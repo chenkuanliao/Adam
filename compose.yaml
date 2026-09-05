@@ -1,0 +1,35 @@
+services:
+  api:
+    build:
+      context: ./backend
+    environment:
+      ADAM_DATA_DIR: /data
+      ADAM_OPENCODE_API_KEY_FILE: /run/secrets/opencode_api_key
+      ADAM_OPENCODE_MODEL: ${ADAM_OPENCODE_MODEL:-gemini-3.8-flash}
+      ADAM_CORS_ORIGINS: http://localhost:${ADAM_WEB_PORT:-3000},http://127.0.0.1:${ADAM_WEB_PORT:-3000}
+    volumes:
+      - ./data:/data
+    secrets:
+      - opencode_api_key
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8000/health')"]
+      interval: 10s
+      timeout: 3s
+      retries: 5
+    restart: unless-stopped
+
+  web:
+    build:
+      context: ./frontend
+    environment:
+      ADAM_INTERNAL_API_BASE: http://api:8000
+    ports:
+      - "127.0.0.1:${ADAM_WEB_PORT:-3000}:3000"
+    depends_on:
+      api:
+        condition: service_healthy
+    restart: unless-stopped
+
+secrets:
+  opencode_api_key:
+    file: ./secrets/opencode_api_key

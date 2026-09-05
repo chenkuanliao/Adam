@@ -1,0 +1,7 @@
+node_modules
+dist
+.next
+.vinext
+.wrangler
+.git
+npm-debug.log*
