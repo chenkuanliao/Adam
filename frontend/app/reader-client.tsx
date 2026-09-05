@@ -1,6 +1,6 @@
 'use client';
 
-import { FormEvent, useCallback, useEffect, useLayoutEffect, useRef, useState } from 'react';
+import { FormEvent, useCallback, useEffect, useLayoutEffect, useRef, useState, type CSSProperties } from 'react';
 import { Document as PdfDocument, Page, pdfjs } from 'react-pdf';
 import ReactMarkdown from 'react-markdown';
 import remarkGfm from 'remark-gfm';
@@ -22,6 +22,10 @@ const API_BASE = '';
 const MIN_ZOOM = .6;
 const MAX_ZOOM = 1.8;
 const DEFAULT_ZOOM = MAX_ZOOM;
+const MIN_CHAT_SCALE = .85;
+const MAX_CHAT_SCALE = 1.35;
+const CHAT_SCALE_STEP = .1;
+const DEFAULT_CHAT_SCALE = 1.2;
 const BASE_PAGE_WIDTH = 760;
 const HIGHLIGHT_COLORS = [
   { color: '#f8e58c', label: 'Yellow', key: '1' },
@@ -43,11 +47,14 @@ export default function Home() {
   const [chatHistory, setChatHistory] = useState<ChatTurn[]>([]);
   const [streamStatus, setStreamStatus] = useState<StreamStatus>('idle');
   const [zoom, setZoom] = useState(DEFAULT_ZOOM);
+  const [chatScale, setChatScale] = useState(DEFAULT_CHAT_SCALE);
   const [uploading, setUploading] = useState(false);
   const [asking, setAsking] = useState(false);
   const [error, setError] = useState('');
   const viewerRef = useRef<HTMLDivElement>(null);
   const chatBodyRef = useRef<HTMLDivElement>(null);
+  const composerRef = useRef<HTMLTextAreaElement>(null);
+  const focusComposerAfterContextRef = useRef(false);
   const followOutputRef = useRef(true);
   const autoScrollFrameRef = useRef<number | null>(null);
   const pendingZoomRef = useRef<{ page: number; y: number } | null>(null);
@@ -102,6 +109,10 @@ export default function Home() {
     setZoom(nextZoom);
   }, []);
 
+  const changeChatScale = useCallback((delta: number) => {
+    setChatScale((current) => Math.min(MAX_CHAT_SCALE, Math.max(MIN_CHAT_SCALE, Number((current + delta).toFixed(2)))));
+  }, []);
+
   useEffect(() => {
     // The initial library fetch intentionally synchronizes remote state after mount.
     // eslint-disable-next-line react-hooks/set-state-in-effect
@@ -121,6 +132,12 @@ export default function Home() {
     viewer.scrollLeft = 0;
     pendingZoomRef.current = null;
   }, [zoom]);
+
+  useLayoutEffect(() => {
+    if (!focusComposerAfterContextRef.current || contextSelections.length === 0) return;
+    focusComposerAfterContextRef.current = false;
+    composerRef.current?.focus({ preventScroll: true });
+  }, [contextSelections.length]);
 
   useEffect(() => {
     const viewer = viewerRef.current;
@@ -281,8 +298,13 @@ export default function Home() {
   function addSelectionToContext() {
     if (!pendingSelection) return;
     const { id, text, page } = pendingSelection;
-    setContextSelections((current) => current.some((item) => item.text === text && item.page === page) ? current : [...current, { id, text, page }]);
+    const alreadyAdded = contextSelections.some((item) => item.text === text && item.page === page);
+    if (!alreadyAdded) {
+      focusComposerAfterContextRef.current = true;
+      setContextSelections((current) => [...current, { id, text, page }]);
+    }
     clearBrowserSelection();
+    if (alreadyAdded) window.requestAnimationFrame(() => composerRef.current?.focus({ preventScroll: true }));
   }
 
   function applyHighlight(color: string) {
@@ -494,22 +516,22 @@ export default function Home() {
 
   return (
     <main className="reader-shell">
-      <header className="reader-header"><button className="brand-button" onClick={() => setActive(null)} aria-label="Back to library"><Brand /></button><div className="document-title"><strong>{active.original_name.replace(/\.pdf$/i, '')}</strong><span>{pages || active.page_count} pages · local</span></div><div className="header-actions"><button title="Zoom out" onClick={() => changeZoom(-.1)}>−</button><span>{Math.round(zoom * 100)}%</span><button title="Zoom in" onClick={() => changeZoom(.1)}>+</button></div></header>
+      <header className="reader-header"><button className="brand-button" onClick={() => setActive(null)} aria-label="Back to library"><Brand /></button><div className="document-title"><strong>{active.original_name.replace(/\.pdf$/i, '')}</strong><span>{pages || active.page_count} pages · local</span></div><div className="paper-zoom"><span className="control-label">Paper</span><div className="header-actions" role="group" aria-label="Paper zoom"><button title="Zoom paper out" aria-label="Zoom paper out" disabled={zoom <= MIN_ZOOM} onClick={() => changeZoom(-.1)}>−</button><span>{Math.round(zoom * 100)}%</span><button title="Zoom paper in" aria-label="Zoom paper in" disabled={zoom >= MAX_ZOOM} onClick={() => changeZoom(.1)}>+</button></div></div></header>
       <div className="reader-workspace">
         <section className="pdf-pane" ref={viewerRef} onMouseUp={captureSelection}>
           <PdfDocument file={`${API_BASE}/api/documents/${active.id}/file`} onLoadSuccess={({ numPages }) => setPages(numPages)} loading={<div className="viewer-message">Rendering paper…</div>} error={<div className="viewer-message error-banner">Could not render this PDF.</div>}>
             {Array.from({ length: pages }, (_, index) => <div className="pdf-page-stage" data-page-number={index + 1} key={index + 1}><div className="pdf-page-wrap" style={{ zoom: zoom / MAX_ZOOM }}><PdfPageWithHighlights pageNumber={index + 1} highlights={highlightEntries.filter((entry) => entry.page === index + 1)} /><span className="page-label">{index + 1}</span></div></div>)}
           </PdfDocument>
         </section>
-        <aside className="side-pane">
-          <div className="mode-tabs"><button className="active">Chat</button><button disabled>Notes <span>Soon</span></button></div>
+        <aside className="side-pane" style={{ '--chat-scale': chatScale } as CSSProperties}>
+          <div className="mode-tabs"><div className="tab-list"><button className="active">Chat</button><button disabled>Notes <span>Soon</span></button></div><div className="chat-text-controls" role="group" aria-label="Chat text size"><span className="control-label">Text size</span><div><button type="button" aria-label="Decrease chat text size" title="Decrease chat text size" disabled={chatScale <= MIN_CHAT_SCALE} onClick={() => changeChatScale(-CHAT_SCALE_STEP)}>A−</button><output aria-live="polite" aria-label={`Chat text size ${Math.round(chatScale * 100)} percent`}>{Math.round(chatScale * 100)}%</output><button type="button" aria-label="Increase chat text size" title="Increase chat text size" disabled={chatScale >= MAX_CHAT_SCALE} onClick={() => changeChatScale(CHAT_SCALE_STEP)}>A+</button></div></div></div>
           <div className="chat-body" ref={chatBodyRef} onWheelCapture={(event) => { if (event.deltaY < 0) pauseChatFollow(); }} onTouchMove={pauseChatFollow} onPointerDown={(event) => { if (event.target === event.currentTarget) pauseChatFollow(); }} onScroll={(event) => { const element = event.currentTarget; followOutputRef.current = element.scrollHeight - element.scrollTop - element.clientHeight < 40; }}><div className="chat-heading"><span className="spark">✦</span><div><strong>Ask about this paper</strong><p>Select text in the paper to give the model precise context.</p></div></div>
             {contextSelections.length > 0 ? <div className="context-list"><div className="context-list-heading"><span>Context</span><small>{contextSelections.length} {contextSelections.length === 1 ? 'excerpt' : 'excerpts'}</small></div>{contextSelections.map((selection, index) => <div className="selection-card" key={selection.id}><div><span>Excerpt {index + 1}{selection.page ? ` · page ${selection.page}` : ''}</span><button type="button" aria-label={`Remove excerpt ${index + 1}`} onClick={() => setContextSelections((current) => current.filter((item) => item.id !== selection.id))}>×</button></div><blockquote>{selection.text}</blockquote></div>)}</div> : <div className="empty-context"><span>⌁</span><p>Highlight a passage, then add it to context.</p></div>}
             {chatHistory.map((turn) => <div className="chat-turn" key={turn.id}><div className="user-message"><span>You</span><p>{turn.question}</p></div><div className="answer-card complete"><div className="answer-meta"><span>Adam</span><span className="stream-state">Done</span></div><MarkdownAnswer>{turn.answer}</MarkdownAnswer></div></div>)}
             {submittedQuestion && <div className="user-message"><span>You</span><p>{submittedQuestion}</p></div>}
             {streamStatus !== 'idle' && streamStatus !== 'error' && <div className={`answer-card ${streamStatus}`} aria-live="polite"><div className="answer-meta"><span>Adam</span><span className="stream-state">{streamStatus === 'connecting' ? <>Thinking<span className="thinking-dots"><i /><i /><i /></span></> : streamStatus === 'streaming' ? 'Responding…' : 'Done'}</span></div>{answer ? <MarkdownAnswer streaming={streamStatus === 'streaming'}>{answer}</MarkdownAnswer> : <div className="answer-skeleton"><i /><i /><i /></div>}</div>}{error && <p className="error-banner compact">{error}</p>}
           </div>
-          <form className="composer" onSubmit={ask}><textarea value={question} onChange={(event) => setQuestion(event.target.value)} onKeyDown={(event) => { if (event.key === 'Enter' && !event.shiftKey && !event.nativeEvent.isComposing) { event.preventDefault(); event.currentTarget.form?.requestSubmit(); } }} placeholder={contextSelections.length ? 'Ask about your excerpts…' : 'Add text to context to start…'} disabled={!contextSelections.length || asking} rows={3} /><div><span>{contextSelections.length ? `${contextSelections.length} context ${contextSelections.length === 1 ? 'excerpt' : 'excerpts'}` : 'No context added'}</span><button type="submit" disabled={!contextSelections.length || !question.trim() || asking}>{asking ? '…' : '↑'}</button></div></form>
+          <form className="composer" onSubmit={ask}><textarea ref={composerRef} value={question} onChange={(event) => setQuestion(event.target.value)} onKeyDown={(event) => { if (event.key === 'Enter' && !event.shiftKey && !event.nativeEvent.isComposing) { event.preventDefault(); event.currentTarget.form?.requestSubmit(); } }} placeholder={contextSelections.length ? 'Ask about your excerpts…' : 'Add text to context to start…'} disabled={!contextSelections.length || asking} rows={3} /><div><span>{contextSelections.length ? `${contextSelections.length} context ${contextSelections.length === 1 ? 'excerpt' : 'excerpts'}` : 'No context added'}</span><button type="submit" disabled={!contextSelections.length || !question.trim() || asking}>{asking ? '…' : '↑'}</button></div></form>
         </aside>
       </div>
       {pendingSelection && <div className="selection-toolbar" style={{ left: pendingSelection.x, top: pendingSelection.y }} onMouseDown={(event) => event.preventDefault()} role="toolbar" aria-label="Text selection actions"><div className="highlight-colors" aria-label="Highlight color">{HIGHLIGHT_COLORS.map(({ color, label, key }) => <button type="button" className="color-swatch" style={{ backgroundColor: color }} aria-label={`Highlight ${label.toLowerCase()} (${key})`} aria-keyshortcuts={key} title={`${label} highlight · ${key}`} onClick={() => applyHighlight(color)} key={color}><kbd>{key}</kbd></button>)}</div><span className="toolbar-divider" /><button type="button" className="toolbar-action primary" aria-keyshortcuts="C" onClick={addSelectionToContext}><span>＋</span>Add to context <kbd>C</kbd></button><button type="button" className="toolbar-action" disabled title="Coming soon"><span>✦</span>Ask <small>Beta</small></button><button type="button" className="toolbar-action" disabled title="Coming soon"><span>▱</span>Note <small>Beta</small></button></div>}
