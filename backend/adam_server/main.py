@@ -113,7 +113,7 @@ async def chat_stream(request: ChatRequest, db: Session = Depends(get_db)) -> St
     if not api_key:
         raise HTTPException(503, "Configure the OpenCode API key secret to enable AI responses.")
 
-    context = {"scope": "selection", "page": request.page, "selected_text": request.selected_text}
+    context = {"scope": "selection", "page": request.page, "selected_text": request.selected_text, "image_count": len(request.images)}
     db.add(Message(document_id=request.document_id, role="user", content=request.question, context_json=json.dumps(context)))
     db.commit()
 
@@ -123,7 +123,7 @@ async def chat_stream(request: ChatRequest, db: Session = Depends(get_db)) -> St
         complete = ""
         try:
             yield sse({"type": "started", "provider": "opencode", "model": settings.opencode_model})
-            async for delta in provider.stream_answer(request.question, request.selected_text, request.page, request.history):
+            async for delta in provider.stream_answer(request.question, request.selected_text, request.images, request.page, request.history):
                 complete += delta
                 yield sse({"type": "delta", "text": delta})
             with SessionLocal() as stream_db:

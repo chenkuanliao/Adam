@@ -40,11 +40,17 @@ class AnnotationOut(AnnotationIn):
     created_at: datetime
 
 
+class ContextImageIn(BaseModel):
+    data_url: str = Field(min_length=32, max_length=12_000_000, pattern=r"^data:image/(png|jpeg|webp);base64,")
+    page: int | None = Field(default=None, ge=1)
+
+
 class ChatTurnIn(BaseModel):
     question: str = Field(min_length=1, max_length=8000)
     answer: str = Field(min_length=1, max_length=30000)
     selected_text: str = Field(default="", max_length=30000)
     page: int | None = Field(default=None, ge=1)
+    images: list[ContextImageIn] = Field(default_factory=list, max_length=6)
 
 
 class ChatRequest(BaseModel):
@@ -52,4 +58,5 @@ class ChatRequest(BaseModel):
     question: str = Field(min_length=1, max_length=8000)
     selected_text: str = Field(default="", max_length=30000)
     page: int | None = Field(default=None, ge=1)
+    images: list[ContextImageIn] = Field(default_factory=list, max_length=6)
     history: list[ChatTurnIn] = Field(default_factory=list, max_length=20)

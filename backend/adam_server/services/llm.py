@@ -3,7 +3,7 @@ from collections.abc import AsyncIterator
 
 import httpx
 
-from ..schemas import ChatTurnIn
+from ..schemas import ChatTurnIn, ContextImageIn
 
 
 class OpenCodeGeminiProvider:
@@ -14,7 +14,7 @@ class OpenCodeGeminiProvider:
         self.model = model
         self.base_url = base_url.rstrip("/")
 
-    async def stream_answer(self, question: str, selected_text: str, page: int | None, history: list[ChatTurnIn]) -> AsyncIterator[str]:
+    async def stream_answer(self, question: str, selected_text: str, images: list[ContextImageIn], page: int | None, history: list[ChatTurnIn]) -> AsyncIterator[str]:
         def user_prompt(turn_question: str, turn_selection: str, turn_page: int | None) -> str:
             if not turn_selection:
                 return f"The user is asking a follow-up about the research paper. Use the preceding conversation as context.\n\nQuestion: {turn_question}"
@@ -25,15 +25,25 @@ class OpenCodeGeminiProvider:
                 f"Selection ({location}):\n<selection>\n{turn_selection}\n</selection>\n\nQuestion: {turn_question}"
             )
 
-        prompt = user_prompt(question, selected_text, page)
+        def user_parts(turn_question: str, turn_selection: str, turn_images: list[ContextImageIn], turn_page: int | None) -> list[dict]:
+            prompt = user_prompt(turn_question, turn_selection, turn_page)
+            if turn_images:
+                prompt += "\n\nThe attached image(s) are user-selected regions of the PDF. Treat them as primary context."
+            parts: list[dict] = [{"text": prompt}]
+            for image in turn_images:
+                header, encoded = image.data_url.split(",", 1)
+                mime_type = header[5:].split(";", 1)[0]
+                parts.append({"inlineData": {"mimeType": mime_type, "data": encoded}})
+            return parts
+
         url = f"{self.base_url}/models/{self.model}:streamGenerateContent"
         contents = []
         for turn in history[-10:]:
             contents.extend([
-                {"role": "user", "parts": [{"text": user_prompt(turn.question, turn.selected_text, turn.page)}]},
+                {"role": "user", "parts": user_parts(turn.question, turn.selected_text, turn.images, turn.page)},
                 {"role": "model", "parts": [{"text": turn.answer}]},
             ])
-        contents.append({"role": "user", "parts": [{"text": prompt}]})
+        contents.append({"role": "user", "parts": user_parts(question, selected_text, images, page)})
         payload = {
             "contents": contents,
             "generationConfig": {"temperature": 0.2},

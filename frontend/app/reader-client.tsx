@@ -1,4 +1,5 @@
 'use client';
+/* eslint-disable @next/next/no-img-element -- context thumbnails are local data URLs */
 
 import { FormEvent, useCallback, useEffect, useLayoutEffect, useRef, useState, type CSSProperties } from 'react';
 import { Document as PdfDocument, Page, pdfjs } from 'react-pdf';
@@ -16,8 +17,9 @@ import 'react-pdf/dist/Page/TextLayer.css';
 pdfjs.GlobalWorkerOptions.workerSrc = '/pdf.worker.min.mjs';
 
 type Paper = { id: string; original_name: string; page_count: number; status: string; created_at: string };
-type ContextSelection = { id: string; text: string; page: number | null };
+type ContextSelection = { id: string; text: string; page: number | null; pageEnd?: number | null; imageDataUrl?: string };
 type PendingSelection = ContextSelection & { x: number; y: number; range: Range };
+type ScreenshotDrag = { startContentX: number; startContentY: number; currentContentX: number; currentContentY: number; overlayLeft: number; overlayTop: number; overlayWidth: number; overlayHeight: number };
 type HighlightRect = { left: number; top: number; width: number; height: number };
 type HighlightEntry = ContextSelection & { color: string; range: Range | null; rects: HighlightRect[] };
 type StreamStatus = 'idle' | 'connecting' | 'streaming' | 'complete' | 'error';
@@ -44,6 +46,8 @@ export default function Home() {
   const [pages, setPages] = useState(0);
   const [contextSelections, setContextSelections] = useState<ContextSelection[]>([]);
   const [pendingSelection, setPendingSelection] = useState<PendingSelection | null>(null);
+  const [screenshotMode, setScreenshotMode] = useState(false);
+  const [screenshotDrag, setScreenshotDrag] = useState<ScreenshotDrag | null>(null);
   const [highlightEntries, setHighlightEntries] = useState<HighlightEntry[]>([]);
   const [question, setQuestion] = useState('');
   const [submittedQuestion, setSubmittedQuestion] = useState('');
@@ -62,6 +66,8 @@ export default function Home() {
   const focusComposerAfterContextRef = useRef(false);
   const followOutputRef = useRef(true);
   const autoScrollFrameRef = useRef<number | null>(null);
+  const screenshotScrollFrameRef = useRef<number | null>(null);
+  const screenshotPointerRef = useRef<{ x: number; y: number } | null>(null);
   const pendingZoomRef = useRef<{ page: number; y: number } | null>(null);
   const answerQueueRef = useRef('');
   const revealTimerRef = useRef<number | null>(null);
@@ -71,6 +77,7 @@ export default function Home() {
   const highlightEntriesRef = useRef<HighlightEntry[]>([]);
   const highlightUndoRef = useRef<HighlightEntry[][]>([]);
   const highlightRedoRef = useRef<HighlightEntry[][]>([]);
+  const isScreenshotDragging = screenshotDrag !== null;
 
   const loadPapers = useCallback(async () => {
     try {
@@ -178,8 +185,46 @@ export default function Home() {
   useEffect(() => () => {
     if (revealTimerRef.current !== null) window.clearInterval(revealTimerRef.current);
     if (autoScrollFrameRef.current !== null) window.cancelAnimationFrame(autoScrollFrameRef.current);
-    clearHighlights();
+    if (screenshotScrollFrameRef.current !== null) window.cancelAnimationFrame(screenshotScrollFrameRef.current);
+    const highlights = (CSS as typeof CSS & { highlights?: Map<string, Highlight> }).highlights;
+    highlightIdsRef.current.forEach((id) => highlights?.delete(id));
+    document.querySelectorAll('style[data-highlight-id^="adam-"]').forEach((style) => style.remove());
+    document.querySelectorAll('.react-pdf__Page > .pdf-highlight-mark').forEach((mark) => mark.remove());
   }, []);
+
+  useEffect(() => {
+    if (!isScreenshotDragging) return;
+    const viewer = viewerRef.current;
+    if (!viewer) return;
+    const edgeSize = 72;
+    const maxSpeed = 18;
+    const tick = () => {
+      const pointer = screenshotPointerRef.current;
+      if (!pointer) return;
+      const viewerRect = viewer.getBoundingClientRect();
+      let speed = 0;
+      if (pointer.y < viewerRect.top + edgeSize) speed = -maxSpeed * Math.min(1, (viewerRect.top + edgeSize - pointer.y) / edgeSize);
+      else if (pointer.y > viewerRect.bottom - edgeSize) speed = maxSpeed * Math.min(1, (pointer.y - (viewerRect.bottom - edgeSize)) / edgeSize);
+      if (speed !== 0) {
+        const previousScrollTop = viewer.scrollTop;
+        viewer.scrollTop += speed;
+        if (viewer.scrollTop !== previousScrollTop) {
+          setScreenshotDrag((drag) => {
+            if (!drag) return null;
+            const startX = viewerRect.left + drag.startContentX - viewer.scrollLeft;
+            const startY = viewerRect.top + drag.startContentY - viewer.scrollTop;
+            return { ...drag, currentContentX: pointer.x - viewerRect.left + viewer.scrollLeft, currentContentY: pointer.y - viewerRect.top + viewer.scrollTop, overlayLeft: Math.min(startX, pointer.x), overlayTop: Math.min(startY, pointer.y), overlayWidth: Math.abs(pointer.x - startX), overlayHeight: Math.abs(pointer.y - startY) };
+          });
+        }
+      }
+      screenshotScrollFrameRef.current = window.requestAnimationFrame(tick);
+    };
+    screenshotScrollFrameRef.current = window.requestAnimationFrame(tick);
+    return () => {
+      if (screenshotScrollFrameRef.current !== null) window.cancelAnimationFrame(screenshotScrollFrameRef.current);
+      screenshotScrollFrameRef.current = null;
+    };
+  }, [isScreenshotDragging]);
 
   useEffect(() => {
     const chatBody = chatBodyRef.current;
@@ -193,7 +238,12 @@ export default function Home() {
       if (autoScrollFrameRef.current !== null) window.cancelAnimationFrame(autoScrollFrameRef.current);
       autoScrollFrameRef.current = null;
     };
-  }, [answer, submittedQuestion, streamStatus, chatHistory.length]);
+  }, [answer, submittedQuestion, streamStatus, chatHistory.length, contextSelections.length]);
+
+  const revealNewContext = useCallback(() => {
+    followOutputRef.current = true;
+    focusComposerAfterContextRef.current = true;
+  }, []);
 
   function pauseChatFollow() {
     followOutputRef.current = false;
@@ -306,11 +356,112 @@ export default function Home() {
     const { id, text, page } = pendingSelection;
     const alreadyAdded = contextSelections.some((item) => item.text === text && item.page === page);
     if (!alreadyAdded) {
-      focusComposerAfterContextRef.current = true;
+      revealNewContext();
       setContextSelections((current) => [...current, { id, text, page }]);
     }
     clearBrowserSelection();
     if (alreadyAdded) window.requestAnimationFrame(() => composerRef.current?.focus({ preventScroll: true }));
+  }
+
+  useEffect(() => {
+    const handleScreenshotHotkey = (event: KeyboardEvent) => {
+      const target = event.target as HTMLElement | null;
+      if (event.repeat || event.metaKey || event.ctrlKey || event.altKey || target?.isContentEditable || target?.matches('input, textarea, select')) return;
+      if (event.key.toLowerCase() === 'r') {
+        event.preventDefault();
+        clearBrowserSelection();
+        setScreenshotDrag(null);
+        screenshotPointerRef.current = null;
+        setScreenshotMode(true);
+      } else if (event.key === 'Escape' && screenshotMode) {
+        event.preventDefault();
+        setScreenshotDrag(null);
+        screenshotPointerRef.current = null;
+        setScreenshotMode(false);
+      }
+    };
+    window.addEventListener('keydown', handleScreenshotHotkey);
+    return () => window.removeEventListener('keydown', handleScreenshotHotkey);
+  });
+
+  function beginScreenshot(event: React.PointerEvent<HTMLElement>) {
+    if (!screenshotMode || event.button !== 0) return;
+    const pageElement = document.elementFromPoint(event.clientX, event.clientY)?.closest<HTMLElement>('.react-pdf__Page');
+    if (!pageElement || !viewerRef.current) return;
+    event.preventDefault();
+    event.currentTarget.setPointerCapture(event.pointerId);
+    const viewerRect = viewerRef.current.getBoundingClientRect();
+    const contentX = event.clientX - viewerRect.left + viewerRef.current.scrollLeft;
+    const contentY = event.clientY - viewerRect.top + viewerRef.current.scrollTop;
+    screenshotPointerRef.current = { x: event.clientX, y: event.clientY };
+    setScreenshotDrag({ startContentX: contentX, startContentY: contentY, currentContentX: contentX, currentContentY: contentY, overlayLeft: event.clientX, overlayTop: event.clientY, overlayWidth: 0, overlayHeight: 0 });
+  }
+
+  function moveScreenshot(event: React.PointerEvent<HTMLElement>) {
+    if (!screenshotDrag) return;
+    event.preventDefault();
+    screenshotPointerRef.current = { x: event.clientX, y: event.clientY };
+    setScreenshotDrag((drag) => {
+      const viewer = viewerRef.current;
+      if (!drag || !viewer) return drag;
+      const viewerRect = viewer.getBoundingClientRect();
+      const startX = viewerRect.left + drag.startContentX - viewer.scrollLeft;
+      const startY = viewerRect.top + drag.startContentY - viewer.scrollTop;
+      return { ...drag, currentContentX: event.clientX - viewerRect.left + viewer.scrollLeft, currentContentY: event.clientY - viewerRect.top + viewer.scrollTop, overlayLeft: Math.min(startX, event.clientX), overlayTop: Math.min(startY, event.clientY), overlayWidth: Math.abs(event.clientX - startX), overlayHeight: Math.abs(event.clientY - startY) };
+    });
+  }
+
+  function finishScreenshot(event: React.PointerEvent<HTMLElement>) {
+    if (!screenshotDrag) return;
+    event.preventDefault();
+    const viewer = viewerRef.current;
+    if (!viewer) return;
+    const viewerRect = viewer.getBoundingClientRect();
+    const currentContentX = event.clientX - viewerRect.left + viewer.scrollLeft;
+    const currentContentY = event.clientY - viewerRect.top + viewer.scrollTop;
+    const selectionLeft = Math.min(screenshotDrag.startContentX, currentContentX);
+    const selectionTop = Math.min(screenshotDrag.startContentY, currentContentY);
+    const selectionRight = Math.max(screenshotDrag.startContentX, currentContentX);
+    const selectionBottom = Math.max(screenshotDrag.startContentY, currentContentY);
+    setScreenshotDrag(null);
+    screenshotPointerRef.current = null;
+    setScreenshotMode(false);
+    const selectionWidth = selectionRight - selectionLeft;
+    const selectionHeight = selectionBottom - selectionTop;
+    if (selectionWidth < 6 || selectionHeight < 6) return;
+    const intersectingPages = Array.from(viewer.querySelectorAll<HTMLElement>('.react-pdf__Page')).map((element) => {
+      const rect = element.getBoundingClientRect();
+      const left = rect.left - viewerRect.left + viewer.scrollLeft;
+      const top = rect.top - viewerRect.top + viewer.scrollTop;
+      return { element, rect, left, top, right: left + rect.width, bottom: top + rect.height, page: Number(element.closest<HTMLElement>('[data-page-number]')?.dataset.pageNumber) };
+    }).filter((item) => item.right > selectionLeft && item.left < selectionRight && item.bottom > selectionTop && item.top < selectionBottom);
+    if (!intersectingPages.length) return;
+    const firstCanvas = intersectingPages[0].element.querySelector<HTMLCanvasElement>('.react-pdf__Page__canvas');
+    if (!firstCanvas) return;
+    const nativeScale = firstCanvas.width / intersectingPages[0].rect.width;
+    const outputScale = Math.min(nativeScale, 4096 / Math.max(selectionWidth, selectionHeight));
+    const output = document.createElement('canvas');
+    output.width = Math.max(1, Math.round(selectionWidth * outputScale));
+    output.height = Math.max(1, Math.round(selectionHeight * outputScale));
+    const outputContext = output.getContext('2d');
+    if (!outputContext) return;
+    outputContext.fillStyle = '#fff';
+    outputContext.fillRect(0, 0, output.width, output.height);
+    intersectingPages.forEach(({ element, rect, left, top, right, bottom }) => {
+      const source = element.querySelector<HTMLCanvasElement>('.react-pdf__Page__canvas');
+      if (!source) return;
+      const cropLeft = Math.max(selectionLeft, left);
+      const cropTop = Math.max(selectionTop, top);
+      const cropRight = Math.min(selectionRight, right);
+      const cropBottom = Math.min(selectionBottom, bottom);
+      const sourceScaleX = source.width / rect.width;
+      const sourceScaleY = source.height / rect.height;
+      outputContext.drawImage(source, (cropLeft - left) * sourceScaleX, (cropTop - top) * sourceScaleY, (cropRight - cropLeft) * sourceScaleX, (cropBottom - cropTop) * sourceScaleY, (cropLeft - selectionLeft) * outputScale, (cropTop - selectionTop) * outputScale, (cropRight - cropLeft) * outputScale, (cropBottom - cropTop) * outputScale);
+    });
+    const page = Math.min(...intersectingPages.map((item) => item.page));
+    const pageEnd = Math.max(...intersectingPages.map((item) => item.page));
+    revealNewContext();
+    setContextSelections((current) => [...current, { id: crypto.randomUUID(), text: 'Selected PDF area', page, pageEnd, imageDataUrl: output.toDataURL('image/jpeg', .92) }]);
   }
 
   function applyHighlight(color: string) {
@@ -474,7 +625,7 @@ export default function Home() {
     try {
       const response = await fetch(`${API_BASE}/api/chat/stream`, {
         method: 'POST', headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ document_id: active.id, question: sentQuestion, selected_text: formatContext(sentContext), page: sentContext.length === 1 ? sentContext[0].page : null, history: [...chatHistory, ...(submittedQuestion && answer ? [{ id: 'current', question: submittedQuestion, answer, context: submittedContext }] : [])].slice(-10).map(({ question: priorQuestion, answer: priorAnswer, context }) => ({ question: priorQuestion, answer: priorAnswer, selected_text: formatContext(context), page: context.length === 1 ? context[0].page : null })) }),
+        body: JSON.stringify({ document_id: active.id, question: sentQuestion, selected_text: formatContext(sentContext), images: formatImages(sentContext), page: sentContext.length === 1 ? sentContext[0].page : null, history: [...chatHistory, ...(submittedQuestion && answer ? [{ id: 'current', question: submittedQuestion, answer, context: submittedContext }] : [])].slice(-10).map(({ question: priorQuestion, answer: priorAnswer, context }) => ({ question: priorQuestion, answer: priorAnswer, selected_text: formatContext(context), images: formatImages(context), page: context.length === 1 ? context[0].page : null })) }),
       });
       if (!response.ok || !response.body) {
         const payload = await response.json().catch(() => ({}));
@@ -530,10 +681,12 @@ export default function Home() {
     <main className="reader-shell">
       <header className="reader-header"><button className="brand-button" onClick={() => setActive(null)} aria-label="Back to library"><Brand /></button><div className="document-title"><strong>{active.original_name.replace(/\.pdf$/i, '')}</strong><span>{pages || active.page_count} pages · local</span></div><div className="paper-zoom"><span className="control-label">Paper</span><div className="header-actions" role="group" aria-label="Paper zoom"><button title="Zoom paper out" aria-label="Zoom paper out" disabled={zoom <= MIN_ZOOM} onClick={() => changeZoom(-.1)}>−</button><span>{Math.round(zoom * 100)}%</span><button title="Zoom paper in" aria-label="Zoom paper in" disabled={zoom >= MAX_ZOOM} onClick={() => changeZoom(.1)}>+</button></div></div></header>
       <div className="reader-workspace">
-        <section className="pdf-pane" ref={viewerRef} onMouseUp={captureSelection}>
+        <section className={`pdf-pane${screenshotMode ? ' screenshot-mode' : ''}`} ref={viewerRef} onMouseUp={(event) => { if (!screenshotMode) captureSelection(event); }} onPointerDown={beginScreenshot} onPointerMove={moveScreenshot} onPointerUp={finishScreenshot} onPointerCancel={() => { screenshotPointerRef.current = null; setScreenshotDrag(null); setScreenshotMode(false); }}>
           <PdfDocument file={`${API_BASE}/api/documents/${active.id}/file`} onLoadSuccess={({ numPages }) => setPages(numPages)} loading={<div className="viewer-message">Rendering paper…</div>} error={<div className="viewer-message error-banner">Could not render this PDF.</div>}>
             {Array.from({ length: pages }, (_, index) => <div className="pdf-page-stage" data-page-number={index + 1} key={index + 1}><div className="pdf-page-wrap" style={{ zoom: zoom / MAX_ZOOM }}><PdfPageWithHighlights pageNumber={index + 1} highlights={highlightEntries.filter((entry) => entry.page === index + 1)} /><span className="page-label">{index + 1}</span></div></div>)}
           </PdfDocument>
+          {screenshotMode && !screenshotDrag && <div className="screenshot-hint">Drag over the PDF to add an image · Esc to cancel</div>}
+          {screenshotDrag && <div className="screenshot-region" style={{ left: screenshotDrag.overlayLeft, top: screenshotDrag.overlayTop, width: screenshotDrag.overlayWidth, height: screenshotDrag.overlayHeight }} />}
         </section>
         <aside className="side-pane" style={{ '--chat-scale': chatScale } as CSSProperties}>
           <div className="mode-tabs"><div className="tab-list"><button className="active">Chat</button><button disabled>Notes <span>Soon</span></button></div><div className="chat-text-controls" role="group" aria-label="Chat text size"><span className="control-label">Text size</span><div><button type="button" aria-label="Decrease chat text size" title="Decrease chat text size" disabled={chatScale <= MIN_CHAT_SCALE} onClick={() => changeChatScale(-CHAT_SCALE_STEP)}>A−</button><output aria-live="polite" aria-label={`Chat text size ${Math.round(chatScale * 100)} percent`}>{Math.round(chatScale * 100)}%</output><button type="button" aria-label="Increase chat text size" title="Increase chat text size" disabled={chatScale >= MAX_CHAT_SCALE} onClick={() => changeChatScale(CHAT_SCALE_STEP)}>A+</button></div></div></div>
@@ -543,7 +696,7 @@ export default function Home() {
             {streamStatus !== 'idle' && streamStatus !== 'error' && <div className={`answer-card ${streamStatus}`} aria-live="polite"><div className="answer-meta"><span>Adam</span><span className="stream-state">{streamStatus === 'connecting' ? <>Thinking<span className="thinking-dots"><i /><i /><i /></span></> : streamStatus === 'streaming' ? 'Responding…' : 'Done'}</span></div>{answer ? <MarkdownAnswer streaming={streamStatus === 'streaming'}>{answer}</MarkdownAnswer> : <div className="answer-skeleton"><i /><i /><i /></div>}</div>}{error && <p className="error-banner compact">{error}</p>}
             {contextSelections.length > 0 ? <ContextList selections={contextSelections} onRemove={(id) => setContextSelections((current) => current.filter((item) => item.id !== id))} /> : !submittedQuestion && <div className="empty-context"><span>⌁</span><p>Highlight a passage, then add it to context.</p></div>}
           </div>
-          <form className="composer" onSubmit={ask}><textarea ref={composerRef} value={question} onChange={(event) => setQuestion(event.target.value)} onKeyDown={(event) => { if (event.key === 'Enter' && !event.shiftKey && !event.nativeEvent.isComposing) { event.preventDefault(); event.currentTarget.form?.requestSubmit(); } }} placeholder={contextSelections.length ? 'Ask about your excerpts…' : canAsk ? 'Ask a follow-up…' : 'Add text to context to start…'} disabled={!canAsk || asking} rows={3} /><div><span>{contextSelections.length ? `${contextSelections.length} context ${contextSelections.length === 1 ? 'excerpt' : 'excerpts'}` : canAsk ? 'Using conversation context' : 'No context added'}</span><button type="submit" disabled={!canAsk || !question.trim() || asking}>{asking ? '…' : '↑'}</button></div></form>
+          <form className="composer" onSubmit={ask}><textarea ref={composerRef} value={question} onChange={(event) => setQuestion(event.target.value)} onKeyDown={(event) => { if (event.key === 'Enter' && !event.shiftKey && !event.nativeEvent.isComposing) { event.preventDefault(); event.currentTarget.form?.requestSubmit(); } }} placeholder={contextSelections.length ? 'Ask about your context…' : canAsk ? 'Ask a follow-up…' : 'Highlight text or press R to capture an area…'} disabled={!canAsk || asking} rows={3} /><div><span>{contextSelections.length ? `${contextSelections.length} context ${contextSelections.length === 1 ? 'item' : 'items'}` : canAsk ? 'Using conversation context' : 'Press R for screenshot'}</span><button type="submit" disabled={!canAsk || !question.trim() || asking}>{asking ? '…' : '↑'}</button></div></form>
         </aside>
       </div>
       {pendingSelection && <div className="selection-toolbar" style={{ left: pendingSelection.x, top: pendingSelection.y }} onMouseDown={(event) => event.preventDefault()} role="toolbar" aria-label="Text selection actions"><div className="highlight-colors" aria-label="Highlight color">{HIGHLIGHT_COLORS.map(({ color, label, key }) => <button type="button" className="color-swatch" style={{ backgroundColor: color }} aria-label={`Highlight ${label.toLowerCase()} (${key})`} aria-keyshortcuts={key} title={`${label} highlight · ${key}`} onClick={() => applyHighlight(color)} key={color}><kbd>{key}</kbd></button>)}</div><span className="toolbar-divider" /><button type="button" className="toolbar-action primary" aria-keyshortcuts="C" onClick={addSelectionToContext}><span>＋</span>Add to context <kbd>C</kbd></button><button type="button" className="toolbar-action" disabled title="Coming soon"><span>✦</span>Ask <small>Beta</small></button><button type="button" className="toolbar-action" disabled title="Coming soon"><span>▱</span>Note <small>Beta</small></button></div>}
@@ -552,12 +705,16 @@ export default function Home() {
 }
 
 function formatContext(selections: ContextSelection[]) {
-  return selections.map((item, index) => `[Excerpt ${index + 1}${item.page ? `, page ${item.page}` : ''}]\n${item.text}`).join('\n\n');
+  return selections.filter((item) => !item.imageDataUrl).map((item, index) => `[Excerpt ${index + 1}${item.page ? `, page ${item.page}` : ''}]\n${item.text}`).join('\n\n');
+}
+
+function formatImages(selections: ContextSelection[]) {
+  return selections.flatMap((item) => item.imageDataUrl ? [{ data_url: item.imageDataUrl, page: item.page }] : []);
 }
 
 function ContextList({ selections, onRemove }: { selections: ContextSelection[]; onRemove?: (id: string) => void }) {
   if (selections.length === 0) return null;
-  return <div className="context-list"><div className="context-list-heading"><span>Context</span><small>{selections.length} {selections.length === 1 ? 'excerpt' : 'excerpts'}</small></div>{selections.map((selection, index) => <div className="selection-card" key={selection.id}><div><span>Excerpt {index + 1}{selection.page ? ` · page ${selection.page}` : ''}</span>{onRemove && <button type="button" aria-label={`Remove excerpt ${index + 1}`} onClick={() => onRemove(selection.id)}>×</button>}</div><blockquote>{selection.text}</blockquote></div>)}</div>;
+  return <div className="context-list"><div className="context-list-heading"><span>Context</span><small>{selections.length} {selections.length === 1 ? 'item' : 'items'}</small></div>{selections.map((selection, index) => <div className={`selection-card${selection.imageDataUrl ? ' image-context' : ''}`} key={selection.id}><div><span>{selection.imageDataUrl ? 'Screenshot' : 'Excerpt'} {index + 1}{selection.page ? ` · ${selection.pageEnd && selection.pageEnd !== selection.page ? `pages ${selection.page}–${selection.pageEnd}` : `page ${selection.page}`}` : ''}</span>{onRemove && <button type="button" aria-label={`Remove context item ${index + 1}`} onClick={() => onRemove(selection.id)}>×</button>}</div>{selection.imageDataUrl ? <img src={selection.imageDataUrl} alt={`Selected area from page ${selection.page ?? ''}`} /> : <blockquote>{selection.text}</blockquote>}</div>)}</div>;
 }
 
 function PdfPageWithHighlights({ pageNumber, highlights }: { pageNumber: number; highlights: HighlightEntry[] }) {
