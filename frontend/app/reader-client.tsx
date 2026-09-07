@@ -869,20 +869,19 @@ function SettingsDialog({ onClose }: { onClose: () => void }) {
     finally { setLoadingModels(false); }
   }, []);
 
-  async function persist(options: { close?: boolean; removeKey?: boolean } = {}) {
+  async function persist() {
     if (!model.trim()) return;
     setSaving(true);
     setStatus('');
     try {
-      const apiKeys = apiKey ? { [provider]: apiKey } : options.removeKey ? { [provider]: null } : {};
+      const apiKeys = {};
       const response = await fetch(`${API_BASE}/api/settings`, { method: 'PUT', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ provider, model: model.trim(), api_keys: apiKeys, favorites: settings?.favorites ?? {} }) });
       const value = await response.json();
       if (!response.ok) throw new Error(value.detail ?? 'Could not save settings.');
       setSettings(value);
+      setModel(value.selected_models[provider] ?? '');
       setApiKey('');
-      setStatus('Saved');
-      if (apiKey) await loadModels(provider);
-      if (options.close) onClose();
+      setStatus(`${model.trim()} is now active`);
     } catch (reason) {
       setStatus(reason instanceof Error ? reason.message : 'Could not save settings.');
     } finally { setSaving(false); }
@@ -916,8 +915,10 @@ function SettingsDialog({ onClose }: { onClose: () => void }) {
   const pinnedModels = favorites.filter((item) => visibleModels.includes(item));
   const otherModels = visibleModels.filter((item) => !favorites.includes(item));
   const providerInfo = PROVIDERS.find((item) => item.id === provider)!;
+  const activeModel = settings?.selected_models[provider] ?? '';
+  const hasPendingModel = Boolean(model && model !== activeModel);
 
-  const modelRow = (id: string) => <button type="button" className={model === id ? 'selected' : ''} onClick={() => setModel(id)} key={id}><span>{id}</span><i role="button" aria-label={favorites.includes(id) ? `Unpin ${id}` : `Pin ${id}`} title={favorites.includes(id) ? 'Unpin model' : 'Pin model'} onClick={(event) => { event.stopPropagation(); toggleFavorite(id); }}>{favorites.includes(id) ? '★' : '☆'}</i></button>;
+  const modelRow = (id: string) => <button type="button" className={`${model === id ? 'selected' : ''}${activeModel === id ? ' active-model' : ''}`} onClick={() => { setModel(id); setStatus(id === activeModel ? '' : 'Selection not applied yet'); }} key={id}><span>{id}{activeModel === id && <small className="active-model-label">Active</small>}</span><i role="button" aria-label={favorites.includes(id) ? `Unpin ${id}` : `Pin ${id}`} title={favorites.includes(id) ? 'Unpin model' : 'Pin model'} onClick={(event) => { event.stopPropagation(); toggleFavorite(id); }}>{favorites.includes(id) ? '★' : '☆'}</i></button>;
 
   return <div className="settings-backdrop" onMouseDown={(event) => { if (event.target === event.currentTarget) onClose(); }}>
     <div className="settings-dialog provider-dialog" ref={dialogRef} role="dialog" aria-modal="true" aria-labelledby="settings-title" tabIndex={-1}>
@@ -933,11 +934,12 @@ function SettingsDialog({ onClose }: { onClose: () => void }) {
           <div className="provider-heading"><div><h3>{providerInfo.name}</h3><p>{settings?.providers[provider] ? 'API key configured' : 'Add a key to enable chat and load available models.'}</p></div>{settings?.providers[provider] && <button type="button" className="secondary-button" onClick={() => void loadModels(provider)} disabled={loadingModels}>{loadingModels ? 'Loading…' : 'Refresh models'}</button>}</div>
           <div className="key-row"><label className="field-label">{providerInfo.keyLabel}<input type="password" value={apiKey} onChange={(event) => setApiKey(event.target.value)} autoComplete="off" placeholder={settings?.providers[provider] ? '••••••••••••  Key configured' : 'Enter API key'} /></label><button type="button" className="secondary-button" disabled={!apiKey || saving} onClick={() => void saveProviderKey()}>{saving ? 'Saving…' : 'Save & connect'}</button></div>
           {settings?.providers[provider] && <button type="button" className="remove-key-button" onClick={() => void saveProviderKey(true)}>Remove this API key</button>}
-          <div className="selected-model-summary"><span>Selected model</span><strong>{model || 'None selected'}</strong><small>{providerInfo.name}</small></div>
+          <div className="selected-model-summary"><span>{settings?.provider === provider ? 'Currently in use' : 'Saved model for this provider'}</span><strong>{activeModel || 'No model selected'}</strong><small>{settings?.provider === provider ? 'In use' : providerInfo.name}</small></div>
+          {hasPendingModel && <div className="pending-model-choice"><span>Pending selection</span><strong>{model}</strong><small>Click “Apply model” to use it</small></div>}
           <div className="model-picker"><div className="model-picker-head"><label>Browse models</label><input type="search" value={query} onChange={(event) => setQuery(event.target.value)} placeholder="Search models…" /></div>{visibleModels.length ? <div className="model-list">{pinnedModels.length > 0 && <div className="model-group-label"><span>★ Pinned</span><small>{pinnedModels.length}</small></div>}{pinnedModels.map(modelRow)}{otherModels.length > 0 && pinnedModels.length > 0 && <div className="model-group-label all-models"><span>All models</span><small>{otherModels.length}</small></div>}{otherModels.map(modelRow)}</div> : <div className="model-empty">{loadingModels ? 'Loading models…' : settings?.providers[provider] ? 'Refresh to load models from this provider.' : 'Connect an API key to browse models.'}</div>}</div>
         </div> : <div className="more-settings-page"><div className="coming-icon">＋</div><span className="settings-kicker">On the roadmap</span><h3>More settings are coming</h3><p>Reading preferences, appearance, shortcuts, and data controls will live here as their own settings.</p></div>}
       </div>
-      <div className="settings-footer"><span role="status" className={status === 'Saved' ? 'save-success' : ''}>{status}</span><div><kbd>Esc</kbd><button type="button" className="secondary-button" onClick={onClose}>Cancel</button>{settingsTab === 'providers' && <button type="button" className="primary-button" disabled={!settings || !model.trim() || saving || !settings.providers[provider]} onClick={() => void persist({ close: true })}>Use selected model</button>}</div></div>
+      <div className="settings-footer"><span role="status" className={status.includes('active') ? 'save-success' : ''}>{status}</span><div><kbd>Esc</kbd><button type="button" className="secondary-button" onClick={onClose}>Close</button>{settingsTab === 'providers' && <button type="button" className="primary-button" disabled={!settings || !hasPendingModel || saving || !settings.providers[provider]} onClick={() => void persist()}>{saving ? 'Applying…' : 'Apply model'}</button>}</div></div>
     </div>
   </div>;
 }
