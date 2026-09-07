@@ -25,7 +25,7 @@ type HighlightEntry = ContextSelection & { color: string; range: Range | null; r
 type StreamStatus = 'idle' | 'connecting' | 'streaming' | 'complete' | 'error';
 type ChatTurn = { id: string; question: string; answer: string; context: ContextSelection[] };
 type ProviderId = 'zen' | 'openrouter' | 'openai' | 'anthropic' | 'google';
-type AppSettings = { provider: ProviderId; model: string; selected_models: Partial<Record<ProviderId, string>>; providers: Record<ProviderId, boolean>; favorites: Partial<Record<ProviderId, string[]>> };
+type AppSettings = { provider: ProviderId; model: string; selected_models: Partial<Record<ProviderId, string>>; providers: Record<ProviderId, boolean>; favorites: Partial<Record<ProviderId, string[]>>; system_prompt: string };
 const PROVIDERS: Array<{ id: ProviderId; name: string; keyLabel: string }> = [
   { id: 'zen', name: 'OpenCode Zen', keyLabel: 'OpenCode Zen key' },
   { id: 'openrouter', name: 'OpenRouter', keyLabel: 'OpenRouter key' },
@@ -838,7 +838,8 @@ function SettingsDialog({ onClose }: { onClose: () => void }) {
   const [status, setStatus] = useState('');
   const [saving, setSaving] = useState(false);
   const [loadingModels, setLoadingModels] = useState(false);
-  const [settingsTab, setSettingsTab] = useState<'providers' | 'more'>('providers');
+  const [systemPrompt, setSystemPrompt] = useState('');
+  const [settingsTab, setSettingsTab] = useState<'providers' | 'system'>('providers');
   const dialogRef = useRef<HTMLDivElement>(null);
 
   useEffect(() => {
@@ -848,6 +849,7 @@ function SettingsDialog({ onClose }: { onClose: () => void }) {
       setSettings(value);
       setProvider(value.provider);
       setModel(value.model);
+      setSystemPrompt(value.system_prompt);
     }).catch((reason) => setStatus(reason instanceof Error ? reason.message : 'Could not load settings.'));
   }, []);
 
@@ -899,6 +901,18 @@ function SettingsDialog({ onClose }: { onClose: () => void }) {
     finally { setSaving(false); }
   }
 
+  async function saveSystemPrompt() {
+    if (!settings || !systemPrompt.trim()) return;
+    setSaving(true); setStatus('');
+    try {
+      const response = await fetch(`${API_BASE}/api/settings`, { method: 'PUT', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ provider: settings.provider, model: settings.model, api_keys: {}, favorites: settings.favorites, system_prompt: systemPrompt.trim() }) });
+      const value = await response.json() as AppSettings;
+      if (!response.ok) throw new Error((value as unknown as { detail?: string }).detail ?? 'Could not save system prompt.');
+      setSettings(value); setSystemPrompt(value.system_prompt); setStatus('System prompt saved');
+    } catch (reason) { setStatus(reason instanceof Error ? reason.message : 'Could not save system prompt.'); }
+    finally { setSaving(false); }
+  }
+
   function chooseProvider(next: ProviderId) { setProvider(next); setModel(settings?.selected_models[next] ?? ''); setModels([]); setQuery(''); setApiKey(''); if (settings?.providers[next]) void loadModels(next); }
   function toggleFavorite(id: string) {
     if (!settings) return;
@@ -928,7 +942,7 @@ function SettingsDialog({ onClose }: { onClose: () => void }) {
           <span className="nav-section-label">Providers</span>
           {PROVIDERS.map((item) => <button type="button" className={settingsTab === 'providers' && provider === item.id ? 'active' : ''} onClick={() => { setSettingsTab('providers'); chooseProvider(item.id); }} key={item.id}><span className={`provider-dot${settings?.providers[item.id] ? ' connected' : ''}`} />{item.name}{settings?.providers[item.id] && <small>{settings.provider === item.id ? 'In use' : 'Ready'}</small>}</button>)}
           <span className="nav-section-label secondary-label">General</span>
-          <button type="button" className={`more-settings-tab${settingsTab === 'more' ? ' active' : ''}`} onClick={() => setSettingsTab('more')}><span className="more-tab-icon">＋</span>More settings<small>Soon</small></button>
+          <button type="button" className={`more-settings-tab${settingsTab === 'system' ? ' active' : ''}`} onClick={() => { setSettingsTab('system'); setStatus(''); }}><span className="more-tab-icon">¶</span>System prompt</button>
         </nav>
         {settingsTab === 'providers' ? <div className="provider-content">
           <div className="provider-heading"><div><h3>{providerInfo.name}</h3><p>{settings?.providers[provider] ? 'API key configured' : 'Add a key to enable chat and load available models.'}</p></div>{settings?.providers[provider] && <button type="button" className="secondary-button" onClick={() => void loadModels(provider)} disabled={loadingModels}>{loadingModels ? 'Loading…' : 'Refresh models'}</button>}</div>
@@ -937,9 +951,9 @@ function SettingsDialog({ onClose }: { onClose: () => void }) {
           <div className="selected-model-summary"><span>{settings?.provider === provider ? 'Currently in use' : 'Saved model for this provider'}</span><strong>{activeModel || 'No model selected'}</strong><small>{settings?.provider === provider ? 'In use' : providerInfo.name}</small></div>
           {hasPendingModel && <div className="pending-model-choice"><span>Pending selection</span><strong>{model}</strong><small>Click “Apply model” to use it</small></div>}
           <div className="model-picker"><div className="model-picker-head"><label>Browse models</label><input type="search" value={query} onChange={(event) => setQuery(event.target.value)} placeholder="Search models…" /></div>{visibleModels.length ? <div className="model-list">{pinnedModels.length > 0 && <div className="model-group-label"><span>★ Pinned</span><small>{pinnedModels.length}</small></div>}{pinnedModels.map(modelRow)}{otherModels.length > 0 && pinnedModels.length > 0 && <div className="model-group-label all-models"><span>All models</span><small>{otherModels.length}</small></div>}{otherModels.map(modelRow)}</div> : <div className="model-empty">{loadingModels ? 'Loading models…' : settings?.providers[provider] ? 'Refresh to load models from this provider.' : 'Connect an API key to browse models.'}</div>}</div>
-        </div> : <div className="more-settings-page"><div className="coming-icon">＋</div><span className="settings-kicker">On the roadmap</span><h3>More settings are coming</h3><p>Reading preferences, appearance, shortcuts, and data controls will live here as their own settings.</p></div>}
+        </div> : <div className="system-prompt-page"><span className="settings-kicker">Assistant behavior</span><h3>System prompt</h3><p>This Markdown prompt is sent with every chat. Edit it to control how Adam reads context and writes answers.</p><label htmlFor="system-prompt-editor">Prompt</label><textarea id="system-prompt-editor" value={systemPrompt} onChange={(event) => setSystemPrompt(event.target.value)} spellCheck rows={16} /></div>}
       </div>
-      <div className="settings-footer"><span role="status" className={status.includes('active') ? 'save-success' : ''}>{status}</span><div><kbd>Esc</kbd><button type="button" className="secondary-button" onClick={onClose}>Close</button>{settingsTab === 'providers' && <button type="button" className="primary-button" disabled={!settings || !hasPendingModel || saving || !settings.providers[provider]} onClick={() => void persist()}>{saving ? 'Applying…' : 'Apply model'}</button>}</div></div>
+      <div className="settings-footer"><span role="status" className={status.includes('active') || status.includes('saved') ? 'save-success' : ''}>{status}</span><div><kbd>Esc</kbd><button type="button" className="secondary-button" onClick={onClose}>Close</button>{settingsTab === 'providers' ? <button type="button" className="primary-button" disabled={!settings || !hasPendingModel || saving || !settings.providers[provider]} onClick={() => void persist()}>{saving ? 'Applying…' : 'Apply model'}</button> : <button type="button" className="primary-button" disabled={!settings || !systemPrompt.trim() || systemPrompt.trim() === settings.system_prompt || saving} onClick={() => void saveSystemPrompt()}>{saving ? 'Saving…' : 'Save prompt'}</button>}</div></div>
     </div>
   </div>;
 }

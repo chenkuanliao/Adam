@@ -5,6 +5,18 @@ from pathlib import Path
 
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
+SYSTEM_PROMPT_BASE = """# Adam
+
+You are Adam, a research paper review assistant.
+
+- Answer only from the paper excerpts, images, and conversation context the user provides. Do not invent missing facts.
+- If the available context is insufficient, say so immediately and state what is missing.
+- Make clear, evidence-based decisions from the provided context. If a request or assumption is incorrect or does not make sense, say so directly and explain why.
+- Be precise, professional, concise, and straightforward. Avoid dramatic language, filler, and unnecessarily fancy wording.
+"""
+DEFAULT_SYSTEM_PROMPT = SYSTEM_PROMPT_BASE + "- Format responses in Markdown that renders cleanly in chat. Use `- ` for bullet lists and `1. `, `2. `, and so on for numbered lists. Use fenced code blocks with a language name for multiline code and backticks for inline code. Use `$...$` for inline LaTeX and `$$...$$` on separate lines for display LaTeX; do not use `\\(...\\)` or `\\[...\\]`. Use tables only for compact comparisons.\n"
+LEGACY_SYSTEM_PROMPT = SYSTEM_PROMPT_BASE + "- Use Markdown that renders cleanly in chat: short paragraphs, headings only when useful, bullet or numbered lists for structure, fenced code blocks for code, tables only for compact comparisons, and LaTeX for equations.\n"
+
 
 class Settings(BaseSettings):
     data_dir: Path = Path("./data")
@@ -54,6 +66,13 @@ class Settings(BaseSettings):
         provider = runtime.get("provider", "zen")
         return runtime.get("selected_models", {}).get(provider, runtime.get("model", self.opencode_model))
 
+    @property
+    def system_prompt(self) -> str:
+        prompt = self.runtime_settings.get("system_prompt")
+        if prompt == LEGACY_SYSTEM_PROMPT.strip():
+            return DEFAULT_SYSTEM_PROMPT
+        return prompt if isinstance(prompt, str) and prompt.strip() else DEFAULT_SYSTEM_PROMPT
+
     def provider_api_key(self, provider: str) -> str | None:
         key = self.runtime_settings.get("api_keys", {}).get(provider)
         if key:
@@ -62,7 +81,7 @@ class Settings(BaseSettings):
             return self.resolved_opencode_api_key
         return None
 
-    def save_runtime_settings(self, provider: str, model: str, api_keys: dict[str, str | None], favorites: dict[str, list[str]]) -> None:
+    def save_runtime_settings(self, provider: str, model: str, api_keys: dict[str, str | None], favorites: dict[str, list[str]], system_prompt: str | None = None) -> None:
         values = self.runtime_settings
         values["provider"] = provider
         values["model"] = model
@@ -76,6 +95,8 @@ class Settings(BaseSettings):
             elif key.strip():
                 stored_keys[name] = key.strip()
         values["favorites"] = {name: list(dict.fromkeys(models))[:50] for name, models in favorites.items()}
+        if system_prompt is not None:
+            values["system_prompt"] = system_prompt.strip()
         temporary = self.runtime_settings_path.with_suffix(".tmp")
         temporary.write_text(json.dumps(values, indent=2) + "\n", encoding="utf-8")
         os.chmod(temporary, 0o600)

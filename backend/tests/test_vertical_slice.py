@@ -76,14 +76,17 @@ def test_settings_are_persisted_without_exposing_the_key() -> None:
     assert initial.status_code == 200
     assert initial.json()["model"] == "gemini-3.8-flash"
     assert initial.json()["provider"] == "zen"
+    assert "You are Adam" in initial.json()["system_prompt"]
+    assert "`$$...$$`" in initial.json()["system_prompt"]
     assert "api_key" not in initial.json()
 
-    saved = client.put("/api/settings", json={"provider": "openai", "model": "gpt-5.6-luna", "api_keys": {"openai": "local-test-secret"}, "favorites": {"openai": ["gpt-5.6-luna"]}})
+    saved = client.put("/api/settings", json={"provider": "openai", "model": "gpt-5.6-luna", "api_keys": {"openai": "local-test-secret"}, "favorites": {"openai": ["gpt-5.6-luna"]}, "system_prompt": "You are Adam. Use only the supplied context."})
     assert saved.status_code == 200
     assert saved.json()["provider"] == "openai"
     assert saved.json()["selected_models"]["openai"] == "gpt-5.6-luna"
     assert saved.json()["providers"]["openai"] is True
     assert saved.json()["favorites"]["openai"] == ["gpt-5.6-luna"]
+    assert saved.json()["system_prompt"] == "You are Adam. Use only the supplied context."
     assert "local-test-secret" not in saved.text
 
     unstarred = client.post("/api/settings/favorite", json={"provider": "openai", "model": "gpt-5.6-luna", "starred": False})
@@ -96,6 +99,7 @@ def test_settings_are_persisted_without_exposing_the_key() -> None:
     cleared = client.put("/api/settings", json={"provider": "zen", "model": "gemini-3.8-flash", "api_keys": {"openai": None}})
     assert cleared.status_code == 200
     assert cleared.json()["providers"]["openai"] is False
+    assert cleared.json()["system_prompt"] == "You are Adam. Use only the supplied context."
 
     key_only = client.post("/api/settings/key", json={"provider": "anthropic", "api_key": "anthropic-test-secret"})
     assert key_only.status_code == 200

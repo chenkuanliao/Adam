@@ -44,7 +44,7 @@ def settings_response(app_settings: Settings, db: Session) -> AppSettingsOut:
     favorites: dict[str, list[str]] = {}
     for item in db.scalars(select(ModelFavorite).order_by(ModelFavorite.created_at)).all():
         favorites.setdefault(item.provider, []).append(item.model_id)
-    return AppSettingsOut(provider=active_provider, model=app_settings.resolved_opencode_model, selected_models=selected_models, providers=providers, favorites=favorites)
+    return AppSettingsOut(provider=active_provider, model=app_settings.resolved_opencode_model, selected_models=selected_models, providers=providers, favorites=favorites, system_prompt=app_settings.system_prompt)
 
 
 @app.get("/api/settings", response_model=AppSettingsOut)
@@ -54,7 +54,7 @@ def get_app_settings(app_settings: Settings = Depends(get_settings), db: Session
 
 @app.put("/api/settings", response_model=AppSettingsOut)
 def update_app_settings(request: AppSettingsUpdate, app_settings: Settings = Depends(get_settings), db: Session = Depends(get_db)) -> AppSettingsOut:
-    app_settings.save_runtime_settings(request.provider, request.model, request.api_keys, request.favorites)
+    app_settings.save_runtime_settings(request.provider, request.model, request.api_keys, request.favorites, request.system_prompt)
     for provider, models in request.favorites.items():
         existing = {item.model_id: item for item in db.scalars(select(ModelFavorite).where(ModelFavorite.provider == provider)).all()}
         desired = set(models)
@@ -197,16 +197,17 @@ async def chat_stream(request: ChatRequest, db: Session = Depends(get_db)) -> St
     db.commit()
 
     model = settings.resolved_opencode_model
-    if provider_name == "google": provider = GoogleProvider(api_key, model, "https://generativelanguage.googleapis.com/v1beta")
-    elif provider_name == "anthropic": provider = AnthropicProvider(api_key, model)
-    elif provider_name == "openai": provider = OpenAIResponsesProvider(api_key, model, "https://api.openai.com/v1")
-    elif provider_name == "zen" and model.startswith("gemini-"): provider = GoogleProvider(api_key, model, "https://opencode.ai/zen/v1")
-    elif provider_name == "zen" and model.startswith(("claude-", "qwen")): provider = AnthropicProvider(api_key, model, "https://opencode.ai/zen/v1")
-    elif provider_name == "zen" and model.startswith(("deepseek-", "minimax-", "glm-", "kimi-", "big-pickle", "mimo-", "ling-", "nemotron-")): provider = OpenAICompatibleProvider(api_key, model, "https://opencode.ai/zen/v1")
-    elif provider_name == "zen": provider = OpenAIResponsesProvider(api_key, model, "https://opencode.ai/zen/v1")
+    system_prompt = settings.system_prompt
+    if provider_name == "google": provider = GoogleProvider(api_key, model, "https://generativelanguage.googleapis.com/v1beta", system_prompt)
+    elif provider_name == "anthropic": provider = AnthropicProvider(api_key, model, system_prompt=system_prompt)
+    elif provider_name == "openai": provider = OpenAIResponsesProvider(api_key, model, "https://api.openai.com/v1", system_prompt)
+    elif provider_name == "zen" and model.startswith("gemini-"): provider = GoogleProvider(api_key, model, "https://opencode.ai/zen/v1", system_prompt)
+    elif provider_name == "zen" and model.startswith(("claude-", "qwen")): provider = AnthropicProvider(api_key, model, "https://opencode.ai/zen/v1", system_prompt)
+    elif provider_name == "zen" and model.startswith(("deepseek-", "minimax-", "glm-", "kimi-", "big-pickle", "mimo-", "ling-", "nemotron-")): provider = OpenAICompatibleProvider(api_key, model, "https://opencode.ai/zen/v1", system_prompt)
+    elif provider_name == "zen": provider = OpenAIResponsesProvider(api_key, model, "https://opencode.ai/zen/v1", system_prompt)
     else:
         bases = {"openrouter": "https://openrouter.ai/api/v1"}
-        provider = OpenAICompatibleProvider(api_key, model, bases[provider_name])
+        provider = OpenAICompatibleProvider(api_key, model, bases[provider_name], system_prompt)
 
     async def events() -> AsyncIterator[str]:
         complete = ""
