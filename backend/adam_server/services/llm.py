@@ -15,17 +15,22 @@ class OpenCodeGeminiProvider:
         self.base_url = base_url.rstrip("/")
 
     async def stream_answer(self, question: str, selected_text: str, page: int | None, history: list[ChatTurnIn]) -> AsyncIterator[str]:
-        location = f"page {page}" if page else "an unknown page"
-        prompt = (
-            "The user is reading a research paper. Answer using the exact selected passage below. "
-            "Be precise, distinguish the paper's claim from your interpretation, and say when the passage alone is insufficient.\n\n"
-            f"Selection ({location}):\n<selection>\n{selected_text}\n</selection>\n\nQuestion: {question}"
-        )
+        def user_prompt(turn_question: str, turn_selection: str, turn_page: int | None) -> str:
+            if not turn_selection:
+                return f"The user is asking a follow-up about the research paper. Use the preceding conversation as context.\n\nQuestion: {turn_question}"
+            location = f"page {turn_page}" if turn_page else "one or more pages"
+            return (
+                "The user is reading a research paper. Answer using the exact selected passage below. "
+                "Be precise, distinguish the paper's claim from your interpretation, and say when the passage alone is insufficient.\n\n"
+                f"Selection ({location}):\n<selection>\n{turn_selection}\n</selection>\n\nQuestion: {turn_question}"
+            )
+
+        prompt = user_prompt(question, selected_text, page)
         url = f"{self.base_url}/models/{self.model}:streamGenerateContent"
         contents = []
         for turn in history[-10:]:
             contents.extend([
-                {"role": "user", "parts": [{"text": turn.question}]},
+                {"role": "user", "parts": [{"text": user_prompt(turn.question, turn.selected_text, turn.page)}]},
                 {"role": "model", "parts": [{"text": turn.answer}]},
             ])
         contents.append({"role": "user", "parts": [{"text": prompt}]})

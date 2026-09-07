@@ -43,11 +43,13 @@ class AnnotationOut(AnnotationIn):
 class ChatTurnIn(BaseModel):
     question: str = Field(min_length=1, max_length=8000)
     answer: str = Field(min_length=1, max_length=30000)
+    selected_text: str = Field(default="", max_length=30000)
+    page: int | None = Field(default=None, ge=1)
 
 
 class ChatRequest(BaseModel):
     document_id: str
     question: str = Field(min_length=1, max_length=8000)
-    selected_text: str = Field(min_length=1, max_length=30000)
+    selected_text: str = Field(default="", max_length=30000)
     page: int | None = Field(default=None, ge=1)
     history: list[ChatTurnIn] = Field(default_factory=list, max_length=20)

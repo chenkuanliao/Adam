@@ -5,6 +5,9 @@ import { Document as PdfDocument, Page, pdfjs } from 'react-pdf';
 import type { PDFPageProxy, TextContent } from 'pdfjs-dist/types/src/display/api';
 import ReactMarkdown from 'react-markdown';
 import remarkGfm from 'remark-gfm';
+import remarkMath from 'remark-math';
+import rehypeKatex from 'rehype-katex';
+import 'katex/dist/katex.min.css';
 import 'react-pdf/dist/Page/AnnotationLayer.css';
 import 'react-pdf/dist/Page/TextLayer.css';
 
@@ -18,7 +21,7 @@ type PendingSelection = ContextSelection & { x: number; y: number; range: Range 
 type HighlightRect = { left: number; top: number; width: number; height: number };
 type HighlightEntry = ContextSelection & { color: string; range: Range | null; rects: HighlightRect[] };
 type StreamStatus = 'idle' | 'connecting' | 'streaming' | 'complete' | 'error';
-type ChatTurn = { id: string; question: string; answer: string };
+type ChatTurn = { id: string; question: string; answer: string; context: ContextSelection[] };
 const API_BASE = '';
 const MIN_ZOOM = .6;
 const MAX_ZOOM = 1.8;
@@ -44,6 +47,7 @@ export default function Home() {
   const [highlightEntries, setHighlightEntries] = useState<HighlightEntry[]>([]);
   const [question, setQuestion] = useState('');
   const [submittedQuestion, setSubmittedQuestion] = useState('');
+  const [submittedContext, setSubmittedContext] = useState<ContextSelection[]>([]);
   const [answer, setAnswer] = useState('');
   const [chatHistory, setChatHistory] = useState<ChatTurn[]>([]);
   const [streamStatus, setStreamStatus] = useState<StreamStatus>('idle');
@@ -247,6 +251,7 @@ export default function Home() {
     clearHighlights();
     setQuestion('');
     setSubmittedQuestion('');
+    setSubmittedContext([]);
     setAnswer('');
     setChatHistory([]);
     setStreamStatus('idle');
@@ -445,15 +450,19 @@ export default function Home() {
 
   async function ask(event: FormEvent) {
     event.preventDefault();
-    if (!active || contextSelections.length === 0 || !question.trim() || asking) return;
+    const hasConversationContext = Boolean(submittedQuestion && answer);
+    if (!active || (contextSelections.length === 0 && !hasConversationContext) || !question.trim() || asking) return;
     const sentQuestion = question.trim();
+    const sentContext = contextSelections.map((selection) => ({ ...selection }));
     if (submittedQuestion && answer) {
-      setChatHistory((current) => [...current, { id: crypto.randomUUID(), question: submittedQuestion, answer }]);
+      setChatHistory((current) => [...current, { id: crypto.randomUUID(), question: submittedQuestion, answer, context: submittedContext }]);
     }
     followOutputRef.current = true;
     setAsking(true);
     setQuestion('');
     setSubmittedQuestion(sentQuestion);
+    setSubmittedContext(sentContext);
+    setContextSelections([]);
     setAnswer('');
     setError('');
     setStreamStatus('connecting');
@@ -465,7 +474,7 @@ export default function Home() {
     try {
       const response = await fetch(`${API_BASE}/api/chat/stream`, {
         method: 'POST', headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ document_id: active.id, question: sentQuestion, selected_text: contextSelections.map((item, index) => `[Excerpt ${index + 1}${item.page ? `, page ${item.page}` : ''}]\n${item.text}`).join('\n\n'), page: contextSelections.length === 1 ? contextSelections[0].page : null, history: [...chatHistory, ...(submittedQuestion && answer ? [{ id: 'current', question: submittedQuestion, answer }] : [])].slice(-10).map(({ question: priorQuestion, answer: priorAnswer }) => ({ question: priorQuestion, answer: priorAnswer })) }),
+        body: JSON.stringify({ document_id: active.id, question: sentQuestion, selected_text: formatContext(sentContext), page: sentContext.length === 1 ? sentContext[0].page : null, history: [...chatHistory, ...(submittedQuestion && answer ? [{ id: 'current', question: submittedQuestion, answer, context: submittedContext }] : [])].slice(-10).map(({ question: priorQuestion, answer: priorAnswer, context }) => ({ question: priorQuestion, answer: priorAnswer, selected_text: formatContext(context), page: context.length === 1 ? context[0].page : null })) }),
       });
       if (!response.ok || !response.body) {
         const payload = await response.json().catch(() => ({}));
@@ -501,6 +510,8 @@ export default function Home() {
     }
   }
 
+  const canAsk = contextSelections.length > 0 || Boolean(submittedQuestion && answer);
+
   if (!active) return (
     <main className="library-shell">
       <header className="library-header"><Brand /><UploadButton uploading={uploading} upload={upload} /></header>
@@ -527,17 +538,26 @@ export default function Home() {
         <aside className="side-pane" style={{ '--chat-scale': chatScale } as CSSProperties}>
           <div className="mode-tabs"><div className="tab-list"><button className="active">Chat</button><button disabled>Notes <span>Soon</span></button></div><div className="chat-text-controls" role="group" aria-label="Chat text size"><span className="control-label">Text size</span><div><button type="button" aria-label="Decrease chat text size" title="Decrease chat text size" disabled={chatScale <= MIN_CHAT_SCALE} onClick={() => changeChatScale(-CHAT_SCALE_STEP)}>A−</button><output aria-live="polite" aria-label={`Chat text size ${Math.round(chatScale * 100)} percent`}>{Math.round(chatScale * 100)}%</output><button type="button" aria-label="Increase chat text size" title="Increase chat text size" disabled={chatScale >= MAX_CHAT_SCALE} onClick={() => changeChatScale(CHAT_SCALE_STEP)}>A+</button></div></div></div>
           <div className="chat-body" ref={chatBodyRef} onWheelCapture={(event) => { if (event.deltaY < 0) pauseChatFollow(); }} onTouchMove={pauseChatFollow} onPointerDown={(event) => { if (event.target === event.currentTarget) pauseChatFollow(); }} onScroll={(event) => { const element = event.currentTarget; followOutputRef.current = element.scrollHeight - element.scrollTop - element.clientHeight < 40; }}><div className="chat-heading"><span className="spark">✦</span><div><strong>Ask about this paper</strong><p>Select text in the paper to give the model precise context.</p></div></div>
-            {contextSelections.length > 0 ? <div className="context-list"><div className="context-list-heading"><span>Context</span><small>{contextSelections.length} {contextSelections.length === 1 ? 'excerpt' : 'excerpts'}</small></div>{contextSelections.map((selection, index) => <div className="selection-card" key={selection.id}><div><span>Excerpt {index + 1}{selection.page ? ` · page ${selection.page}` : ''}</span><button type="button" aria-label={`Remove excerpt ${index + 1}`} onClick={() => setContextSelections((current) => current.filter((item) => item.id !== selection.id))}>×</button></div><blockquote>{selection.text}</blockquote></div>)}</div> : <div className="empty-context"><span>⌁</span><p>Highlight a passage, then add it to context.</p></div>}
-            {chatHistory.map((turn) => <div className="chat-turn" key={turn.id}><div className="user-message"><span>You</span><p>{turn.question}</p></div><div className="answer-card complete"><div className="answer-meta"><span>Adam</span><span className="stream-state">Done</span></div><MarkdownAnswer>{turn.answer}</MarkdownAnswer></div></div>)}
-            {submittedQuestion && <div className="user-message"><span>You</span><p>{submittedQuestion}</p></div>}
+            {chatHistory.map((turn) => <div className="chat-turn" key={turn.id}><ContextList selections={turn.context} /><div className="user-message"><span>You</span><p>{turn.question}</p></div><div className="answer-card complete"><div className="answer-meta"><span>Adam</span><span className="stream-state">Done</span></div><MarkdownAnswer>{turn.answer}</MarkdownAnswer></div></div>)}
+            {submittedQuestion && <><ContextList selections={submittedContext} /><div className="user-message"><span>You</span><p>{submittedQuestion}</p></div></>}
             {streamStatus !== 'idle' && streamStatus !== 'error' && <div className={`answer-card ${streamStatus}`} aria-live="polite"><div className="answer-meta"><span>Adam</span><span className="stream-state">{streamStatus === 'connecting' ? <>Thinking<span className="thinking-dots"><i /><i /><i /></span></> : streamStatus === 'streaming' ? 'Responding…' : 'Done'}</span></div>{answer ? <MarkdownAnswer streaming={streamStatus === 'streaming'}>{answer}</MarkdownAnswer> : <div className="answer-skeleton"><i /><i /><i /></div>}</div>}{error && <p className="error-banner compact">{error}</p>}
+            {contextSelections.length > 0 ? <ContextList selections={contextSelections} onRemove={(id) => setContextSelections((current) => current.filter((item) => item.id !== id))} /> : !submittedQuestion && <div className="empty-context"><span>⌁</span><p>Highlight a passage, then add it to context.</p></div>}
           </div>
-          <form className="composer" onSubmit={ask}><textarea ref={composerRef} value={question} onChange={(event) => setQuestion(event.target.value)} onKeyDown={(event) => { if (event.key === 'Enter' && !event.shiftKey && !event.nativeEvent.isComposing) { event.preventDefault(); event.currentTarget.form?.requestSubmit(); } }} placeholder={contextSelections.length ? 'Ask about your excerpts…' : 'Add text to context to start…'} disabled={!contextSelections.length || asking} rows={3} /><div><span>{contextSelections.length ? `${contextSelections.length} context ${contextSelections.length === 1 ? 'excerpt' : 'excerpts'}` : 'No context added'}</span><button type="submit" disabled={!contextSelections.length || !question.trim() || asking}>{asking ? '…' : '↑'}</button></div></form>
+          <form className="composer" onSubmit={ask}><textarea ref={composerRef} value={question} onChange={(event) => setQuestion(event.target.value)} onKeyDown={(event) => { if (event.key === 'Enter' && !event.shiftKey && !event.nativeEvent.isComposing) { event.preventDefault(); event.currentTarget.form?.requestSubmit(); } }} placeholder={contextSelections.length ? 'Ask about your excerpts…' : canAsk ? 'Ask a follow-up…' : 'Add text to context to start…'} disabled={!canAsk || asking} rows={3} /><div><span>{contextSelections.length ? `${contextSelections.length} context ${contextSelections.length === 1 ? 'excerpt' : 'excerpts'}` : canAsk ? 'Using conversation context' : 'No context added'}</span><button type="submit" disabled={!canAsk || !question.trim() || asking}>{asking ? '…' : '↑'}</button></div></form>
         </aside>
       </div>
       {pendingSelection && <div className="selection-toolbar" style={{ left: pendingSelection.x, top: pendingSelection.y }} onMouseDown={(event) => event.preventDefault()} role="toolbar" aria-label="Text selection actions"><div className="highlight-colors" aria-label="Highlight color">{HIGHLIGHT_COLORS.map(({ color, label, key }) => <button type="button" className="color-swatch" style={{ backgroundColor: color }} aria-label={`Highlight ${label.toLowerCase()} (${key})`} aria-keyshortcuts={key} title={`${label} highlight · ${key}`} onClick={() => applyHighlight(color)} key={color}><kbd>{key}</kbd></button>)}</div><span className="toolbar-divider" /><button type="button" className="toolbar-action primary" aria-keyshortcuts="C" onClick={addSelectionToContext}><span>＋</span>Add to context <kbd>C</kbd></button><button type="button" className="toolbar-action" disabled title="Coming soon"><span>✦</span>Ask <small>Beta</small></button><button type="button" className="toolbar-action" disabled title="Coming soon"><span>▱</span>Note <small>Beta</small></button></div>}
     </main>
   );
+}
+
+function formatContext(selections: ContextSelection[]) {
+  return selections.map((item, index) => `[Excerpt ${index + 1}${item.page ? `, page ${item.page}` : ''}]\n${item.text}`).join('\n\n');
+}
+
+function ContextList({ selections, onRemove }: { selections: ContextSelection[]; onRemove?: (id: string) => void }) {
+  if (selections.length === 0) return null;
+  return <div className="context-list"><div className="context-list-heading"><span>Context</span><small>{selections.length} {selections.length === 1 ? 'excerpt' : 'excerpts'}</small></div>{selections.map((selection, index) => <div className="selection-card" key={selection.id}><div><span>Excerpt {index + 1}{selection.page ? ` · page ${selection.page}` : ''}</span>{onRemove && <button type="button" aria-label={`Remove excerpt ${index + 1}`} onClick={() => onRemove(selection.id)}>×</button>}</div><blockquote>{selection.text}</blockquote></div>)}</div>;
 }
 
 function PdfPageWithHighlights({ pageNumber, highlights }: { pageNumber: number; highlights: HighlightEntry[] }) {
@@ -617,6 +637,6 @@ function HighlightCanvas({ highlights, renderVersion }: { highlights: HighlightE
 
 function Brand() { return <div className="brand"><span className="brand-mark">A</span><strong>Adam</strong></div>; }
 function MarkdownAnswer({ children, streaming = false }: { children: string; streaming?: boolean }) {
-  return <div className="markdown-answer"><ReactMarkdown remarkPlugins={[remarkGfm]} components={{ a: ({ children: linkText, ...props }) => <a {...props} target="_blank" rel="noreferrer">{linkText}</a> }}>{children}</ReactMarkdown>{streaming && <i className="stream-cursor" />}</div>;
+  return <div className="markdown-answer"><ReactMarkdown remarkPlugins={[remarkGfm, remarkMath]} rehypePlugins={[rehypeKatex]} components={{ a: ({ children: linkText, ...props }) => <a {...props} target="_blank" rel="noreferrer">{linkText}</a> }}>{children}</ReactMarkdown>{streaming && <i className="stream-cursor" />}</div>;
 }
 function UploadButton({ uploading, upload }: { uploading: boolean; upload: (file: File) => Promise<void> }) { return <label className="primary-button">{uploading ? 'Opening…' : 'Open PDF'}<input type="file" accept="application/pdf" hidden disabled={uploading} onChange={(event) => event.target.files?.[0] && void upload(event.target.files[0])} /></label>; }
