@@ -2,6 +2,7 @@
 
 import { FormEvent, useCallback, useEffect, useLayoutEffect, useRef, useState, type CSSProperties } from 'react';
 import { Document as PdfDocument, Page, pdfjs } from 'react-pdf';
+import type { PDFPageProxy, TextContent } from 'pdfjs-dist/types/src/display/api';
 import ReactMarkdown from 'react-markdown';
 import remarkGfm from 'remark-gfm';
 import 'react-pdf/dist/Page/AnnotationLayer.css';
@@ -541,8 +542,37 @@ export default function Home() {
 
 function PdfPageWithHighlights({ pageNumber, highlights }: { pageNumber: number; highlights: HighlightEntry[] }) {
   const [renderVersion, setRenderVersion] = useState(0);
+  const pageElementRef = useRef<HTMLDivElement>(null);
+  const pdfPageRef = useRef<PDFPageProxy | null>(null);
+  const textContentRef = useRef<TextContent | null>(null);
   const handleRenderSuccess = useCallback(() => setRenderVersion((version) => version + 1), []);
-  return <Page pageNumber={pageNumber} width={BASE_PAGE_WIDTH * MAX_ZOOM} renderAnnotationLayer renderTextLayer onRenderSuccess={handleRenderSuccess}><HighlightCanvas highlights={highlights} renderVersion={renderVersion} /></Page>;
+  const alignTextLayer = useCallback(() => {
+    const element = pageElementRef.current;
+    const page = pdfPageRef.current;
+    const content = textContentRef.current;
+    if (!element || !page || !content) return;
+    const viewport = page.getViewport({ scale: 1 });
+    // PDF.js measures fonts on a separate canvas. Browser zoom and font
+    // substitution can make those metrics differ from the actual DOM glyphs.
+    // Match each text run to its PDF width using the displayed page scale.
+    const screenScale = element.getBoundingClientRect().width / viewport.width;
+    const spans = element.querySelectorAll<HTMLElement>('.textLayer span[role="presentation"]');
+    const items = content.items.filter((item) => 'str' in item && item.str.length > 0);
+    if (spans.length !== items.length || screenScale <= 0) return;
+    spans.forEach((span, index) => {
+      const item = items[index];
+      if (!('str' in item) || span.textContent !== item.str || content.styles[item.fontName]?.vertical) return;
+      const transform = pdfjs.Util.transform(viewport.transform, item.transform);
+      // Leave rotated runs to PDF.js: their bounding width includes height.
+      if (Math.abs(transform[1]) > 0.001 || item.width <= 0) return;
+      const actualWidth = span.getBoundingClientRect().width;
+      const expectedWidth = item.width * viewport.scale * screenScale;
+      if (actualWidth > 0 && Math.abs(actualWidth - expectedWidth) > 0.25) {
+        span.style.transform = `${span.style.transform} scaleX(${expectedWidth / actualWidth})`;
+      }
+    });
+  }, []);
+  return <Page inputRef={pageElementRef} pageNumber={pageNumber} width={BASE_PAGE_WIDTH * MAX_ZOOM} renderAnnotationLayer renderTextLayer onLoadSuccess={(page) => { pdfPageRef.current = page; }} onGetTextSuccess={(content) => { textContentRef.current = content; }} onRenderTextLayerSuccess={alignTextLayer} onRenderSuccess={handleRenderSuccess}><HighlightCanvas highlights={highlights} renderVersion={renderVersion} /></Page>;
 }
 
 function HighlightCanvas({ highlights, renderVersion }: { highlights: HighlightEntry[]; renderVersion: number }) {
