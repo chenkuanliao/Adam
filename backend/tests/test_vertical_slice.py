@@ -68,4 +68,36 @@ def test_upload_extract_reopen_and_missing_key() -> None:
         },
     )
     assert chat.status_code == 503
-    assert "OpenCode API key secret" in chat.json()["detail"]
+    assert "No API key is configured" in chat.json()["detail"]
+
+
+def test_settings_are_persisted_without_exposing_the_key() -> None:
+    initial = client.get("/api/settings")
+    assert initial.status_code == 200
+    assert initial.json()["model"] == "gemini-3.8-flash"
+    assert initial.json()["provider"] == "zen"
+    assert "api_key" not in initial.json()
+
+    saved = client.put("/api/settings", json={"provider": "openai", "model": "gpt-5.6-luna", "api_keys": {"openai": "local-test-secret"}, "favorites": {"openai": ["gpt-5.6-luna"]}})
+    assert saved.status_code == 200
+    assert saved.json()["provider"] == "openai"
+    assert saved.json()["selected_models"]["openai"] == "gpt-5.6-luna"
+    assert saved.json()["providers"]["openai"] is True
+    assert saved.json()["favorites"]["openai"] == ["gpt-5.6-luna"]
+    assert "local-test-secret" not in saved.text
+
+    unstarred = client.post("/api/settings/favorite", json={"provider": "openai", "model": "gpt-5.6-luna", "starred": False})
+    assert unstarred.status_code == 200
+    assert unstarred.json()["favorites"].get("openai", []) == []
+    starred = client.post("/api/settings/favorite", json={"provider": "openai", "model": "gpt-5.6-luna", "starred": True})
+    assert starred.status_code == 200
+    assert starred.json()["favorites"]["openai"] == ["gpt-5.6-luna"]
+
+    cleared = client.put("/api/settings", json={"provider": "zen", "model": "gemini-3.8-flash", "api_keys": {"openai": None}})
+    assert cleared.status_code == 200
+    assert cleared.json()["providers"]["openai"] is False
+
+    key_only = client.post("/api/settings/key", json={"provider": "anthropic", "api_key": "anthropic-test-secret"})
+    assert key_only.status_code == 200
+    assert key_only.json()["providers"]["anthropic"] is True
+    assert "anthropic" not in key_only.json()["selected_models"]

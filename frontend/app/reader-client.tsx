@@ -24,6 +24,15 @@ type HighlightRect = { left: number; top: number; width: number; height: number 
 type HighlightEntry = ContextSelection & { color: string; range: Range | null; rects: HighlightRect[] };
 type StreamStatus = 'idle' | 'connecting' | 'streaming' | 'complete' | 'error';
 type ChatTurn = { id: string; question: string; answer: string; context: ContextSelection[] };
+type ProviderId = 'zen' | 'openrouter' | 'openai' | 'anthropic' | 'google';
+type AppSettings = { provider: ProviderId; model: string; selected_models: Partial<Record<ProviderId, string>>; providers: Record<ProviderId, boolean>; favorites: Partial<Record<ProviderId, string[]>> };
+const PROVIDERS: Array<{ id: ProviderId; name: string; keyLabel: string }> = [
+  { id: 'zen', name: 'OpenCode Zen', keyLabel: 'OpenCode Zen key' },
+  { id: 'openrouter', name: 'OpenRouter', keyLabel: 'OpenRouter key' },
+  { id: 'openai', name: 'OpenAI', keyLabel: 'OpenAI key' },
+  { id: 'anthropic', name: 'Anthropic', keyLabel: 'Anthropic key' },
+  { id: 'google', name: 'Google', keyLabel: 'Google AI key' },
+];
 const API_BASE = '';
 const MIN_ZOOM = .6;
 const MAX_ZOOM = 1.8;
@@ -60,6 +69,8 @@ export default function Home() {
   const [uploading, setUploading] = useState(false);
   const [asking, setAsking] = useState(false);
   const [error, setError] = useState('');
+  const [settingsOpen, setSettingsOpen] = useState(false);
+  const [chatConfigured, setChatConfigured] = useState<boolean | null>(null);
   const viewerRef = useRef<HTMLDivElement>(null);
   const chatBodyRef = useRef<HTMLDivElement>(null);
   const composerRef = useRef<HTMLTextAreaElement>(null);
@@ -129,7 +140,24 @@ export default function Home() {
     // The initial library fetch intentionally synchronizes remote state after mount.
     // eslint-disable-next-line react-hooks/set-state-in-effect
     void loadPapers();
+    void fetch(`${API_BASE}/api/settings`).then((response) => response.json()).then((value: AppSettings) => setChatConfigured(Boolean(value.providers[value.provider]))).catch(() => setChatConfigured(false));
   }, [loadPapers]);
+
+  const closeSettings = useCallback(() => {
+    setSettingsOpen(false);
+    void fetch(`${API_BASE}/api/settings`).then((response) => response.json()).then((value: AppSettings) => setChatConfigured(Boolean(value.providers[value.provider]))).catch(() => setChatConfigured(false));
+  }, []);
+
+  useEffect(() => {
+    const openSettings = (event: KeyboardEvent) => {
+      if ((event.metaKey || event.ctrlKey) && event.key === ',') {
+        event.preventDefault();
+        setSettingsOpen(true);
+      }
+    };
+    window.addEventListener('keydown', openSettings);
+    return () => window.removeEventListener('keydown', openSettings);
+  }, []);
 
   useLayoutEffect(() => {
     const focus = pendingZoomRef.current;
@@ -661,11 +689,12 @@ export default function Home() {
     }
   }
 
-  const canAsk = contextSelections.length > 0 || Boolean(submittedQuestion && answer);
+  const hasChatContext = contextSelections.length > 0 || Boolean(submittedQuestion && answer);
+  const canAsk = chatConfigured !== false && hasChatContext;
 
-  if (!active) return (
+  if (!active) return (<>
     <main className="library-shell">
-      <header className="library-header"><Brand /><UploadButton uploading={uploading} upload={upload} /></header>
+      <header className="library-header"><Brand /><div className="library-actions"><SettingsButton onClick={() => setSettingsOpen(true)} /><UploadButton uploading={uploading} upload={upload} /></div></header>
       <section className="library-content">
         <p className="eyebrow">Your research desk</p>
         <h1>Read closely. Ask instantly.</h1>
@@ -675,11 +704,12 @@ export default function Home() {
         {papers.length > 0 && <div className="paper-list"><div className="section-heading"><h2>Recent papers</h2><span>{papers.length}</span></div>{papers.map((paper) => <button className="paper-row" key={paper.id} onClick={() => openPaper(paper)}><span className="paper-badge">PDF</span><span><strong>{paper.original_name}</strong><small>{paper.page_count} pages · stored locally</small></span><span className="row-arrow">→</span></button>)}</div>}
       </section>
     </main>
-  );
+    {settingsOpen && <SettingsDialog onClose={closeSettings} />}
+  </>);
 
   return (
     <main className="reader-shell">
-      <header className="reader-header"><button className="brand-button" onClick={() => setActive(null)} aria-label="Back to library"><Brand /></button><div className="document-title"><strong>{active.original_name.replace(/\.pdf$/i, '')}</strong><span>{pages || active.page_count} pages · local</span></div><div className="paper-zoom"><span className="control-label">Paper</span><div className="header-actions" role="group" aria-label="Paper zoom"><button title="Zoom paper out" aria-label="Zoom paper out" disabled={zoom <= MIN_ZOOM} onClick={() => changeZoom(-.1)}>−</button><span>{Math.round(zoom * 100)}%</span><button title="Zoom paper in" aria-label="Zoom paper in" disabled={zoom >= MAX_ZOOM} onClick={() => changeZoom(.1)}>+</button></div></div></header>
+      <header className="reader-header"><button className="brand-button" onClick={() => setActive(null)} aria-label="Back to library"><Brand /></button><div className="document-title"><strong>{active.original_name.replace(/\.pdf$/i, '')}</strong><span>{pages || active.page_count} pages · local</span></div><div className="reader-header-tools"><div className="paper-zoom"><span className="control-label">Paper</span><div className="header-actions" role="group" aria-label="Paper zoom"><button title="Zoom paper out" aria-label="Zoom paper out" disabled={zoom <= MIN_ZOOM} onClick={() => changeZoom(-.1)}>−</button><span>{Math.round(zoom * 100)}%</span><button title="Zoom paper in" aria-label="Zoom paper in" disabled={zoom >= MAX_ZOOM} onClick={() => changeZoom(.1)}>+</button></div></div><SettingsButton compact onClick={() => setSettingsOpen(true)} /></div></header>
       <div className="reader-workspace">
         <section className={`pdf-pane${screenshotMode ? ' screenshot-mode' : ''}`} ref={viewerRef} onMouseUp={(event) => { if (!screenshotMode) captureSelection(event); }} onPointerDown={beginScreenshot} onPointerMove={moveScreenshot} onPointerUp={finishScreenshot} onPointerCancel={() => { screenshotPointerRef.current = null; setScreenshotDrag(null); setScreenshotMode(false); }}>
           <PdfDocument file={`${API_BASE}/api/documents/${active.id}/file`} onLoadSuccess={({ numPages }) => setPages(numPages)} loading={<div className="viewer-message">Rendering paper…</div>} error={<div className="viewer-message error-banner">Could not render this PDF.</div>}>
@@ -690,16 +720,17 @@ export default function Home() {
         </section>
         <aside className="side-pane" style={{ '--chat-scale': chatScale } as CSSProperties}>
           <div className="mode-tabs"><div className="tab-list"><button className="active">Chat</button><button disabled>Notes <span>Soon</span></button></div><div className="chat-text-controls" role="group" aria-label="Chat text size"><span className="control-label">Text size</span><div><button type="button" aria-label="Decrease chat text size" title="Decrease chat text size" disabled={chatScale <= MIN_CHAT_SCALE} onClick={() => changeChatScale(-CHAT_SCALE_STEP)}>A−</button><output aria-live="polite" aria-label={`Chat text size ${Math.round(chatScale * 100)} percent`}>{Math.round(chatScale * 100)}%</output><button type="button" aria-label="Increase chat text size" title="Increase chat text size" disabled={chatScale >= MAX_CHAT_SCALE} onClick={() => changeChatScale(CHAT_SCALE_STEP)}>A+</button></div></div></div>
-          <div className="chat-body" ref={chatBodyRef} onWheelCapture={(event) => { if (event.deltaY < 0) pauseChatFollow(); }} onTouchMove={pauseChatFollow} onPointerDown={(event) => { if (event.target === event.currentTarget) pauseChatFollow(); }} onScroll={(event) => { const element = event.currentTarget; followOutputRef.current = element.scrollHeight - element.scrollTop - element.clientHeight < 40; }}><div className="chat-heading"><span className="spark">✦</span><div><strong>Ask about this paper</strong><p>Select text in the paper to give the model precise context.</p></div></div>
+          <div className="chat-body" ref={chatBodyRef} onWheelCapture={(event) => { if (event.deltaY < 0) pauseChatFollow(); }} onTouchMove={pauseChatFollow} onPointerDown={(event) => { if (event.target === event.currentTarget) pauseChatFollow(); }} onScroll={(event) => { const element = event.currentTarget; followOutputRef.current = element.scrollHeight - element.scrollTop - element.clientHeight < 40; }}><div className="chat-heading"><span className="spark">✦</span><div><strong>Ask about this paper</strong><p>Select text in the paper to give the model precise context.</p></div></div>{chatConfigured === false && <button type="button" className="no-key-notice" onClick={() => setSettingsOpen(true)}><strong>No API key configured</strong><span>Choose a provider and add a key in Settings to enable chat.</span></button>}
             {chatHistory.map((turn) => <div className="chat-turn" key={turn.id}><ContextList selections={turn.context} /><div className="user-message"><span>You</span><p>{turn.question}</p></div><div className="answer-card complete"><div className="answer-meta"><span>Adam</span><span className="stream-state">Done</span></div><MarkdownAnswer>{turn.answer}</MarkdownAnswer></div></div>)}
             {submittedQuestion && <><ContextList selections={submittedContext} /><div className="user-message"><span>You</span><p>{submittedQuestion}</p></div></>}
             {streamStatus !== 'idle' && streamStatus !== 'error' && <div className={`answer-card ${streamStatus}`} aria-live="polite"><div className="answer-meta"><span>Adam</span><span className="stream-state">{streamStatus === 'connecting' ? <>Thinking<span className="thinking-dots"><i /><i /><i /></span></> : streamStatus === 'streaming' ? 'Responding…' : 'Done'}</span></div>{answer ? <MarkdownAnswer streaming={streamStatus === 'streaming'}>{answer}</MarkdownAnswer> : <div className="answer-skeleton"><i /><i /><i /></div>}</div>}{error && <p className="error-banner compact">{error}</p>}
             {contextSelections.length > 0 ? <ContextList selections={contextSelections} onRemove={(id) => setContextSelections((current) => current.filter((item) => item.id !== id))} /> : !submittedQuestion && <div className="empty-context"><span>⌁</span><p>Highlight a passage, then add it to context.</p></div>}
           </div>
-          <form className="composer" onSubmit={ask}><textarea ref={composerRef} value={question} onChange={(event) => setQuestion(event.target.value)} onKeyDown={(event) => { if (event.key === 'Enter' && !event.shiftKey && !event.nativeEvent.isComposing) { event.preventDefault(); event.currentTarget.form?.requestSubmit(); } }} placeholder={contextSelections.length ? 'Ask about your context…' : canAsk ? 'Ask a follow-up…' : 'Highlight text or press R to capture an area…'} disabled={!canAsk || asking} rows={3} /><div><span>{contextSelections.length ? `${contextSelections.length} context ${contextSelections.length === 1 ? 'item' : 'items'}` : canAsk ? 'Using conversation context' : 'Press R for screenshot'}</span><button type="submit" disabled={!canAsk || !question.trim() || asking}>{asking ? '…' : '↑'}</button></div></form>
+          <form className="composer" onSubmit={ask}><textarea ref={composerRef} value={question} onChange={(event) => setQuestion(event.target.value)} onKeyDown={(event) => { if (event.key === 'Enter' && !event.shiftKey && !event.nativeEvent.isComposing) { event.preventDefault(); event.currentTarget.form?.requestSubmit(); } }} placeholder={chatConfigured === false ? 'Add an API key in Settings to chat…' : contextSelections.length ? 'Ask about your context…' : canAsk ? 'Ask a follow-up…' : 'Highlight text or press R to capture an area…'} disabled={!canAsk || asking} rows={3} /><div><span>{chatConfigured === false ? 'Chat unavailable' : contextSelections.length ? `${contextSelections.length} context ${contextSelections.length === 1 ? 'item' : 'items'}` : canAsk ? 'Using conversation context' : 'Press R for screenshot'}</span><button type="submit" disabled={!canAsk || !question.trim() || asking}>{asking ? '…' : '↑'}</button></div></form>
         </aside>
       </div>
       {pendingSelection && <div className="selection-toolbar" style={{ left: pendingSelection.x, top: pendingSelection.y }} onMouseDown={(event) => event.preventDefault()} role="toolbar" aria-label="Text selection actions"><div className="highlight-colors" aria-label="Highlight color">{HIGHLIGHT_COLORS.map(({ color, label, key }) => <button type="button" className="color-swatch" style={{ backgroundColor: color }} aria-label={`Highlight ${label.toLowerCase()} (${key})`} aria-keyshortcuts={key} title={`${label} highlight · ${key}`} onClick={() => applyHighlight(color)} key={color}><kbd>{key}</kbd></button>)}</div><span className="toolbar-divider" /><button type="button" className="toolbar-action primary" aria-keyshortcuts="C" onClick={addSelectionToContext}><span>＋</span>Add to context <kbd>C</kbd></button><button type="button" className="toolbar-action" disabled title="Coming soon"><span>✦</span>Ask <small>Beta</small></button><button type="button" className="toolbar-action" disabled title="Coming soon"><span>▱</span>Note <small>Beta</small></button></div>}
+      {settingsOpen && <SettingsDialog onClose={closeSettings} />}
     </main>
   );
 }
@@ -793,6 +824,123 @@ function HighlightCanvas({ highlights, renderVersion }: { highlights: HighlightE
 }
 
 function Brand() { return <div className="brand"><span className="brand-mark">A</span><strong>Adam</strong></div>; }
+function SettingsButton({ onClick, compact = false }: { onClick: () => void; compact?: boolean }) {
+  return <button type="button" className={`settings-button${compact ? ' compact-button' : ''}`} onClick={onClick} title="Settings (⌘/Ctrl + ,)" aria-label="Open settings" aria-keyshortcuts="Meta+, Control+,"><span className="settings-gear" aria-hidden="true">⚙</span><span>{compact ? '' : 'Settings'}</span></button>;
+}
+
+function SettingsDialog({ onClose }: { onClose: () => void }) {
+  const [settings, setSettings] = useState<AppSettings | null>(null);
+  const [provider, setProvider] = useState<ProviderId>('zen');
+  const [model, setModel] = useState('');
+  const [apiKey, setApiKey] = useState('');
+  const [models, setModels] = useState<string[]>([]);
+  const [query, setQuery] = useState('');
+  const [status, setStatus] = useState('');
+  const [saving, setSaving] = useState(false);
+  const [loadingModels, setLoadingModels] = useState(false);
+  const [settingsTab, setSettingsTab] = useState<'providers' | 'more'>('providers');
+  const dialogRef = useRef<HTMLDivElement>(null);
+
+  useEffect(() => {
+    void fetch(`${API_BASE}/api/settings`).then(async (response) => {
+      if (!response.ok) throw new Error('Could not load settings.');
+      const value = await response.json() as AppSettings;
+      setSettings(value);
+      setProvider(value.provider);
+      setModel(value.model);
+    }).catch((reason) => setStatus(reason instanceof Error ? reason.message : 'Could not load settings.'));
+  }, []);
+
+  useEffect(() => {
+    const close = (event: KeyboardEvent) => { if (event.key === 'Escape') onClose(); };
+    window.addEventListener('keydown', close);
+    dialogRef.current?.focus();
+    return () => window.removeEventListener('keydown', close);
+  }, [onClose]);
+
+  const loadModels = useCallback(async (providerId: ProviderId) => {
+    setLoadingModels(true); setStatus('');
+    try {
+      const response = await fetch(`${API_BASE}/api/settings/models/${providerId}`);
+      const value = await response.json();
+      if (!response.ok) throw new Error(value.detail ?? 'Could not load models.');
+      setModels(value.models);
+    } catch (reason) { setModels([]); setStatus(reason instanceof Error ? reason.message : 'Could not load models.'); }
+    finally { setLoadingModels(false); }
+  }, []);
+
+  async function persist(options: { close?: boolean; removeKey?: boolean } = {}) {
+    if (!model.trim()) return;
+    setSaving(true);
+    setStatus('');
+    try {
+      const apiKeys = apiKey ? { [provider]: apiKey } : options.removeKey ? { [provider]: null } : {};
+      const response = await fetch(`${API_BASE}/api/settings`, { method: 'PUT', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ provider, model: model.trim(), api_keys: apiKeys, favorites: settings?.favorites ?? {} }) });
+      const value = await response.json();
+      if (!response.ok) throw new Error(value.detail ?? 'Could not save settings.');
+      setSettings(value);
+      setApiKey('');
+      setStatus('Saved');
+      if (apiKey) await loadModels(provider);
+      if (options.close) onClose();
+    } catch (reason) {
+      setStatus(reason instanceof Error ? reason.message : 'Could not save settings.');
+    } finally { setSaving(false); }
+  }
+
+  async function saveProviderKey(remove = false) {
+    setSaving(true); setStatus('');
+    try {
+      const response = await fetch(`${API_BASE}/api/settings/key`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ provider, api_key: remove ? null : apiKey }) });
+      const value = await response.json() as AppSettings;
+      if (!response.ok) throw new Error((value as unknown as { detail?: string }).detail ?? 'Could not save API key.');
+      setSettings(value); setApiKey(''); setStatus(remove ? 'API key removed' : 'API key connected');
+      if (!remove) await loadModels(provider);
+    } catch (reason) { setStatus(reason instanceof Error ? reason.message : 'Could not save API key.'); }
+    finally { setSaving(false); }
+  }
+
+  function chooseProvider(next: ProviderId) { setProvider(next); setModel(settings?.selected_models[next] ?? ''); setModels([]); setQuery(''); setApiKey(''); if (settings?.providers[next]) void loadModels(next); }
+  function toggleFavorite(id: string) {
+    if (!settings) return;
+    const current = settings.favorites[provider] ?? [];
+    const starred = !current.includes(id);
+    const next = starred ? [id, ...current] : current.filter((item) => item !== id);
+    setSettings({ ...settings, favorites: { ...settings.favorites, [provider]: next } });
+    void fetch(`${API_BASE}/api/settings/favorite`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ provider, model: id, starred }) }).then(async (response) => {
+      if (!response.ok) throw new Error((await response.json()).detail ?? 'Could not save pinned model.');
+    }).catch((reason) => { setSettings(settings); setStatus(reason instanceof Error ? reason.message : 'Could not save pinned model.'); });
+  }
+  const favorites = settings?.favorites[provider] ?? [];
+  const visibleModels = models.filter((item) => item.toLowerCase().includes(query.toLowerCase()));
+  const pinnedModels = favorites.filter((item) => visibleModels.includes(item));
+  const otherModels = visibleModels.filter((item) => !favorites.includes(item));
+  const providerInfo = PROVIDERS.find((item) => item.id === provider)!;
+
+  const modelRow = (id: string) => <button type="button" className={model === id ? 'selected' : ''} onClick={() => setModel(id)} key={id}><span>{id}</span><i role="button" aria-label={favorites.includes(id) ? `Unpin ${id}` : `Pin ${id}`} title={favorites.includes(id) ? 'Unpin model' : 'Pin model'} onClick={(event) => { event.stopPropagation(); toggleFavorite(id); }}>{favorites.includes(id) ? '★' : '☆'}</i></button>;
+
+  return <div className="settings-backdrop" onMouseDown={(event) => { if (event.target === event.currentTarget) onClose(); }}>
+    <div className="settings-dialog provider-dialog" ref={dialogRef} role="dialog" aria-modal="true" aria-labelledby="settings-title" tabIndex={-1}>
+      <div className="settings-titlebar"><div><span className="settings-kicker">Preferences</span><h2 id="settings-title">Settings</h2></div><button type="button" onClick={onClose} aria-label="Close settings">×</button></div>
+      <div className="provider-layout">
+        <nav className="provider-nav" aria-label="Settings sections">
+          <span className="nav-section-label">Providers</span>
+          {PROVIDERS.map((item) => <button type="button" className={settingsTab === 'providers' && provider === item.id ? 'active' : ''} onClick={() => { setSettingsTab('providers'); chooseProvider(item.id); }} key={item.id}><span className={`provider-dot${settings?.providers[item.id] ? ' connected' : ''}`} />{item.name}{settings?.providers[item.id] && <small>{settings.provider === item.id ? 'In use' : 'Ready'}</small>}</button>)}
+          <span className="nav-section-label secondary-label">General</span>
+          <button type="button" className={`more-settings-tab${settingsTab === 'more' ? ' active' : ''}`} onClick={() => setSettingsTab('more')}><span className="more-tab-icon">＋</span>More settings<small>Soon</small></button>
+        </nav>
+        {settingsTab === 'providers' ? <div className="provider-content">
+          <div className="provider-heading"><div><h3>{providerInfo.name}</h3><p>{settings?.providers[provider] ? 'API key configured' : 'Add a key to enable chat and load available models.'}</p></div>{settings?.providers[provider] && <button type="button" className="secondary-button" onClick={() => void loadModels(provider)} disabled={loadingModels}>{loadingModels ? 'Loading…' : 'Refresh models'}</button>}</div>
+          <div className="key-row"><label className="field-label">{providerInfo.keyLabel}<input type="password" value={apiKey} onChange={(event) => setApiKey(event.target.value)} autoComplete="off" placeholder={settings?.providers[provider] ? '••••••••••••  Key configured' : 'Enter API key'} /></label><button type="button" className="secondary-button" disabled={!apiKey || saving} onClick={() => void saveProviderKey()}>{saving ? 'Saving…' : 'Save & connect'}</button></div>
+          {settings?.providers[provider] && <button type="button" className="remove-key-button" onClick={() => void saveProviderKey(true)}>Remove this API key</button>}
+          <div className="selected-model-summary"><span>Selected model</span><strong>{model || 'None selected'}</strong><small>{providerInfo.name}</small></div>
+          <div className="model-picker"><div className="model-picker-head"><label>Browse models</label><input type="search" value={query} onChange={(event) => setQuery(event.target.value)} placeholder="Search models…" /></div>{visibleModels.length ? <div className="model-list">{pinnedModels.length > 0 && <div className="model-group-label"><span>★ Pinned</span><small>{pinnedModels.length}</small></div>}{pinnedModels.map(modelRow)}{otherModels.length > 0 && pinnedModels.length > 0 && <div className="model-group-label all-models"><span>All models</span><small>{otherModels.length}</small></div>}{otherModels.map(modelRow)}</div> : <div className="model-empty">{loadingModels ? 'Loading models…' : settings?.providers[provider] ? 'Refresh to load models from this provider.' : 'Connect an API key to browse models.'}</div>}</div>
+        </div> : <div className="more-settings-page"><div className="coming-icon">＋</div><span className="settings-kicker">On the roadmap</span><h3>More settings are coming</h3><p>Reading preferences, appearance, shortcuts, and data controls will live here as their own settings.</p></div>}
+      </div>
+      <div className="settings-footer"><span role="status" className={status === 'Saved' ? 'save-success' : ''}>{status}</span><div><kbd>Esc</kbd><button type="button" className="secondary-button" onClick={onClose}>Cancel</button>{settingsTab === 'providers' && <button type="button" className="primary-button" disabled={!settings || !model.trim() || saving || !settings.providers[provider]} onClick={() => void persist({ close: true })}>Use selected model</button>}</div></div>
+    </div>
+  </div>;
+}
 function MarkdownAnswer({ children, streaming = false }: { children: string; streaming?: boolean }) {
   return <div className="markdown-answer"><ReactMarkdown remarkPlugins={[remarkGfm, remarkMath]} rehypePlugins={[rehypeKatex]} components={{ a: ({ children: linkText, ...props }) => <a {...props} target="_blank" rel="noreferrer">{linkText}</a> }}>{children}</ReactMarkdown>{streaming && <i className="stream-cursor" />}</div>;
 }

@@ -7,13 +7,14 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse, StreamingResponse
 from sqlalchemy import select
 from sqlalchemy.orm import Session
+import httpx
 
 from .config import Settings, get_settings
 from .database import SessionLocal, get_db, run_migrations
-from .models import Annotation, Document, Message, Page
-from .schemas import AnnotationIn, AnnotationOut, ChatRequest, DocumentOut, PageTextOut
+from .models import Annotation, Document, Message, ModelFavorite, Page
+from .schemas import AnnotationIn, AnnotationOut, AppSettingsOut, AppSettingsUpdate, ChatRequest, DocumentOut, ModelFavoriteUpdate, PageTextOut, ProviderKeyUpdate, ProviderModelsOut
 from .services.documents import ingest_pdf
-from .services.llm import OpenCodeGeminiProvider, sse
+from .services.llm import AnthropicProvider, GoogleProvider, OpenAICompatibleProvider, OpenAIResponsesProvider, sse
 
 settings = get_settings()
 run_migrations()
@@ -23,7 +24,7 @@ app.add_middleware(
     CORSMiddleware,
     allow_origins=[origin.strip() for origin in settings.cors_origins.split(",")],
     allow_credentials=False,
-    allow_methods=["GET", "POST", "DELETE", "OPTIONS"],
+    allow_methods=["GET", "POST", "PUT", "DELETE", "OPTIONS"],
     allow_headers=["Content-Type"],
 )
 
@@ -31,6 +32,82 @@ app.add_middleware(
 @app.get("/health")
 def health() -> dict[str, str]:
     return {"status": "ok"}
+
+
+def settings_response(app_settings: Settings, db: Session) -> AppSettingsOut:
+    runtime = app_settings.runtime_settings
+    active_provider = runtime.get("provider", "zen")
+    selected_models = dict(runtime.get("selected_models", {}))
+    if active_provider not in selected_models:
+        selected_models[active_provider] = runtime.get("model", app_settings.opencode_model)
+    providers = {name: bool(app_settings.provider_api_key(name)) for name in ("zen", "openrouter", "openai", "anthropic", "google")}
+    favorites: dict[str, list[str]] = {}
+    for item in db.scalars(select(ModelFavorite).order_by(ModelFavorite.created_at)).all():
+        favorites.setdefault(item.provider, []).append(item.model_id)
+    return AppSettingsOut(provider=active_provider, model=app_settings.resolved_opencode_model, selected_models=selected_models, providers=providers, favorites=favorites)
+
+
+@app.get("/api/settings", response_model=AppSettingsOut)
+def get_app_settings(app_settings: Settings = Depends(get_settings), db: Session = Depends(get_db)) -> AppSettingsOut:
+    return settings_response(app_settings, db)
+
+
+@app.put("/api/settings", response_model=AppSettingsOut)
+def update_app_settings(request: AppSettingsUpdate, app_settings: Settings = Depends(get_settings), db: Session = Depends(get_db)) -> AppSettingsOut:
+    app_settings.save_runtime_settings(request.provider, request.model, request.api_keys, request.favorites)
+    for provider, models in request.favorites.items():
+        existing = {item.model_id: item for item in db.scalars(select(ModelFavorite).where(ModelFavorite.provider == provider)).all()}
+        desired = set(models)
+        for model_id in desired - existing.keys(): db.add(ModelFavorite(provider=provider, model_id=model_id))
+        for model_id in existing.keys() - desired: db.delete(existing[model_id])
+    db.commit()
+    return settings_response(app_settings, db)
+
+
+@app.post("/api/settings/favorite", response_model=AppSettingsOut)
+def update_model_favorite(request: ModelFavoriteUpdate, app_settings: Settings = Depends(get_settings), db: Session = Depends(get_db)) -> AppSettingsOut:
+    favorite = db.scalar(select(ModelFavorite).where(ModelFavorite.provider == request.provider, ModelFavorite.model_id == request.model))
+    if request.starred and not favorite: db.add(ModelFavorite(provider=request.provider, model_id=request.model))
+    elif not request.starred and favorite: db.delete(favorite)
+    db.commit()
+    return settings_response(app_settings, db)
+
+
+@app.post("/api/settings/key", response_model=AppSettingsOut)
+def update_provider_key(request: ProviderKeyUpdate, app_settings: Settings = Depends(get_settings), db: Session = Depends(get_db)) -> AppSettingsOut:
+    app_settings.save_provider_api_key(request.provider, request.api_key)
+    return settings_response(app_settings, db)
+
+
+@app.get("/api/settings/models/{provider}", response_model=ProviderModelsOut)
+async def list_provider_models(provider: str, app_settings: Settings = Depends(get_settings)) -> ProviderModelsOut:
+    if provider not in {"zen", "openrouter", "openai", "anthropic", "google"}:
+        raise HTTPException(404, "Unknown provider.")
+    key = app_settings.provider_api_key(provider)
+    if not key:
+        raise HTTPException(503, f"Add a {provider} API key to load models.")
+    urls = {"zen": "https://opencode.ai/zen/v1/models", "openrouter": "https://openrouter.ai/api/v1/models", "openai": "https://api.openai.com/v1/models", "anthropic": "https://api.anthropic.com/v1/models", "google": "https://generativelanguage.googleapis.com/v1beta/models"}
+    headers = {"Authorization": f"Bearer {key}"}
+    params = None
+    if provider == "anthropic": headers = {"x-api-key": key, "anthropic-version": "2023-06-01"}
+    if provider == "google": headers, params = {"x-goog-api-key": key}, {"pageSize": 1000}
+    try:
+        async with httpx.AsyncClient(timeout=20) as client:
+            response = await client.get(urls[provider], headers=headers, params=params)
+            response.raise_for_status()
+            payload = response.json()
+    except httpx.HTTPStatusError as exc:
+        raise HTTPException(exc.response.status_code, "The provider rejected the API key or model-list request.") from exc
+    except (httpx.HTTPError, ValueError) as exc:
+        raise HTTPException(502, "Could not load models from the provider.") from exc
+    data = payload.get("models", []) if provider == "google" else payload.get("data", [])
+    models = []
+    for item in data:
+        model_id = item.get("name", "").removeprefix("models/") if provider == "google" else item.get("id", "")
+        if provider == "google" and "generateContent" not in item.get("supportedGenerationMethods", []): continue
+        if provider == "openai" and not model_id.startswith(("gpt-", "o1", "o3", "o4")): continue
+        if model_id: models.append(model_id)
+    return ProviderModelsOut(provider=provider, models=sorted(set(models)))
 
 
 @app.get("/api/documents", response_model=list[DocumentOut])
@@ -109,20 +186,32 @@ def delete_annotation(document_id: str, annotation_id: str, db: Session = Depend
 async def chat_stream(request: ChatRequest, db: Session = Depends(get_db)) -> StreamingResponse:
     if not db.get(Document, request.document_id):
         raise HTTPException(404, "Document not found.")
-    api_key = settings.resolved_opencode_api_key
+    runtime = settings.runtime_settings
+    provider_name = runtime.get("provider", "zen")
+    api_key = settings.provider_api_key(provider_name)
     if not api_key:
-        raise HTTPException(503, "Configure the OpenCode API key secret to enable AI responses.")
+        raise HTTPException(503, f"No API key is configured for {provider_name}. Open Settings to enable chat.")
 
     context = {"scope": "selection", "page": request.page, "selected_text": request.selected_text, "image_count": len(request.images)}
     db.add(Message(document_id=request.document_id, role="user", content=request.question, context_json=json.dumps(context)))
     db.commit()
 
-    provider = OpenCodeGeminiProvider(api_key, settings.opencode_model, settings.opencode_base_url)
+    model = settings.resolved_opencode_model
+    if provider_name == "google": provider = GoogleProvider(api_key, model, "https://generativelanguage.googleapis.com/v1beta")
+    elif provider_name == "anthropic": provider = AnthropicProvider(api_key, model)
+    elif provider_name == "openai": provider = OpenAIResponsesProvider(api_key, model, "https://api.openai.com/v1")
+    elif provider_name == "zen" and model.startswith("gemini-"): provider = GoogleProvider(api_key, model, "https://opencode.ai/zen/v1")
+    elif provider_name == "zen" and model.startswith(("claude-", "qwen")): provider = AnthropicProvider(api_key, model, "https://opencode.ai/zen/v1")
+    elif provider_name == "zen" and model.startswith(("deepseek-", "minimax-", "glm-", "kimi-", "big-pickle", "mimo-", "ling-", "nemotron-")): provider = OpenAICompatibleProvider(api_key, model, "https://opencode.ai/zen/v1")
+    elif provider_name == "zen": provider = OpenAIResponsesProvider(api_key, model, "https://opencode.ai/zen/v1")
+    else:
+        bases = {"openrouter": "https://openrouter.ai/api/v1"}
+        provider = OpenAICompatibleProvider(api_key, model, bases[provider_name])
 
     async def events() -> AsyncIterator[str]:
         complete = ""
         try:
-            yield sse({"type": "started", "provider": "opencode", "model": settings.opencode_model})
+            yield sse({"type": "started", "provider": provider_name, "model": model})
             async for delta in provider.stream_answer(request.question, request.selected_text, request.images, request.page, request.history):
                 complete += delta
                 yield sse({"type": "delta", "text": delta})

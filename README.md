@@ -9,6 +9,7 @@ The current vertical slice supports:
 - local native-text extraction with PyMuPDF
 - selected passage context in the chat sidebar
 - streamed responses from OpenCode Zen, using Gemini 3.8 Flash by default
+- provider-aware model and API-key settings for OpenCode Zen, OpenRouter, OpenAI, Anthropic, and Google, available from either screen with `Cmd/Ctrl + ,`
 - Docker Compose deployment with host-mounted data
 
 ## Run with Docker
@@ -22,6 +23,7 @@ docker compose up --build
 ```
 
 Open <http://localhost:3000>. PDFs and application state are stored under `./data`, outside the containers.
+Settings changed in the app are stored in `./data/settings.json` and survive container rebuilds. Keys remain server-side and are never returned to the browser. An OpenCode Zen key entered in Settings takes precedence over the Docker secret; removing it falls back to the secret.
 
 ## Run for development
 

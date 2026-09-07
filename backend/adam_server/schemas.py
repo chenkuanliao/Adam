@@ -60,3 +60,34 @@ class ChatRequest(BaseModel):
     page: int | None = Field(default=None, ge=1)
     images: list[ContextImageIn] = Field(default_factory=list, max_length=6)
     history: list[ChatTurnIn] = Field(default_factory=list, max_length=20)
+
+
+class AppSettingsOut(BaseModel):
+    provider: str
+    model: str
+    selected_models: dict[str, str]
+    providers: dict[str, bool]
+    favorites: dict[str, list[str]]
+
+
+class AppSettingsUpdate(BaseModel):
+    provider: str = Field(pattern=r"^(zen|openrouter|openai|anthropic|google)$")
+    model: str = Field(min_length=1, max_length=200, pattern=r"^[A-Za-z0-9._:/-]+$")
+    api_keys: dict[str, str | None] = Field(default_factory=dict)
+    favorites: dict[str, list[str]] = Field(default_factory=dict)
+
+
+class ProviderModelsOut(BaseModel):
+    provider: str
+    models: list[str]
+
+
+class ModelFavoriteUpdate(BaseModel):
+    provider: str = Field(pattern=r"^(zen|openrouter|openai|anthropic|google)$")
+    model: str = Field(min_length=1, max_length=200)
+    starred: bool
+
+
+class ProviderKeyUpdate(BaseModel):
+    provider: str = Field(pattern=r"^(zen|openrouter|openai|anthropic|google)$")
+    api_key: str | None = Field(default=None, max_length=10000)

@@ -66,3 +66,13 @@ class Annotation(Base):
     geometry_json: Mapped[str] = mapped_column(Text)
     note_text: Mapped[str | None] = mapped_column(Text, nullable=True)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
+
+
+class ModelFavorite(Base):
+    __tablename__ = "model_favorites"
+    __table_args__ = (UniqueConstraint("provider", "model_id"),)
+
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=new_id)
+    provider: Mapped[str] = mapped_column(String(32), index=True)
+    model_id: Mapped[str] = mapped_column(String(200))
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
