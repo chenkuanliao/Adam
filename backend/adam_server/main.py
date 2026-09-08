@@ -14,7 +14,7 @@ import httpx
 from .config import Settings, get_settings
 from .database import SessionLocal, get_db, run_migrations
 from .models import Annotation, Conversation, Document, Message, ModelFavorite, Page
-from .schemas import AnnotationIn, AnnotationOut, AppSettingsOut, AppSettingsUpdate, ChatRequest, ConversationCreate, ConversationDetail, ConversationOut, ConversationUpdate, DocumentOut, DocumentUpdate, ModelFavoriteUpdate, PageTextOut, ProviderKeyUpdate, ProviderModelsOut
+from .schemas import AnnotationIn, AnnotationOut, AppSettingsOut, AppSettingsUpdate, ChatRequest, ConversationCreate, ConversationDetail, ConversationOut, ConversationUpdate, DocumentOut, DocumentUpdate, ModelFavoriteUpdate, PageTextOut, ProviderKeyUpdate, ProviderModelsOut, QuickAskImportRequest, QuickAskRequest
 from .services.context import build_paper_context
 from .services.documents import ingest_pdf
 from .services.llm import AnthropicProvider, GoogleProvider, OpenAICompatibleProvider, OpenAIResponsesProvider, generate_zen_title, sse
@@ -32,6 +32,17 @@ app.add_middleware(
 )
 
 
+def make_provider(provider_name: str, api_key: str, model: str, system_prompt: str):
+    if provider_name == "google": return GoogleProvider(api_key, model, "https://generativelanguage.googleapis.com/v1beta", system_prompt)
+    if provider_name == "anthropic": return AnthropicProvider(api_key, model, system_prompt=system_prompt)
+    if provider_name == "openai": return OpenAIResponsesProvider(api_key, model, "https://api.openai.com/v1", system_prompt)
+    if provider_name == "zen" and model.startswith("gemini-"): return GoogleProvider(api_key, model, "https://opencode.ai/zen/v1", system_prompt)
+    if provider_name == "zen" and model.startswith(("claude-", "qwen")): return AnthropicProvider(api_key, model, "https://opencode.ai/zen/v1", system_prompt)
+    if provider_name == "zen" and model.startswith(("deepseek-", "minimax-", "glm-", "kimi-", "big-pickle", "mimo-", "ling-", "nemotron-")): return OpenAICompatibleProvider(api_key, model, "https://opencode.ai/zen/v1", system_prompt)
+    if provider_name == "zen": return OpenAIResponsesProvider(api_key, model, "https://opencode.ai/zen/v1", system_prompt)
+    return OpenAICompatibleProvider(api_key, model, {"openrouter": "https://openrouter.ai/api/v1"}[provider_name], system_prompt)
+
+
 @app.get("/health")
 def health() -> dict[str, str]:
     return {"status": "ok"}
@@ -47,7 +58,7 @@ def settings_response(app_settings: Settings, db: Session) -> AppSettingsOut:
     favorites: dict[str, list[str]] = {}
     for item in db.scalars(select(ModelFavorite).order_by(ModelFavorite.created_at)).all():
         favorites.setdefault(item.provider, []).append(item.model_id)
-    return AppSettingsOut(provider=active_provider, model=app_settings.resolved_opencode_model, selected_models=selected_models, providers=providers, favorites=favorites, system_prompt=app_settings.system_prompt)
+    return AppSettingsOut(provider=active_provider, model=app_settings.resolved_opencode_model, selected_models=selected_models, providers=providers, favorites=favorites, system_prompt=app_settings.system_prompt, quick_ask_prompt=app_settings.quick_ask_prompt)
 
 
 @app.get("/api/settings", response_model=AppSettingsOut)
@@ -57,7 +68,7 @@ def get_app_settings(app_settings: Settings = Depends(get_settings), db: Session
 
 @app.put("/api/settings", response_model=AppSettingsOut)
 def update_app_settings(request: AppSettingsUpdate, app_settings: Settings = Depends(get_settings), db: Session = Depends(get_db)) -> AppSettingsOut:
-    app_settings.save_runtime_settings(request.provider, request.model, request.api_keys, request.favorites, request.system_prompt)
+    app_settings.save_runtime_settings(request.provider, request.model, request.api_keys, request.favorites, request.system_prompt, request.quick_ask_prompt)
     for provider, models in request.favorites.items():
         existing = {item.model_id: item for item in db.scalars(select(ModelFavorite).where(ModelFavorite.provider == provider)).all()}
         desired = set(models)
@@ -352,8 +363,12 @@ async def chat_stream(conversation_id: str, request: ChatRequest, db: Session = 
     if not api_key:
         raise HTTPException(503, f"No API key is configured for {provider_name}. Open Settings to enable chat.")
 
-    paper_context, context_mode = build_paper_context(db, conversation, request.question, request.selected_text)
-    context = {"scope": "selection" if request.selected_text or request.images else "paper", "page": request.page, "selected_text": request.selected_text, "images": [image.model_dump() for image in request.images], "context_mode": context_mode}
+    if conversation.context_builder_version == "quick-ask-v1":
+        paper_context, context_mode = "", "quick_ask_history"
+    else:
+        paper_context, context_mode = build_paper_context(db, conversation, request.question, request.selected_text)
+    scope = "quick_ask_followup" if conversation.context_builder_version == "quick-ask-v1" else ("selection" if request.selected_text or request.images else "paper")
+    context = {"scope": scope, "page": request.page, "selected_text": request.selected_text, "images": [image.model_dump() for image in request.images], "context_mode": context_mode}
     user_message = Message(document_id=conversation.document_id, conversation_id=conversation.id, role="user", content=request.question, context_json=json.dumps(context))
     db.add(user_message)
     should_generate_title = conversation.title == "New chat" and provider_name == "zen"
@@ -372,16 +387,7 @@ async def chat_stream(conversation_id: str, request: ChatRequest, db: Session = 
 
     model = conversation.model_id
     system_prompt = conversation.system_prompt + paper_context
-    if provider_name == "google": provider = GoogleProvider(api_key, model, "https://generativelanguage.googleapis.com/v1beta", system_prompt)
-    elif provider_name == "anthropic": provider = AnthropicProvider(api_key, model, system_prompt=system_prompt)
-    elif provider_name == "openai": provider = OpenAIResponsesProvider(api_key, model, "https://api.openai.com/v1", system_prompt)
-    elif provider_name == "zen" and model.startswith("gemini-"): provider = GoogleProvider(api_key, model, "https://opencode.ai/zen/v1", system_prompt)
-    elif provider_name == "zen" and model.startswith(("claude-", "qwen")): provider = AnthropicProvider(api_key, model, "https://opencode.ai/zen/v1", system_prompt)
-    elif provider_name == "zen" and model.startswith(("deepseek-", "minimax-", "glm-", "kimi-", "big-pickle", "mimo-", "ling-", "nemotron-")): provider = OpenAICompatibleProvider(api_key, model, "https://opencode.ai/zen/v1", system_prompt)
-    elif provider_name == "zen": provider = OpenAIResponsesProvider(api_key, model, "https://opencode.ai/zen/v1", system_prompt)
-    else:
-        bases = {"openrouter": "https://openrouter.ai/api/v1"}
-        provider = OpenAICompatibleProvider(api_key, model, bases[provider_name], system_prompt)
+    provider = make_provider(provider_name, api_key, model, system_prompt)
 
     async def events() -> AsyncIterator[str]:
         complete = ""
@@ -412,3 +418,47 @@ async def chat_stream(conversation_id: str, request: ChatRequest, db: Session = 
             yield sse({"type": "error", "message": str(exc)})
 
     return StreamingResponse(events(), media_type="text/event-stream", headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"})
+
+
+@app.post("/api/conversations/{conversation_id}/quick-ask/stream")
+async def quick_ask_stream(conversation_id: str, request: QuickAskRequest, db: Session = Depends(get_db)) -> StreamingResponse:
+    conversation = db.get(Conversation, conversation_id)
+    if not conversation:
+        raise HTTPException(404, "Conversation not found.")
+    history_has_selection = any(turn.selected_text or turn.images for turn in request.history)
+    if not request.selected_text and not request.images and not history_has_selection:
+        raise HTTPException(422, "Quick Ask requires selected text or a screenshot.")
+    api_key = settings.provider_api_key(conversation.provider)
+    if not api_key:
+        raise HTTPException(503, f"No API key is configured for {conversation.provider}. Open Settings to enable Quick Ask.")
+    provider = make_provider(conversation.provider, api_key, conversation.model_id, settings.quick_ask_prompt)
+
+    async def events() -> AsyncIterator[str]:
+        try:
+            yield sse({"type": "started", "provider": conversation.provider, "model": conversation.model_id})
+            async for delta in provider.stream_answer(request.question, request.selected_text, request.images, request.page, request.history):
+                yield sse({"type": "delta", "text": delta})
+            yield sse({"type": "completed"})
+        except Exception as exc:
+            yield sse({"type": "error", "message": str(exc)})
+
+    return StreamingResponse(events(), media_type="text/event-stream", headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"})
+
+
+@app.post("/api/conversations/{conversation_id}/quick-ask/import", response_model=ConversationOut, status_code=201)
+def import_quick_ask(conversation_id: str, request: QuickAskImportRequest, db: Session = Depends(get_db)) -> ConversationOut:
+    source = db.get(Conversation, conversation_id)
+    if not source:
+        raise HTTPException(404, "Conversation not found.")
+    conversation = Conversation(document_id=source.document_id, title=f"Quick Ask · {request.turns[0].question.strip()[:70]}", provider=source.provider, model_id=source.model_id, system_prompt=settings.quick_ask_prompt, context_builder_version="quick-ask-v1")
+    db.add(conversation)
+    db.flush()
+    for index, turn in enumerate(request.turns):
+        context = json.dumps({"scope": "quick_ask_saved" if index == 0 else "quick_ask_followup", "page": request.page, "selected_text": request.selected_text if index == 0 else "", "images": [image.model_dump() for image in request.images] if index == 0 else [], "label": "Saved Quick Ask · selection only" if index == 0 else "Quick Ask follow-up"})
+        db.add(Message(document_id=conversation.document_id, conversation_id=conversation.id, role="user", content=turn.question, context_json=context))
+        db.add(Message(document_id=conversation.document_id, conversation_id=conversation.id, role="assistant", content=turn.answer, context_json=None))
+    conversation.updated_at = datetime.now(timezone.utc)
+    db.commit()
+    db.refresh(conversation)
+    result = ConversationOut.model_validate(conversation)
+    return result.model_copy(update={"message_count": db.scalar(select(func.count(Message.id)).where(Message.conversation_id == conversation.id)) or 0})

@@ -19,15 +19,17 @@ pdfjs.GlobalWorkerOptions.workerSrc = '/pdf.worker.min.mjs';
 type Paper = { id: string; original_name: string; page_count: number; status: string; created_at: string };
 type ContextSelection = { id: string; text: string; page: number | null; pageEnd?: number | null; imageDataUrl?: string };
 type PendingSelection = ContextSelection & { x: number; y: number; range: Range };
+type QuickAskTarget = ContextSelection & { x: number; y: number };
 type ScreenshotDrag = { startContentX: number; startContentY: number; currentContentX: number; currentContentY: number; overlayLeft: number; overlayTop: number; overlayWidth: number; overlayHeight: number };
 type HighlightRect = { left: number; top: number; width: number; height: number };
 type HighlightEntry = ContextSelection & { color: string; range: Range | null; rects: HighlightRect[] };
 type StreamStatus = 'idle' | 'connecting' | 'streaming' | 'complete' | 'error';
-type ChatTurn = { id: string; question: string; answer: string; context: ContextSelection[] };
+type ChatTurn = { id: string; question: string; answer: string; context: ContextSelection[]; importedQuickAsk?: boolean };
+type QuickTurn = { question: string; answer: string };
 type Conversation = { id: string; document_id: string; title: string; provider: string; model_id: string; context_builder_version: string; updated_at: string; message_count: number };
 type SavedMessage = { id: string; role: string; content: string; context_json: string | null };
 type ProviderId = 'zen' | 'openrouter' | 'openai' | 'anthropic' | 'google';
-type AppSettings = { provider: ProviderId; model: string; selected_models: Partial<Record<ProviderId, string>>; providers: Record<ProviderId, boolean>; favorites: Partial<Record<ProviderId, string[]>>; system_prompt: string };
+type AppSettings = { provider: ProviderId; model: string; selected_models: Partial<Record<ProviderId, string>>; providers: Record<ProviderId, boolean>; favorites: Partial<Record<ProviderId, string[]>>; system_prompt: string; quick_ask_prompt: string };
 const PROVIDERS: Array<{ id: ProviderId; name: string; keyLabel: string }> = [
   { id: 'zen', name: 'OpenCode Zen', keyLabel: 'OpenCode Zen key' },
   { id: 'openrouter', name: 'OpenRouter', keyLabel: 'OpenRouter key' },
@@ -59,6 +61,14 @@ export default function Home() {
   const [pages, setPages] = useState(0);
   const [contextSelections, setContextSelections] = useState<ContextSelection[]>([]);
   const [pendingSelection, setPendingSelection] = useState<PendingSelection | null>(null);
+  const [quickAskTarget, setQuickAskTarget] = useState<QuickAskTarget | null>(null);
+  const [quickQuestion, setQuickQuestion] = useState('');
+  const [quickActiveQuestion, setQuickActiveQuestion] = useState('');
+  const [quickAnswer, setQuickAnswer] = useState('');
+  const [quickTurns, setQuickTurns] = useState<QuickTurn[]>([]);
+  const [quickAsking, setQuickAsking] = useState(false);
+  const [quickImporting, setQuickImporting] = useState(false);
+  const [quickError, setQuickError] = useState('');
   const [screenshotMode, setScreenshotMode] = useState(false);
   const [screenshotDrag, setScreenshotDrag] = useState<ScreenshotDrag | null>(null);
   const [highlightEntries, setHighlightEntries] = useState<HighlightEntry[]>([]);
@@ -90,6 +100,10 @@ export default function Home() {
   const resizingRef = useRef(false);
   const chatBodyRef = useRef<HTMLDivElement>(null);
   const composerRef = useRef<HTMLTextAreaElement>(null);
+  const quickAskInputRef = useRef<HTMLInputElement>(null);
+  const quickThreadRef = useRef<HTMLDivElement>(null);
+  const quickFollowRef = useRef(true);
+  const quickDragRef = useRef<{ pointerId: number; offsetX: number; offsetY: number } | null>(null);
   const focusComposerAfterContextRef = useRef(false);
   const followOutputRef = useRef(true);
   const autoScrollFrameRef = useRef<number | null>(null);
@@ -508,7 +522,7 @@ export default function Home() {
       const user = detail.messages[index];
       const assistant = detail.messages[index + 1];
       if (user.role !== 'user' || assistant?.role !== 'assistant') continue;
-      turns.push({ id: user.id, question: user.content, answer: assistant.content, context: contextFromJson(user.context_json) });
+      turns.push({ id: user.id, question: user.content, answer: assistant.content, context: contextFromJson(user.context_json), importedQuickAsk: contextScope(user.context_json) === 'quick_ask_saved' });
       index += 1;
     }
     setChatHistory(turns);
@@ -532,6 +546,7 @@ export default function Home() {
     setConversations(remaining);
     if (activeConversation?.id === conversation.id) {
       if (remaining[0]) await openConversation(remaining[0]); else await createNewConversation();
+      setHistoryOpen(true);
     }
   }
 
@@ -631,6 +646,101 @@ export default function Home() {
     if (alreadyAdded) window.requestAnimationFrame(() => composerRef.current?.focus({ preventScroll: true }));
   }
 
+  function openQuickAskFromSelection() {
+    if (!pendingSelection) return;
+    const { id, text, page, x, y } = pendingSelection;
+    setQuickAskTarget({ id, text, page, x, y: Math.min(window.innerHeight - 500, Math.max(70, y + 12)) });
+    setQuickQuestion(''); setQuickActiveQuestion(''); setQuickAnswer(''); setQuickTurns([]); setQuickError('');
+    clearBrowserSelection();
+    window.requestAnimationFrame(() => quickAskInputRef.current?.focus());
+  }
+
+  function closeQuickAsk() {
+    if (quickAsking) return;
+    setQuickAskTarget(null); setQuickQuestion(''); setQuickActiveQuestion(''); setQuickAnswer(''); setQuickTurns([]); setQuickError('');
+  }
+
+  useEffect(() => {
+    if (quickAskTarget) quickAskInputRef.current?.focus({ preventScroll: true });
+  }, [quickAskTarget]);
+
+  function addQuickTargetToContext() {
+    if (!quickAskTarget) return;
+    const selection: ContextSelection = { id: quickAskTarget.id, text: quickAskTarget.text, page: quickAskTarget.page, pageEnd: quickAskTarget.pageEnd, imageDataUrl: quickAskTarget.imageDataUrl };
+    setContextSelections((current) => current.some((item) => item.id === selection.id) ? current : [...current, selection]);
+    revealNewContext();
+    setQuickAskTarget(null);
+  }
+
+  async function submitQuickAsk(event: FormEvent) {
+    event.preventDefault();
+    if (!quickAskTarget || !activeConversation || !quickQuestion.trim() || quickAsking) return;
+    const priorTurns = quickAnswer ? [...quickTurns, { question: quickActiveQuestion, answer: quickAnswer }] : quickTurns;
+    const sentQuestion = quickQuestion.trim();
+    if (quickAnswer) setQuickTurns(priorTurns);
+    quickFollowRef.current = true;
+    setQuickAsking(true); setQuickActiveQuestion(sentQuestion); setQuickQuestion(''); setQuickAnswer(''); setQuickError('');
+    try {
+      const selectionText = quickAskTarget.imageDataUrl ? '' : quickAskTarget.text;
+      const selectionImages = quickAskTarget.imageDataUrl ? [{ data_url: quickAskTarget.imageDataUrl, page: quickAskTarget.page }] : [];
+      const response = await fetch(`${API_BASE}/api/conversations/${activeConversation.id}/quick-ask/stream`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ question: sentQuestion, selected_text: priorTurns.length ? '' : selectionText, images: priorTurns.length ? [] : selectionImages, page: quickAskTarget.page, history: priorTurns.map((turn, index) => ({ ...turn, selected_text: index === 0 ? selectionText : '', images: index === 0 ? selectionImages : [], page: quickAskTarget.page })) }) });
+      if (!response.ok || !response.body) { const payload = await response.json().catch(() => ({})); throw new Error(payload.detail ?? 'Quick Ask failed.'); }
+      const reader = response.body.getReader(); const decoder = new TextDecoder(); let buffer = '';
+      while (true) {
+        const { value, done } = await reader.read(); if (done) break;
+        buffer += decoder.decode(value, { stream: true }); const events = buffer.split('\n\n'); buffer = events.pop() ?? '';
+        for (const block of events) { const line = block.split('\n').find((item) => item.startsWith('data: ')); if (!line) continue; const data = JSON.parse(line.slice(6)); if (data.type === 'delta') setQuickAnswer((current) => current + data.text); if (data.type === 'error') throw new Error(data.message); }
+      }
+    } catch (reason) { setQuickError(reason instanceof Error ? reason.message : 'Quick Ask failed.'); }
+    finally { setQuickAsking(false); }
+  }
+
+  useLayoutEffect(() => {
+    const thread = quickThreadRef.current;
+    if (!thread || !quickFollowRef.current) return;
+    thread.scrollTop = thread.scrollHeight;
+  }, [quickAnswer, quickTurns, quickAsking]);
+
+  function beginQuickDrag(event: React.PointerEvent<HTMLDivElement>) {
+    if (!quickAskTarget || (event.target as HTMLElement).closest('button')) return;
+    event.currentTarget.setPointerCapture(event.pointerId);
+    quickDragRef.current = { pointerId: event.pointerId, offsetX: event.clientX - quickAskTarget.x, offsetY: event.clientY - quickAskTarget.y };
+  }
+
+  function moveQuickDrag(event: React.PointerEvent<HTMLDivElement>) {
+    const drag = quickDragRef.current; if (!drag || drag.pointerId !== event.pointerId) return;
+    setQuickAskTarget((target) => target && ({ ...target, x: Math.min(window.innerWidth - 220, Math.max(220, event.clientX - drag.offsetX)), y: Math.min(window.innerHeight - 90, Math.max(10, event.clientY - drag.offsetY)) }));
+  }
+
+  function endQuickDrag(event: React.PointerEvent<HTMLDivElement>) {
+    if (quickDragRef.current?.pointerId === event.pointerId) quickDragRef.current = null;
+  }
+
+  async function importQuickAsk() {
+    if (!quickAskTarget || !activeConversation || quickAsking || quickImporting) return;
+    const turns = quickAnswer ? [...quickTurns, { question: quickActiveQuestion, answer: quickAnswer }] : quickTurns;
+    if (!turns.length) return;
+    setQuickImporting(true); setQuickError('');
+    try {
+      const response = await fetch(`${API_BASE}/api/conversations/${activeConversation.id}/quick-ask/import`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ selected_text: quickAskTarget.imageDataUrl ? '' : quickAskTarget.text, images: quickAskTarget.imageDataUrl ? [{ data_url: quickAskTarget.imageDataUrl, page: quickAskTarget.page }] : [], page: quickAskTarget.page, turns: turns.map((turn) => ({ ...turn, selected_text: '', images: [], page: quickAskTarget.page })) }) });
+      const updated = await response.json() as Conversation; if (!response.ok) throw new Error((updated as unknown as { detail?: string }).detail ?? 'Could not move Quick Ask to chat.');
+      setActiveConversation(updated); setConversations((current) => [updated, ...current]);
+      await openConversation(updated); setQuickAskTarget(null); setQuickQuestion(''); setQuickActiveQuestion(''); setQuickAnswer(''); setQuickTurns([]);
+    } catch (reason) { setQuickError(reason instanceof Error ? reason.message : 'Could not move Quick Ask to chat.'); }
+    finally { setQuickImporting(false); }
+  }
+
+  useEffect(() => {
+    if (!quickAskTarget) return;
+    const handleQuickAskHotkey = (event: KeyboardEvent) => {
+      const target = event.target as HTMLElement | null;
+      if (event.key === 'Escape') { event.preventDefault(); closeQuickAsk(); return; }
+      if (event.key.toLowerCase() === 'c' && !event.metaKey && !event.ctrlKey && !event.altKey && !target?.matches('input, textarea, select') && !target?.isContentEditable) { event.preventDefault(); addQuickTargetToContext(); }
+    };
+    window.addEventListener('keydown', handleQuickAskHotkey);
+    return () => window.removeEventListener('keydown', handleQuickAskHotkey);
+  });
+
   useEffect(() => {
     const handleScreenshotHotkey = (event: KeyboardEvent) => {
       const target = event.target as HTMLElement | null;
@@ -728,8 +838,9 @@ export default function Home() {
     });
     const page = Math.min(...intersectingPages.map((item) => item.page));
     const pageEnd = Math.max(...intersectingPages.map((item) => item.page));
-    revealNewContext();
-    setContextSelections((current) => [...current, { id: crypto.randomUUID(), text: 'Selected PDF area', page, pageEnd, imageDataUrl: output.toDataURL('image/jpeg', .92) }]);
+    setQuickAskTarget({ id: crypto.randomUUID(), text: 'Selected PDF area', page, pageEnd, imageDataUrl: output.toDataURL('image/jpeg', .92), x: Math.min(window.innerWidth - 220, Math.max(220, event.clientX)), y: Math.min(window.innerHeight - 500, Math.max(70, event.clientY - 12)) });
+    setQuickQuestion(''); setQuickActiveQuestion(''); setQuickAnswer(''); setQuickTurns([]); setQuickError('');
+    window.requestAnimationFrame(() => quickAskInputRef.current?.focus());
   }
 
   function applyHighlight(color: string) {
@@ -858,6 +969,9 @@ export default function Home() {
       } else if (event.key.toLowerCase() === 'c') {
         event.preventDefault();
         addSelectionToContext();
+      } else if (event.key.toLowerCase() === 'a') {
+        event.preventDefault();
+        openQuickAskFromSelection();
       } else if (event.key === 'Escape') {
         event.preventDefault();
         clearBrowserSelection();
@@ -964,7 +1078,7 @@ export default function Home() {
           <PdfDocument file={`${API_BASE}/api/documents/${active.id}/file`} onLoadSuccess={({ numPages }) => setPages(numPages)} loading={<div className="viewer-message">Rendering paper…</div>} error={<div className="viewer-message error-banner">Could not render this PDF.</div>}>
             {Array.from({ length: pages }, (_, index) => <div className="pdf-page-stage" data-page-number={index + 1} key={index + 1}><div className="pdf-page-wrap" style={{ zoom: zoom / MAX_ZOOM }}><PdfPageWithHighlights pageNumber={index + 1} highlights={highlightEntries.filter((entry) => entry.page === index + 1)} /><span className="page-label">{index + 1}</span></div></div>)}
           </PdfDocument>
-          {screenshotMode && !screenshotDrag && <div className="screenshot-hint">Drag over the PDF to add an image · Esc to cancel</div>}
+          {screenshotMode && !screenshotDrag && <div className="screenshot-hint">Drag over the PDF to ask about it · Esc to cancel</div>}
           {screenshotDrag && <div className="screenshot-region" style={{ left: screenshotDrag.overlayLeft, top: screenshotDrag.overlayTop, width: screenshotDrag.overlayWidth, height: screenshotDrag.overlayHeight }} />}
         </section>
         <div className="pane-resizer" style={{ left: `${paperPercent}%` }} role="separator" aria-label="Resize paper and chat panes" aria-orientation="vertical" aria-valuemin={MIN_PAPER_PERCENT} aria-valuemax={80} aria-valuenow={Math.round(paperPercent)} tabIndex={0} onPointerDown={beginWorkspaceResize} onPointerMove={moveWorkspaceResize} onPointerUp={finishWorkspaceResize} onPointerCancel={() => { resizingRef.current = false; }} onDoubleClick={resetWorkspaceResize}><span /></div>
@@ -973,20 +1087,21 @@ export default function Home() {
           {historyOpen ? <section className="history-view">
             <div className="history-header"><div><p>Conversations</p><h2>Chat history</h2><span>{conversations.length} saved for this paper</span></div><button type="button" onClick={() => setHistoryOpen(false)} aria-label="Close chat history">×</button></div>
             <button type="button" className="new-chat-card" onClick={() => void createNewConversation()}><span>＋</span><div><strong>Start a new chat</strong><small>Uses your current default model</small></div><i>→</i></button>
-            <div className="history-list">{conversations.map((item) => <article className={`history-card${item.id === activeConversation?.id ? ' current' : ''}`} key={item.id}>{renamingChatId === item.id ? <form className="chat-title-form history-title-form" onSubmit={(event) => void renameConversation(event, item)}><input autoFocus value={chatTitleValue} maxLength={200} aria-label="Chat title" onChange={(event) => setChatTitleValue(event.target.value)} onKeyDown={(event) => { if (event.key === 'Escape') setRenamingChatId(null); }} /><button type="submit" disabled={!chatTitleValue.trim() || titleSaving}>Save</button><button type="button" onClick={() => setRenamingChatId(null)}>Cancel</button></form> : <button type="button" className="history-card-main" onClick={() => void openConversation(item)}><div className="history-card-top"><span className="history-model-mark">✦</span><time>{formatConversationDate(item.updated_at)}</time></div><strong>{item.title}</strong><p>{item.provider} · {item.model_id}</p><div className="history-card-meta"><span>{Math.ceil(item.message_count / 2)} {Math.ceil(item.message_count / 2) === 1 ? 'exchange' : 'exchanges'}</span><span>Full paper</span>{item.id === activeConversation?.id && <em>Current</em>}</div></button>}<div className="history-card-actions"><button type="button" aria-label={`Rename ${item.title}`} title="Rename chat" onClick={() => beginChatRename(item)}>✎</button>{item.provider === 'zen' && item.message_count > 0 && <button type="button" aria-label={`Regenerate title for ${item.title}`} title="Regenerate title with GPT-5.6 Luna" disabled={titleSaving} onClick={() => void regenerateConversationTitle(item)}>↻</button>}<button type="button" className="history-delete" aria-label={`Delete ${item.title}`} title="Delete chat" onClick={() => void deleteConversation(item)}><TrashIcon /></button></div></article>)}</div>
+            <div className="history-list">{conversations.map((item) => <article className={`history-card${item.id === activeConversation?.id ? ' current' : ''}`} key={item.id}>{renamingChatId === item.id ? <form className="chat-title-form history-title-form" onSubmit={(event) => void renameConversation(event, item)}><input autoFocus value={chatTitleValue} maxLength={200} aria-label="Chat title" onChange={(event) => setChatTitleValue(event.target.value)} onKeyDown={(event) => { if (event.key === 'Escape') setRenamingChatId(null); }} /><button type="submit" disabled={!chatTitleValue.trim() || titleSaving}>Save</button><button type="button" onClick={() => setRenamingChatId(null)}>Cancel</button></form> : <button type="button" className="history-card-main" onClick={() => void openConversation(item)}><div className="history-card-top"><span className="history-model-mark">✦</span><time>{formatConversationDate(item.updated_at)}</time></div><strong>{item.title}</strong><p>{item.provider} · {item.model_id}</p><div className="history-card-meta"><span>{Math.ceil(item.message_count / 2)} {Math.ceil(item.message_count / 2) === 1 ? 'exchange' : 'exchanges'}</span><span>{item.context_builder_version === 'quick-ask-v1' ? 'Selection only' : 'Full paper'}</span>{item.id === activeConversation?.id && <em>Current</em>}</div></button>}<div className="history-card-actions"><button type="button" aria-label={`Rename ${item.title}`} title="Rename chat" onClick={() => beginChatRename(item)}>✎</button>{item.provider === 'zen' && item.message_count > 0 && <button type="button" aria-label={`Regenerate title for ${item.title}`} title="Regenerate title with GPT-5.6 Luna" disabled={titleSaving} onClick={() => void regenerateConversationTitle(item)}>↻</button>}<button type="button" className="history-delete" aria-label={`Delete ${item.title}`} title="Delete chat" onClick={() => void deleteConversation(item)}><TrashIcon /></button></div></article>)}</div>
           </section> : <>
             <div className="conversation-header"><div>{activeConversation && renamingChatId === activeConversation.id ? <form className="chat-title-form" onSubmit={(event) => void renameConversation(event, activeConversation)}><input autoFocus value={chatTitleValue} maxLength={200} aria-label="Chat title" onChange={(event) => setChatTitleValue(event.target.value)} onKeyDown={(event) => { if (event.key === 'Escape') setRenamingChatId(null); }} /><button type="submit" disabled={!chatTitleValue.trim() || titleSaving}>Save</button></form> : <button type="button" className="chat-title-button" title="Rename chat" onClick={() => activeConversation && beginChatRename(activeConversation)}><strong>{activeConversation?.title ?? 'Loading chat…'}</strong><span>✎</span></button>}<small>{activeConversation ? `${activeConversation.provider} · ${activeConversation.model_id}` : 'Preparing paper context'}</small></div><div className="conversation-actions">{activeConversation?.provider === 'zen' && activeConversation.message_count > 0 && <button type="button" disabled={titleSaving} onClick={() => void regenerateConversationTitle(activeConversation)} title="Regenerate title with GPT-5.6 Luna"><span>↻</span> Title</button>}<button type="button" onClick={() => void createNewConversation()} title="Start a new chat"><span>＋</span> New</button><button type="button" onClick={() => setHistoryOpen(true)}><span>☰</span> History</button></div></div>
-            <div className="chat-body" ref={chatBodyRef} onWheelCapture={(event) => { if (event.deltaY < 0) pauseChatFollow(); }} onTouchMove={pauseChatFollow} onPointerDown={(event) => { if (event.target === event.currentTarget) pauseChatFollow(); }} onScroll={(event) => { const element = event.currentTarget; followOutputRef.current = element.scrollHeight - element.scrollTop - element.clientHeight < 40; }}><div className="chat-heading"><span className="spark">✦</span><div><strong>Ask about this paper</strong><p>The full paper is available automatically. Select text only when you want to focus the answer.</p></div></div>{chatConfigured === false && <button type="button" className="no-key-notice" onClick={() => setSettingsOpen(true)}><strong>No API key configured</strong><span>Choose a provider and add a key in Settings to enable chat.</span></button>}
-              {chatHistory.map((turn) => <div className="chat-turn" key={turn.id}><ContextList selections={turn.context} /><div className="user-message"><span>You</span><p>{turn.question}</p></div><div className="answer-card complete"><div className="answer-meta"><span>Adam</span><span className="stream-state">Done</span></div><MarkdownAnswer>{turn.answer}</MarkdownAnswer></div></div>)}
+            <div className="chat-body" ref={chatBodyRef} onWheelCapture={(event) => { if (event.deltaY < 0) pauseChatFollow(); }} onTouchMove={pauseChatFollow} onPointerDown={(event) => { if (event.target === event.currentTarget) pauseChatFollow(); }} onScroll={(event) => { const element = event.currentTarget; followOutputRef.current = element.scrollHeight - element.scrollTop - element.clientHeight < 40; }}><div className="chat-heading"><span className="spark">✦</span><div><strong>{activeConversation?.context_builder_version === 'quick-ask-v1' ? 'Saved Quick Ask' : 'Ask about this paper'}</strong><p>{activeConversation?.context_builder_version === 'quick-ask-v1' ? 'This saved thread uses only its original selection and Quick Ask prompt.' : 'The full paper is available automatically. Select text only when you want to focus the answer.'}</p></div></div>{chatConfigured === false && <button type="button" className="no-key-notice" onClick={() => setSettingsOpen(true)}><strong>No API key configured</strong><span>Choose a provider and add a key in Settings to enable chat.</span></button>}
+              {chatHistory.map((turn) => <div className="chat-turn" key={turn.id}>{turn.importedQuickAsk && <div className="quick-import-badge">✦ Saved Quick Ask · selection only</div>}<ContextList selections={turn.context} /><div className="user-message"><span>You</span><p>{turn.question}</p></div><div className="answer-card complete"><div className="answer-meta"><span>Adam</span><span className="stream-state">Done</span></div><MarkdownAnswer>{turn.answer}</MarkdownAnswer></div></div>)}
               {submittedQuestion && <><ContextList selections={submittedContext} /><div className="user-message"><span>You</span><p>{submittedQuestion}</p></div></>}
               {streamStatus !== 'idle' && streamStatus !== 'error' && <div className={`answer-card ${streamStatus}`} aria-live="polite"><div className="answer-meta"><span>Adam</span><span className="stream-state">{streamStatus === 'connecting' ? <>Thinking<span className="thinking-dots"><i /><i /><i /></span></> : streamStatus === 'streaming' ? 'Responding…' : 'Done'}</span></div>{answer ? <MarkdownAnswer streaming={streamStatus === 'streaming'}>{answer}</MarkdownAnswer> : <div className="answer-skeleton"><i /><i /><i /></div>}</div>}{error && <p className="error-banner compact">{error}</p>}
               {contextSelections.length > 0 ? <ContextList selections={contextSelections} onRemove={(id) => setContextSelections((current) => current.filter((item) => item.id !== id))} /> : !submittedQuestion && chatHistory.length === 0 && <div className="empty-context"><span>✦</span><p>Ask anything about the paper, or select a passage for precise focus.</p></div>}
             </div>
-            <form className="composer" onSubmit={ask}><textarea ref={composerRef} value={question} onChange={(event) => setQuestion(event.target.value)} onKeyDown={(event) => { if (event.key === 'Enter' && !event.shiftKey && !event.nativeEvent.isComposing) { event.preventDefault(); event.currentTarget.form?.requestSubmit(); } }} placeholder={chatConfigured === false ? 'Add an API key in Settings to chat…' : contextSelections.length ? 'Ask about your context…' : 'Ask anything about this paper…'} disabled={!canAsk || asking} rows={3} /><div><span>{chatConfigured === false ? 'Chat unavailable' : contextSelections.length ? `${contextSelections.length} context ${contextSelections.length === 1 ? 'item' : 'items'}` : 'Full paper context'}</span><button type="submit" disabled={!canAsk || !question.trim() || asking}>{asking ? '…' : '↑'}</button></div></form>
+            <form className="composer" onSubmit={ask}><textarea ref={composerRef} value={question} onChange={(event) => setQuestion(event.target.value)} onKeyDown={(event) => { if (event.key === 'Enter' && !event.shiftKey && !event.nativeEvent.isComposing) { event.preventDefault(); event.currentTarget.form?.requestSubmit(); } }} placeholder={chatConfigured === false ? 'Add an API key in Settings to chat…' : activeConversation?.context_builder_version === 'quick-ask-v1' ? 'Continue this saved Quick Ask…' : contextSelections.length ? 'Ask about your context…' : 'Ask anything about this paper…'} disabled={!canAsk || asking} rows={3} /><div><span>{chatConfigured === false ? 'Chat unavailable' : activeConversation?.context_builder_version === 'quick-ask-v1' ? 'Selection-only context' : contextSelections.length ? `${contextSelections.length} context ${contextSelections.length === 1 ? 'item' : 'items'}` : 'Full paper context'}</span><button type="submit" disabled={!canAsk || !question.trim() || asking}>{asking ? '…' : '↑'}</button></div></form>
           </>}
         </aside>
       </div>
-      {pendingSelection && <div className="selection-toolbar" style={{ left: pendingSelection.x, top: pendingSelection.y }} onMouseDown={(event) => event.preventDefault()} role="toolbar" aria-label="Text selection actions"><div className="highlight-colors" aria-label="Highlight color">{HIGHLIGHT_COLORS.map(({ color, label, key }) => <button type="button" className="color-swatch" style={{ backgroundColor: color }} aria-label={`Highlight ${label.toLowerCase()} (${key})`} aria-keyshortcuts={key} title={`${label} highlight · ${key}`} onClick={() => applyHighlight(color)} key={color}><kbd>{key}</kbd></button>)}</div><span className="toolbar-divider" /><button type="button" className="toolbar-action primary" aria-keyshortcuts="C" onClick={addSelectionToContext}><span>＋</span>Add to context <kbd>C</kbd></button><button type="button" className="toolbar-action" disabled title="Coming soon"><span>✦</span>Ask <small>Beta</small></button><button type="button" className="toolbar-action" disabled title="Coming soon"><span>▱</span>Note <small>Beta</small></button></div>}
+      {pendingSelection && <div className="selection-toolbar" style={{ left: pendingSelection.x, top: pendingSelection.y }} onMouseDown={(event) => event.preventDefault()} role="toolbar" aria-label="Text selection actions"><div className="highlight-colors" aria-label="Highlight color">{HIGHLIGHT_COLORS.map(({ color, label, key }) => <button type="button" className="color-swatch" style={{ backgroundColor: color }} aria-label={`Highlight ${label.toLowerCase()} (${key})`} aria-keyshortcuts={key} title={`${label} highlight · ${key}`} onClick={() => applyHighlight(color)} key={color}><kbd>{key}</kbd></button>)}</div><span className="toolbar-divider" /><button type="button" className="toolbar-action primary" aria-keyshortcuts="C" onClick={addSelectionToContext}><span>＋</span>Add to context <kbd>C</kbd></button><button type="button" className="toolbar-action" aria-keyshortcuts="A" onClick={openQuickAskFromSelection}><span>✦</span>Ask AI <kbd>A</kbd></button><button type="button" className="toolbar-action" disabled title="Coming soon"><span>▱</span>Note <small>Beta</small></button></div>}
+      {quickAskTarget && <form className="quick-ask-popover" style={{ left: quickAskTarget.x, top: quickAskTarget.y }} onSubmit={submitQuickAsk}><div className="quick-ask-head" onPointerDown={beginQuickDrag} onPointerMove={moveQuickDrag} onPointerUp={endQuickDrag} onPointerCancel={endQuickDrag}><span>⠿</span><span>✦ Quick Ask</span><small>{activeConversation?.model_id}</small><button type="button" aria-label="Close Quick Ask" onClick={closeQuickAsk}>×</button></div><div className={`quick-ask-context${quickAskTarget.imageDataUrl ? ' image' : ''}`}>{quickAskTarget.imageDataUrl ? <img src={quickAskTarget.imageDataUrl} alt="Selected PDF area" /> : <blockquote>{quickAskTarget.text}</blockquote>}</div><div className="quick-thread" ref={quickThreadRef} onWheelCapture={(event) => { if (event.deltaY < 0) quickFollowRef.current = false; }} onTouchMove={() => { quickFollowRef.current = false; }} onScroll={(event) => { const element = event.currentTarget; quickFollowRef.current = element.scrollHeight - element.scrollTop - element.clientHeight < 24; }}>{quickTurns.map((turn, index) => <div className="quick-turn" key={index}><div className="quick-user">{turn.question}</div><MarkdownAnswer>{turn.answer}</MarkdownAnswer></div>)}{(quickActiveQuestion && (quickAnswer || quickAsking)) && <div className="quick-turn"><div className="quick-user">{quickActiveQuestion}</div>{quickAnswer ? <MarkdownAnswer streaming={quickAsking}>{quickAnswer}</MarkdownAnswer> : <div className="answer-skeleton"><i /><i /><i /></div>}</div>}</div><div className="quick-ask-entry"><input ref={quickAskInputRef} value={quickQuestion} onChange={(event) => setQuickQuestion(event.target.value)} placeholder={quickTurns.length || quickAnswer ? 'Ask a follow-up…' : 'What would you like clarified?'} disabled={quickAsking} /><button type="submit" disabled={!quickQuestion.trim() || quickAsking}>{quickAsking ? '…' : '↑'}</button></div>{quickError && <p className="quick-ask-error">{quickError}</p>}<div className="quick-ask-footer"><span>Only this selection + this thread</span><div><button type="button" onClick={addQuickTargetToContext} disabled={quickAsking || quickImporting}>＋ Context <kbd>C</kbd></button><button type="button" className="move-to-chat" onClick={() => void importQuickAsk()} disabled={quickAsking || quickImporting || (!quickTurns.length && !quickAnswer)}>{quickImporting ? 'Saving…' : 'Save as new chat →'}</button></div></div></form>}
       {settingsOpen && <SettingsDialog onClose={closeSettings} />}
     </main>
   );
@@ -1009,6 +1124,10 @@ function contextFromJson(value: string | null): ContextSelection[] {
     for (const image of context.images ?? []) items.push({ id: crypto.randomUUID(), text: 'Selected PDF area', page: image.page ?? null, imageDataUrl: image.data_url });
     return items;
   } catch { return []; }
+}
+
+function contextScope(value: string | null): string | null {
+  try { return value ? (JSON.parse(value) as { scope?: string }).scope ?? null : null; } catch { return null; }
 }
 
 function formatConversationDate(value: string) {
@@ -1118,6 +1237,8 @@ function SettingsDialog({ onClose }: { onClose: () => void }) {
   const [saving, setSaving] = useState(false);
   const [loadingModels, setLoadingModels] = useState(false);
   const [systemPrompt, setSystemPrompt] = useState('');
+  const [quickAskPrompt, setQuickAskPrompt] = useState('');
+  const [promptKind, setPromptKind] = useState<'chat' | 'quick'>('chat');
   const [settingsTab, setSettingsTab] = useState<'providers' | 'system'>('providers');
   const dialogRef = useRef<HTMLDivElement>(null);
 
@@ -1129,6 +1250,7 @@ function SettingsDialog({ onClose }: { onClose: () => void }) {
       setProvider(value.provider);
       setModel(value.model);
       setSystemPrompt(value.system_prompt);
+      setQuickAskPrompt(value.quick_ask_prompt);
     }).catch((reason) => setStatus(reason instanceof Error ? reason.message : 'Could not load settings.'));
   }, []);
 
@@ -1181,13 +1303,13 @@ function SettingsDialog({ onClose }: { onClose: () => void }) {
   }
 
   async function saveSystemPrompt() {
-    if (!settings || !systemPrompt.trim()) return;
+    if (!settings || !systemPrompt.trim() || !quickAskPrompt.trim()) return;
     setSaving(true); setStatus('');
     try {
-      const response = await fetch(`${API_BASE}/api/settings`, { method: 'PUT', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ provider: settings.provider, model: settings.model, api_keys: {}, favorites: settings.favorites, system_prompt: systemPrompt.trim() }) });
+      const response = await fetch(`${API_BASE}/api/settings`, { method: 'PUT', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ provider: settings.provider, model: settings.model, api_keys: {}, favorites: settings.favorites, system_prompt: systemPrompt.trim(), quick_ask_prompt: quickAskPrompt.trim() }) });
       const value = await response.json() as AppSettings;
       if (!response.ok) throw new Error((value as unknown as { detail?: string }).detail ?? 'Could not save system prompt.');
-      setSettings(value); setSystemPrompt(value.system_prompt); setStatus('System prompt saved');
+      setSettings(value); setSystemPrompt(value.system_prompt); setQuickAskPrompt(value.quick_ask_prompt); setStatus('System prompt saved');
     } catch (reason) { setStatus(reason instanceof Error ? reason.message : 'Could not save system prompt.'); }
     finally { setSaving(false); }
   }
@@ -1230,9 +1352,9 @@ function SettingsDialog({ onClose }: { onClose: () => void }) {
           <div className="selected-model-summary"><span>{settings?.provider === provider ? 'Currently in use' : 'Saved model for this provider'}</span><strong>{activeModel || 'No model selected'}</strong><small>{settings?.provider === provider ? 'In use' : providerInfo.name}</small></div>
           {hasPendingModel && <div className="pending-model-choice"><span>Pending selection</span><strong>{model}</strong><small>Click “Apply model” to use it</small></div>}
           <div className="model-picker"><div className="model-picker-head"><label>Browse models</label><input type="search" value={query} onChange={(event) => setQuery(event.target.value)} placeholder="Search models…" /></div>{visibleModels.length ? <div className="model-list">{pinnedModels.length > 0 && <div className="model-group-label"><span>★ Pinned</span><small>{pinnedModels.length}</small></div>}{pinnedModels.map(modelRow)}{otherModels.length > 0 && pinnedModels.length > 0 && <div className="model-group-label all-models"><span>All models</span><small>{otherModels.length}</small></div>}{otherModels.map(modelRow)}</div> : <div className="model-empty">{loadingModels ? 'Loading models…' : settings?.providers[provider] ? 'Refresh to load models from this provider.' : 'Connect an API key to browse models.'}</div>}</div>
-        </div> : <div className="system-prompt-page"><span className="settings-kicker">Assistant behavior</span><h3>System prompt</h3><p>This Markdown prompt is sent with every chat. Edit it to control how Adam reads context and writes answers.</p><label htmlFor="system-prompt-editor">Prompt</label><textarea id="system-prompt-editor" value={systemPrompt} onChange={(event) => setSystemPrompt(event.target.value)} spellCheck rows={16} /></div>}
+        </div> : <div className="system-prompt-page"><span className="settings-kicker">Assistant behavior</span><h3>System prompts</h3><div className="prompt-kind-tabs"><button type="button" className={promptKind === 'chat' ? 'active' : ''} onClick={() => setPromptKind('chat')}>Chat</button><button type="button" className={promptKind === 'quick' ? 'active' : ''} onClick={() => setPromptKind('quick')}>Quick Ask</button></div><p>{promptKind === 'chat' ? 'Sent with every full chat. Controls how Adam reads paper context and writes answers.' : 'Sent only for inline questions. Quick Ask receives the selected excerpt or screenshot and nothing else.'}</p><label htmlFor="system-prompt-editor">{promptKind === 'chat' ? 'Chat prompt' : 'Quick Ask prompt'}</label><textarea id="system-prompt-editor" value={promptKind === 'chat' ? systemPrompt : quickAskPrompt} onChange={(event) => promptKind === 'chat' ? setSystemPrompt(event.target.value) : setQuickAskPrompt(event.target.value)} spellCheck rows={16} /></div>}
       </div>
-      <div className="settings-footer"><span role="status" className={status.includes('active') || status.includes('saved') ? 'save-success' : ''}>{status}</span><div><kbd>Esc</kbd><button type="button" className="secondary-button" onClick={onClose}>Close</button>{settingsTab === 'providers' ? <button type="button" className="primary-button" disabled={!settings || !hasPendingModel || saving || !settings.providers[provider]} onClick={() => void persist()}>{saving ? 'Applying…' : 'Apply model'}</button> : <button type="button" className="primary-button" disabled={!settings || !systemPrompt.trim() || systemPrompt.trim() === settings.system_prompt || saving} onClick={() => void saveSystemPrompt()}>{saving ? 'Saving…' : 'Save prompt'}</button>}</div></div>
+      <div className="settings-footer"><span role="status" className={status.includes('active') || status.includes('saved') ? 'save-success' : ''}>{status}</span><div><kbd>Esc</kbd><button type="button" className="secondary-button" onClick={onClose}>Close</button>{settingsTab === 'providers' ? <button type="button" className="primary-button" disabled={!settings || !hasPendingModel || saving || !settings.providers[provider]} onClick={() => void persist()}>{saving ? 'Applying…' : 'Apply model'}</button> : <button type="button" className="primary-button" disabled={!settings || !systemPrompt.trim() || !quickAskPrompt.trim() || (systemPrompt.trim() === settings.system_prompt && quickAskPrompt.trim() === settings.quick_ask_prompt) || saving} onClick={() => void saveSystemPrompt()}>{saving ? 'Saving…' : 'Save prompt'}</button>}</div></div>
     </div>
   </div>;
 }

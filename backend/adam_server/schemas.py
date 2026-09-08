@@ -64,6 +64,17 @@ class ChatRequest(BaseModel):
     images: list[ContextImageIn] = Field(default_factory=list, max_length=6)
 
 
+class QuickAskRequest(ChatRequest):
+    history: list[ChatTurnIn] = Field(default_factory=list, max_length=30)
+
+
+class QuickAskImportRequest(BaseModel):
+    selected_text: str = Field(default="", max_length=30000)
+    page: int | None = Field(default=None, ge=1)
+    images: list[ContextImageIn] = Field(default_factory=list, max_length=6)
+    turns: list[ChatTurnIn] = Field(min_length=1, max_length=30)
+
+
 class ConversationCreate(BaseModel):
     title: str | None = Field(default=None, max_length=200)
 
@@ -105,6 +116,7 @@ class AppSettingsOut(BaseModel):
     providers: dict[str, bool]
     favorites: dict[str, list[str]]
     system_prompt: str
+    quick_ask_prompt: str
 
 
 class AppSettingsUpdate(BaseModel):
@@ -113,6 +125,7 @@ class AppSettingsUpdate(BaseModel):
     api_keys: dict[str, str | None] = Field(default_factory=dict)
     favorites: dict[str, list[str]] = Field(default_factory=dict)
     system_prompt: str | None = Field(default=None, min_length=1, max_length=20000)
+    quick_ask_prompt: str | None = Field(default=None, min_length=1, max_length=20000)
 
 
 class ProviderModelsOut(BaseModel):

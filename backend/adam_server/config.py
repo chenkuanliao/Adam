@@ -18,6 +18,16 @@ DEFAULT_SYSTEM_PROMPT = SYSTEM_PROMPT_BASE + """- Format responses in Markdown t
 - Prefer Markdown tables when presenting comparisons or other information that is clearer in rows and columns.
 - Cite paper-based claims using the supplied page number and, when identifiable, the section name. Put the citation at the end of the relevant sentence or paragraph in a concise form such as `(p. 5)` or `(Section 3.2, p. 5)`. Never invent a page or section, and clearly distinguish paper evidence from user-provided context or your own interpretation.
 """
+DEFAULT_QUICK_ASK_PROMPT = """# Adam Quick Ask
+
+You clarify a single user-selected excerpt or screenshot from a research paper.
+
+- Use only the supplied selection. Never assume access to the rest of the paper or prior conversation.
+- Answer the user's exact question directly and concisely.
+- Explain notation and technical language in plain language while preserving accuracy.
+- If the selection is insufficient, say what cannot be determined from it.
+- Render clean Markdown and use `$...$` or `$$...$$` for mathematics.
+"""
 LEGACY_SYSTEM_PROMPT = SYSTEM_PROMPT_BASE + "- Use Markdown that renders cleanly in chat: short paragraphs, headings only when useful, bullet or numbered lists for structure, fenced code blocks for code, tables only for compact comparisons, and LaTeX for equations.\n"
 
 
@@ -76,6 +86,11 @@ class Settings(BaseSettings):
             return DEFAULT_SYSTEM_PROMPT
         return prompt if isinstance(prompt, str) and prompt.strip() else DEFAULT_SYSTEM_PROMPT
 
+    @property
+    def quick_ask_prompt(self) -> str:
+        prompt = self.runtime_settings.get("quick_ask_prompt")
+        return prompt if isinstance(prompt, str) and prompt.strip() else DEFAULT_QUICK_ASK_PROMPT
+
     def provider_api_key(self, provider: str) -> str | None:
         key = self.runtime_settings.get("api_keys", {}).get(provider)
         if key:
@@ -84,7 +99,7 @@ class Settings(BaseSettings):
             return self.resolved_opencode_api_key
         return None
 
-    def save_runtime_settings(self, provider: str, model: str, api_keys: dict[str, str | None], favorites: dict[str, list[str]], system_prompt: str | None = None) -> None:
+    def save_runtime_settings(self, provider: str, model: str, api_keys: dict[str, str | None], favorites: dict[str, list[str]], system_prompt: str | None = None, quick_ask_prompt: str | None = None) -> None:
         values = self.runtime_settings
         values["provider"] = provider
         values["model"] = model
@@ -100,6 +115,8 @@ class Settings(BaseSettings):
         values["favorites"] = {name: list(dict.fromkeys(models))[:50] for name, models in favorites.items()}
         if system_prompt is not None:
             values["system_prompt"] = system_prompt.strip()
+        if quick_ask_prompt is not None:
+            values["quick_ask_prompt"] = quick_ask_prompt.strip()
         temporary = self.runtime_settings_path.with_suffix(".tmp")
         temporary.write_text(json.dumps(values, indent=2) + "\n", encoding="utf-8")
         os.chmod(temporary, 0o600)

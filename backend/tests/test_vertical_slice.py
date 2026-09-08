@@ -96,15 +96,17 @@ def test_settings_are_persisted_without_exposing_the_key() -> None:
     assert initial.json()["provider"] == "zen"
     assert "You are Adam" in initial.json()["system_prompt"]
     assert "`$$...$$`" in initial.json()["system_prompt"]
+    assert "Adam Quick Ask" in initial.json()["quick_ask_prompt"]
     assert "api_key" not in initial.json()
 
-    saved = client.put("/api/settings", json={"provider": "openai", "model": "gpt-5.6-luna", "api_keys": {"openai": "local-test-secret"}, "favorites": {"openai": ["gpt-5.6-luna"]}, "system_prompt": "You are Adam. Use only the supplied context."})
+    saved = client.put("/api/settings", json={"provider": "openai", "model": "gpt-5.6-luna", "api_keys": {"openai": "local-test-secret"}, "favorites": {"openai": ["gpt-5.6-luna"]}, "system_prompt": "You are Adam. Use only the supplied context.", "quick_ask_prompt": "Explain only the selected item."})
     assert saved.status_code == 200
     assert saved.json()["provider"] == "openai"
     assert saved.json()["selected_models"]["openai"] == "gpt-5.6-luna"
     assert saved.json()["providers"]["openai"] is True
     assert saved.json()["favorites"]["openai"] == ["gpt-5.6-luna"]
     assert saved.json()["system_prompt"] == "You are Adam. Use only the supplied context."
+    assert saved.json()["quick_ask_prompt"] == "Explain only the selected item."
     assert "local-test-secret" not in saved.text
 
     unstarred = client.post("/api/settings/favorite", json={"provider": "openai", "model": "gpt-5.6-luna", "starred": False})
@@ -150,6 +152,33 @@ def test_paper_context_and_history_are_owned_by_the_backend(monkeypatch) -> None
     second = client.post(f"/api/conversations/{conversation['id']}/messages/stream", json={"question": "Explain that further."})
     assert second.status_code == 200
     assert captured[1][1] == 1
+    messages_before_quick_ask = len(client.get(f"/api/conversations/{conversation['id']}").json()["messages"])
+    quick = client.post(f"/api/conversations/{conversation['id']}/quick-ask/stream", json={"question": "What does this mean?", "selected_text": "Attention lets a model weigh relevant context.", "page": 1})
+    assert quick.status_code == 200
+    assert captured[2][1] == 0
+    assert "weigh relevant context" not in captured[2][0]
+    assert captured[2][0] == "Explain only the selected item."
+    assert len(client.get(f"/api/conversations/{conversation['id']}").json()["messages"]) == messages_before_quick_ask
+    follow_up = client.post(f"/api/conversations/{conversation['id']}/quick-ask/stream", json={"question": "Can you simplify that?", "selected_text": "Attention lets a model weigh relevant context.", "page": 1, "history": [{"question": "What does this mean?", "answer": "It explains attention.", "page": 1}]})
+    assert follow_up.status_code == 200
+    assert captured[3][1] == 1
+    context_only_in_history = client.post(f"/api/conversations/{conversation['id']}/quick-ask/stream", json={"question": "And why is that useful?", "page": 1, "history": [{"question": "What does this mean?", "answer": "It explains attention.", "selected_text": "Attention lets a model weigh relevant context.", "page": 1}]})
+    assert context_only_in_history.status_code == 200
+    assert captured[4][1] == 1
+    imported = client.post(f"/api/conversations/{conversation['id']}/quick-ask/import", json={"selected_text": "Attention lets a model weigh relevant context.", "page": 1, "turns": [{"question": "What does this mean?", "answer": "It means relevant inputs receive more weight."}, {"question": "Can you simplify that?", "answer": "It focuses on useful inputs."}]})
+    assert imported.status_code == 201
+    saved_quick_chat = imported.json()
+    assert saved_quick_chat["id"] != conversation["id"]
+    assert saved_quick_chat["context_builder_version"] == "quick-ask-v1"
+    saved_after_import = client.get(f"/api/conversations/{saved_quick_chat['id']}").json()
+    assert len(saved_after_import["messages"]) == 4
+    assert "quick_ask_saved" in saved_after_import["messages"][0]["context_json"]
+    assert "weigh relevant context" not in saved_after_import["messages"][2]["context_json"]
+    assert len(client.get(f"/api/conversations/{conversation['id']}").json()["messages"]) == messages_before_quick_ask
+    continued = client.post(f"/api/conversations/{saved_quick_chat['id']}/messages/stream", json={"question": "One more follow-up."})
+    assert continued.status_code == 200
+    assert captured[5][0] == "Explain only the selected item."
+    assert captured[5][1] == 2
     saved = client.get(f"/api/conversations/{conversation['id']}").json()
     assert saved["title"] == "What does the paper say?"
     assert [message["role"] for message in saved["messages"]] == ["user", "assistant", "user", "assistant"]
