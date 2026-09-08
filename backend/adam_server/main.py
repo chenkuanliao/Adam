@@ -14,7 +14,7 @@ import httpx
 from .config import Settings, get_settings
 from .database import SessionLocal, get_db, run_migrations
 from .models import Annotation, Conversation, Document, Message, ModelFavorite, Page
-from .schemas import AnnotationIn, AnnotationOut, AppSettingsOut, AppSettingsUpdate, ChatRequest, ConversationCreate, ConversationDetail, ConversationOut, ConversationUpdate, DocumentOut, DocumentUpdate, ModelFavoriteUpdate, PageTextOut, ProviderKeyUpdate, ProviderModelsOut, QuickAskImportRequest, QuickAskRequest
+from .schemas import AnnotationIn, AnnotationOut, AnnotationUpdate, AppSettingsOut, AppSettingsUpdate, ChatRequest, ConversationCreate, ConversationDetail, ConversationOut, ConversationUpdate, DocumentOut, DocumentUpdate, ModelFavoriteUpdate, PageTextOut, ProviderKeyUpdate, ProviderModelsOut, QuickAskImportRequest, QuickAskRequest
 from .services.context import build_paper_context
 from .services.documents import ingest_pdf
 from .services.llm import AnthropicProvider, GoogleProvider, OpenAICompatibleProvider, OpenAIResponsesProvider, generate_zen_title, sse
@@ -229,7 +229,7 @@ def list_annotations(document_id: str, db: Session = Depends(get_db)) -> list[An
     if not db.get(Document, document_id):
         raise HTTPException(404, "Document not found.")
     annotations = db.scalars(select(Annotation).where(Annotation.document_id == document_id).order_by(Annotation.created_at)).all()
-    return [AnnotationOut(id=item.id, page=item.page_number, text=item.selected_text, color=item.color, rects=json.loads(item.geometry_json), created_at=item.created_at) for item in annotations]
+    return [AnnotationOut(id=item.id, page=item.page_number, text=item.selected_text, color=item.color, rects=json.loads(item.geometry_json), note_text=item.note_text, created_at=item.created_at) for item in annotations]
 
 
 @app.post("/api/documents/{document_id}/annotations", response_model=AnnotationOut, status_code=201)
@@ -240,12 +240,26 @@ def create_annotation(document_id: str, request: AnnotationIn, db: Session = Dep
     if existing:
         if existing.document_id != document_id:
             raise HTTPException(409, "Annotation id already exists.")
-        return AnnotationOut(id=existing.id, page=existing.page_number, text=existing.selected_text, color=existing.color, rects=json.loads(existing.geometry_json), created_at=existing.created_at)
-    annotation = Annotation(id=request.id, document_id=document_id, page_number=request.page, kind="highlight", selected_text=request.text, color=request.color, geometry_json=json.dumps([rect.model_dump() for rect in request.rects]))
+        return AnnotationOut(id=existing.id, page=existing.page_number, text=existing.selected_text, color=existing.color, rects=json.loads(existing.geometry_json), note_text=existing.note_text, created_at=existing.created_at)
+    annotation = Annotation(id=request.id, document_id=document_id, page_number=request.page, kind="note" if request.note_text is not None else "highlight", selected_text=request.text, color=request.color, geometry_json=json.dumps([rect.model_dump() for rect in request.rects]), note_text=request.note_text)
     db.add(annotation)
     db.commit()
     db.refresh(annotation)
-    return AnnotationOut(id=annotation.id, page=annotation.page_number, text=annotation.selected_text, color=annotation.color, rects=request.rects, created_at=annotation.created_at)
+    return AnnotationOut(id=annotation.id, page=annotation.page_number, text=annotation.selected_text, color=annotation.color, rects=request.rects, note_text=annotation.note_text, created_at=annotation.created_at)
+
+
+@app.patch("/api/documents/{document_id}/annotations/{annotation_id}", response_model=AnnotationOut)
+def update_annotation(document_id: str, annotation_id: str, request: AnnotationUpdate, db: Session = Depends(get_db)) -> AnnotationOut:
+    annotation = db.get(Annotation, annotation_id)
+    if not annotation or annotation.document_id != document_id:
+        raise HTTPException(404, "Annotation not found.")
+    annotation.note_text = request.note_text
+    if request.color is not None:
+        annotation.color = request.color
+    annotation.kind = "note" if request.note_text else "highlight"
+    db.commit()
+    db.refresh(annotation)
+    return AnnotationOut(id=annotation.id, page=annotation.page_number, text=annotation.selected_text, color=annotation.color, rects=json.loads(annotation.geometry_json), note_text=annotation.note_text, created_at=annotation.created_at)
 
 
 @app.delete("/api/documents/{document_id}/annotations/{annotation_id}", status_code=204)

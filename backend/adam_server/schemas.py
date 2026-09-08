@@ -38,10 +38,16 @@ class AnnotationIn(BaseModel):
     text: str = Field(min_length=1, max_length=30000)
     color: str = Field(pattern=r"^#[0-9a-fA-F]{6}$")
     rects: list[HighlightRect] = Field(min_length=1, max_length=500)
+    note_text: str | None = Field(default=None, max_length=30000)
 
 
 class AnnotationOut(AnnotationIn):
     created_at: datetime
+
+
+class AnnotationUpdate(BaseModel):
+    note_text: str = Field(max_length=30000)
+    color: str | None = Field(default=None, pattern=r"^#[0-9a-fA-F]{6}$")
 
 
 class ContextImageIn(BaseModel):

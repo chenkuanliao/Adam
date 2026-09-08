@@ -22,7 +22,8 @@ type PendingSelection = ContextSelection & { x: number; y: number; range: Range 
 type QuickAskTarget = ContextSelection & { x: number; y: number };
 type ScreenshotDrag = { startContentX: number; startContentY: number; currentContentX: number; currentContentY: number; overlayLeft: number; overlayTop: number; overlayWidth: number; overlayHeight: number };
 type HighlightRect = { left: number; top: number; width: number; height: number };
-type HighlightEntry = ContextSelection & { color: string; range: Range | null; rects: HighlightRect[] };
+type HighlightEntry = ContextSelection & { color: string; range: Range | null; rects: HighlightRect[]; note_text?: string | null };
+type NoteEditor = { entry: HighlightEntry; text: string; x: number; y: number };
 type StreamStatus = 'idle' | 'connecting' | 'streaming' | 'complete' | 'error';
 type ChatTurn = { id: string; question: string; answer: string; context: ContextSelection[]; importedQuickAsk?: boolean };
 type QuickTurn = { question: string; answer: string };
@@ -46,6 +47,7 @@ const MAX_CHAT_SCALE = 1.35;
 const CHAT_SCALE_STEP = .1;
 const DEFAULT_CHAT_SCALE = 1.2;
 const BASE_PAGE_WIDTH = 760;
+const NOTE_RAIL_WIDTH = 268;
 const DEFAULT_PAPER_PERCENT = 68;
 const MIN_PAPER_PERCENT = 52;
 const HIGHLIGHT_COLORS = [
@@ -53,6 +55,13 @@ const HIGHLIGHT_COLORS = [
   { color: '#bfe6cd', label: 'Green', key: '2' },
   { color: '#bcdcf4', label: 'Blue', key: '3' },
   { color: '#e6c8ed', label: 'Purple', key: '4' },
+] as const;
+const NOTE_COLORS = [
+  { color: '#d6a629', label: 'Gold' },
+  { color: '#5b9b72', label: 'Green' },
+  { color: '#4d8fbd', label: 'Blue' },
+  { color: '#9a6aaa', label: 'Purple' },
+  { color: '#c76f62', label: 'Coral' },
 ] as const;
 
 export default function Home() {
@@ -72,6 +81,9 @@ export default function Home() {
   const [screenshotMode, setScreenshotMode] = useState(false);
   const [screenshotDrag, setScreenshotDrag] = useState<ScreenshotDrag | null>(null);
   const [highlightEntries, setHighlightEntries] = useState<HighlightEntry[]>([]);
+  const [noteEditor, setNoteEditor] = useState<NoteEditor | null>(null);
+  const [notesVisible, setNotesVisible] = useState(false);
+  const [noteSaving, setNoteSaving] = useState(false);
   const [question, setQuestion] = useState('');
   const [submittedQuestion, setSubmittedQuestion] = useState('');
   const [submittedContext, setSubmittedContext] = useState<ContextSelection[]>([]);
@@ -104,6 +116,7 @@ export default function Home() {
   const quickThreadRef = useRef<HTMLDivElement>(null);
   const quickFollowRef = useRef(true);
   const quickDragRef = useRef<{ pointerId: number; offsetX: number; offsetY: number } | null>(null);
+  const noteDragRef = useRef<{ pointerId: number; offsetX: number; offsetY: number } | null>(null);
   const focusComposerAfterContextRef = useRef(false);
   const followOutputRef = useRef(true);
   const autoScrollFrameRef = useRef<number | null>(null);
@@ -114,6 +127,8 @@ export default function Home() {
   const revealTimerRef = useRef<number | null>(null);
   const streamFinishedRef = useRef(false);
   const zoomRef = useRef(DEFAULT_ZOOM);
+  const notesVisibleRef = useRef(false);
+  const zoomBeforeNotesRef = useRef<number | null>(null);
   const highlightIdsRef = useRef<string[]>([]);
   const highlightEntriesRef = useRef<HighlightEntry[]>([]);
   const highlightUndoRef = useRef<HighlightEntry[][]>([]);
@@ -167,11 +182,25 @@ export default function Home() {
     if (!viewer) return;
     const styles = window.getComputedStyle(viewer);
     const horizontalPadding = parseFloat(styles.paddingLeft) + parseFloat(styles.paddingRight);
-    const availableWidth = viewer.clientWidth - horizontalPadding;
+    const availableWidth = viewer.clientWidth - horizontalPadding - (notesVisibleRef.current ? NOTE_RAIL_WIDTH : 0);
     if (availableWidth <= 0) return;
     const fittedZoom = Math.min(MAX_ZOOM, Math.max(MIN_ZOOM, availableWidth / BASE_PAGE_WIDTH));
     changeZoom(fittedZoom - zoomRef.current);
   }, [changeZoom]);
+
+  function toggleNotes() {
+    const opening = !notesVisibleRef.current;
+    notesVisibleRef.current = opening;
+    setNotesVisible(opening);
+    if (opening) {
+      zoomBeforeNotesRef.current = zoomRef.current;
+      window.requestAnimationFrame(() => fitPaperToPane());
+    } else {
+      const previousZoom = zoomBeforeNotesRef.current;
+      zoomBeforeNotesRef.current = null;
+      if (previousZoom !== null) window.requestAnimationFrame(() => changeZoom(previousZoom - zoomRef.current));
+    }
+  }
 
   const changeChatScale = useCallback((delta: number) => {
     setChatScale((current) => Math.min(MAX_CHAT_SCALE, Math.max(MIN_CHAT_SCALE, Number((current + delta).toFixed(2)))));
@@ -475,6 +504,10 @@ export default function Home() {
     setPages(0);
     setContextSelections([]);
     setPendingSelection(null);
+    setNoteEditor(null);
+    setNotesVisible(false);
+    notesVisibleRef.current = false;
+    zoomBeforeNotesRef.current = null;
     clearHighlights();
     setQuestion('');
     setSubmittedQuestion('');
@@ -598,7 +631,7 @@ export default function Home() {
     try {
       const response = await fetch(`${API_BASE}/api/documents/${documentId}/annotations`);
       if (!response.ok) throw new Error('Could not load saved highlights.');
-      const annotations = await response.json() as Array<{ id: string; page: number; text: string; color: string; rects: HighlightRect[] }>;
+      const annotations = await response.json() as Array<{ id: string; page: number; text: string; color: string; rects: HighlightRect[]; note_text?: string | null }>;
       const entries = annotations.map((item) => ({ ...item, range: null }));
       highlightEntriesRef.current = entries;
       highlightUndoRef.current = [];
@@ -853,6 +886,91 @@ export default function Home() {
     clearBrowserSelection();
   }
 
+  function openNoteFromSelection() {
+    if (!pendingSelection) return;
+    const { id, text, page, range } = pendingSelection;
+    const pageElement = (range.startContainer.nodeType === Node.ELEMENT_NODE ? range.startContainer as Element : range.startContainer.parentElement)?.closest<HTMLElement>('.react-pdf__Page');
+    if (!pageElement) return;
+    const entry: HighlightEntry = { id, text, page, range, color: NOTE_COLORS[0].color, rects: getHighlightRects(range, pageElement), note_text: '' };
+    setNoteEditor({ entry, text: '', ...placeNoteBeside(range.getBoundingClientRect()) });
+    clearBrowserSelection();
+  }
+
+  function placeNoteBeside(target: Pick<DOMRect, 'left' | 'right' | 'top' | 'bottom'>) {
+    const editorWidth = Math.min(340, window.innerWidth - 24);
+    const editorHeight = 330;
+    const gap = 18;
+    let x = target.right + gap + editorWidth / 2;
+    let y = Math.max(8, Math.min(window.innerHeight - editorHeight - 8, target.top));
+    if (x + editorWidth / 2 > window.innerWidth - 8) x = target.left - gap - editorWidth / 2;
+    if (x - editorWidth / 2 < 8) {
+      x = Math.max(editorWidth / 2 + 8, Math.min(window.innerWidth - editorWidth / 2 - 8, (target.left + target.right) / 2));
+      y = target.bottom + gap;
+      if (y + editorHeight > window.innerHeight - 8) y = target.top - editorHeight - gap;
+      y = Math.max(8, Math.min(window.innerHeight - editorHeight - 8, y));
+    }
+    return { x, y };
+  }
+
+  function openSavedNote(entry: HighlightEntry) {
+    const page = viewerRef.current?.querySelector<HTMLElement>(`[data-page-number="${entry.page}"] .react-pdf__Page`);
+    const pageRect = page?.getBoundingClientRect();
+    const first = entry.rects[0];
+    const target = pageRect && first ? { left: pageRect.left + first.left * pageRect.width, right: pageRect.left + (first.left + first.width) * pageRect.width, top: pageRect.top + first.top * pageRect.height, bottom: pageRect.top + (first.top + first.height) * pageRect.height } : { left: window.innerWidth / 2, right: window.innerWidth / 2, top: 80, bottom: 100 };
+    setNoteEditor({ entry, text: entry.note_text ?? '', ...placeNoteBeside(target) });
+  }
+
+  async function saveNote(event: FormEvent) {
+    event.preventDefault();
+    if (!active || !noteEditor || !noteEditor.text.trim() || noteSaving) return;
+    setNoteSaving(true);
+    const text = noteEditor.text.trim();
+    const existing = highlightEntriesRef.current.some((item) => item.id === noteEditor.entry.id);
+    const updated = { ...noteEditor.entry, note_text: text };
+    try {
+      const response = await fetch(`${API_BASE}/api/documents/${active.id}/annotations${existing ? `/${updated.id}` : ''}`, { method: existing ? 'PATCH' : 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(existing ? { note_text: text, color: updated.color } : { id: updated.id, page: updated.page, text: updated.text, color: updated.color, rects: updated.rects, note_text: text }) });
+      if (!response.ok) throw new Error();
+      const next = existing ? highlightEntriesRef.current.map((item) => item.id === updated.id ? updated : item) : [...highlightEntriesRef.current, updated];
+      highlightEntriesRef.current = next;
+      paintHighlights(next);
+      setNoteEditor(null);
+    } catch { setError('The note could not be saved. Please try again.'); }
+    finally { setNoteSaving(false); }
+  }
+
+  function beginNoteDrag(event: React.PointerEvent<HTMLElement>) {
+    if (!noteEditor || (event.target as HTMLElement).closest('button')) return;
+    event.currentTarget.setPointerCapture(event.pointerId);
+    noteDragRef.current = { pointerId: event.pointerId, offsetX: event.clientX - noteEditor.x, offsetY: event.clientY - noteEditor.y };
+  }
+
+  function moveNoteDrag(event: React.PointerEvent<HTMLElement>) {
+    const drag = noteDragRef.current;
+    if (!drag || drag.pointerId !== event.pointerId) return;
+    setNoteEditor((current) => current && ({ ...current, x: Math.min(window.innerWidth - 170, Math.max(170, event.clientX - drag.offsetX)), y: Math.min(window.innerHeight - 60, Math.max(8, event.clientY - drag.offsetY)) }));
+  }
+
+  function endNoteDrag(event: React.PointerEvent<HTMLElement>) {
+    if (noteDragRef.current?.pointerId === event.pointerId) noteDragRef.current = null;
+  }
+
+  async function deleteNote() {
+    if (!active || !noteEditor || noteSaving) return;
+    const existing = highlightEntriesRef.current.some((item) => item.id === noteEditor.entry.id);
+    if (!existing) { setNoteEditor(null); return; }
+    if (!window.confirm('Delete this note?')) return;
+    setNoteSaving(true);
+    try {
+      const response = await fetch(`${API_BASE}/api/documents/${active.id}/annotations/${noteEditor.entry.id}`, { method: 'DELETE' });
+      if (!response.ok && response.status !== 404) throw new Error();
+      const next = highlightEntriesRef.current.filter((item) => item.id !== noteEditor.entry.id);
+      highlightEntriesRef.current = next;
+      paintHighlights(next);
+      setNoteEditor(null);
+    } catch { setError('The note could not be deleted. Please try again.'); }
+    finally { setNoteSaving(false); }
+  }
+
   function getHighlightRects(range: Range, page: HTMLElement): HighlightRect[] {
     const pageRect = page.getBoundingClientRect();
     const fragments = Array.from(range.getClientRects()).filter((rect) => rect.width > 1 && rect.height > 1).map((rect) => ({ left: rect.left, top: rect.top, right: rect.right, bottom: rect.bottom })).sort((a, b) => a.top - b.top || a.left - b.left);
@@ -957,7 +1075,7 @@ export default function Home() {
     return () => window.removeEventListener('keydown', handleHistoryHotkey);
   });
 
-  useEffect(() => {
+  useLayoutEffect(() => {
     if (!pendingSelection) return;
     const handleSelectionHotkey = (event: KeyboardEvent) => {
       const target = event.target as HTMLElement | null;
@@ -972,13 +1090,16 @@ export default function Home() {
       } else if (event.key.toLowerCase() === 'a') {
         event.preventDefault();
         openQuickAskFromSelection();
+      } else if (event.key.toLowerCase() === 'n') {
+        event.preventDefault();
+        openNoteFromSelection();
       } else if (event.key === 'Escape') {
         event.preventDefault();
         clearBrowserSelection();
       }
     };
-    window.addEventListener('keydown', handleSelectionHotkey);
-    return () => window.removeEventListener('keydown', handleSelectionHotkey);
+    window.addEventListener('keydown', handleSelectionHotkey, true);
+    return () => window.removeEventListener('keydown', handleSelectionHotkey, true);
   });
 
   async function ask(event: FormEvent) {
@@ -1072,18 +1193,18 @@ export default function Home() {
 
   return (
     <main className="reader-shell">
-      <header className="reader-header"><button className="brand-button" onClick={() => { window.localStorage.removeItem('adam.activePaper'); setActive(null); }} aria-label="Back to library"><Brand /></button><div className="document-title">{renaming ? <form onSubmit={(event) => void renamePaper(event)}><input autoFocus aria-label="PDF filename" value={renameValue} maxLength={512} onChange={(event) => setRenameValue(event.target.value)} onKeyDown={(event) => { if (event.key === 'Escape') setRenaming(false); }} disabled={renameSaving} /><button type="submit" disabled={!renameValue.trim() || renameSaving}>{renameSaving ? 'Saving…' : 'Save'}</button></form> : <button type="button" className="document-title-button" title="Rename PDF" onClick={() => { setRenameValue(active.original_name.replace(/\.pdf$/i, '')); setRenaming(true); }}><strong>{active.original_name.replace(/\.pdf$/i, '')}</strong><span aria-hidden="true">✎</span></button>}<span>{pages || active.page_count} pages · local</span></div><div className="reader-header-tools"><div className="paper-zoom"><span className="control-label">Paper</span><div className="header-actions" role="group" aria-label="Paper zoom"><button title="Zoom paper out" aria-label="Zoom paper out" disabled={zoom <= MIN_ZOOM} onClick={() => changeZoom(-.1)}>−</button><span>{Math.round(zoom * 100)}%</span><button title="Zoom paper in" aria-label="Zoom paper in" disabled={zoom >= MAX_ZOOM} onClick={() => changeZoom(.1)}>+</button></div></div><button type="button" className="reader-delete-button" aria-label="Delete paper" title="Delete paper" onClick={() => void deletePaper(active)}><TrashIcon /></button><SettingsButton compact onClick={() => setSettingsOpen(true)} /></div></header>
-      <div className="reader-workspace" ref={workspaceRef} style={{ gridTemplateColumns: `minmax(0, ${paperPercent}fr) minmax(340px, ${100 - paperPercent}fr)` }}>
+      <header className="reader-header"><button className="brand-button" onClick={() => { window.localStorage.removeItem('adam.activePaper'); setActive(null); }} aria-label="Back to library"><Brand /></button><div className="document-title">{renaming ? <form onSubmit={(event) => void renamePaper(event)}><input autoFocus aria-label="PDF filename" value={renameValue} maxLength={512} onChange={(event) => setRenameValue(event.target.value)} onKeyDown={(event) => { if (event.key === 'Escape') setRenaming(false); }} disabled={renameSaving} /><button type="submit" disabled={!renameValue.trim() || renameSaving}>{renameSaving ? 'Saving…' : 'Save'}</button></form> : <button type="button" className="document-title-button" title="Rename PDF" onClick={() => { setRenameValue(active.original_name.replace(/\.pdf$/i, '')); setRenaming(true); }}><strong>{active.original_name.replace(/\.pdf$/i, '')}</strong><span aria-hidden="true">✎</span></button>}<span>{pages || active.page_count} pages · local</span></div><div className="reader-header-tools"><button type="button" className={`note-view-button${notesVisible ? ' active' : ''}`} onClick={toggleNotes} title={notesVisible ? 'Hide anchored notes' : 'View anchored notes'}><span>▰</span>{notesVisible ? 'Hide notes' : 'View notes'}<strong>{highlightEntries.filter((entry) => entry.note_text).length}</strong></button><div className="paper-zoom"><span className="control-label">Paper</span><div className="header-actions" role="group" aria-label="Paper zoom"><button title="Zoom paper out" aria-label="Zoom paper out" disabled={zoom <= MIN_ZOOM} onClick={() => changeZoom(-.1)}>−</button><span>{Math.round(zoom * 100)}%</span><button title="Zoom paper in" aria-label="Zoom paper in" disabled={zoom >= MAX_ZOOM} onClick={() => changeZoom(.1)}>+</button></div></div><button type="button" className="reader-delete-button" aria-label="Delete paper" title="Delete paper" onClick={() => void deletePaper(active)}><TrashIcon /></button><SettingsButton compact onClick={() => setSettingsOpen(true)} /></div></header>
+      <div className={`reader-workspace${notesVisible ? ' notes-mode' : ''}`} ref={workspaceRef} style={{ gridTemplateColumns: `minmax(0, ${paperPercent}fr) minmax(340px, ${100 - paperPercent}fr)` }}>
         <section className={`pdf-pane${screenshotMode ? ' screenshot-mode' : ''}`} ref={viewerRef} onMouseUp={(event) => { if (!screenshotMode) captureSelection(event); }} onPointerDown={beginScreenshot} onPointerMove={moveScreenshot} onPointerUp={finishScreenshot} onPointerCancel={() => { screenshotPointerRef.current = null; setScreenshotDrag(null); setScreenshotMode(false); }}>
           <PdfDocument file={`${API_BASE}/api/documents/${active.id}/file`} onLoadSuccess={({ numPages }) => setPages(numPages)} loading={<div className="viewer-message">Rendering paper…</div>} error={<div className="viewer-message error-banner">Could not render this PDF.</div>}>
-            {Array.from({ length: pages }, (_, index) => <div className="pdf-page-stage" data-page-number={index + 1} key={index + 1}><div className="pdf-page-wrap" style={{ zoom: zoom / MAX_ZOOM }}><PdfPageWithHighlights pageNumber={index + 1} highlights={highlightEntries.filter((entry) => entry.page === index + 1)} /><span className="page-label">{index + 1}</span></div></div>)}
+            {Array.from({ length: pages }, (_, index) => { const pageNotes = highlightEntries.filter((entry) => entry.page === index + 1 && entry.note_text).sort(compareNotePosition); const pageScale = zoom / MAX_ZOOM; return <div className="pdf-page-stage" data-page-number={index + 1} key={index + 1}><div className="pdf-page-wrap" style={{ zoom: pageScale, '--page-scale': pageScale } as CSSProperties}><PdfPageWithHighlights pageNumber={index + 1} highlights={highlightEntries.filter((entry) => entry.page === index + 1)} />{!notesVisible && pageNotes.map((note, noteIndex) => <button type="button" className="note-anchor" style={{ top: `${noteMarkerTop(pageNotes, noteIndex) * 100}%`, '--note-color': note.color } as CSSProperties} title="Open note" aria-label="Open note" onClick={() => openSavedNote(note)} key={note.id}>▰</button>)}{notesVisible && <aside className="page-notes" aria-label={`Notes for page ${index + 1}`}>{pageNotes.map((note, noteIndex) => <button type="button" className="page-note-card" style={{ top: `${noteCardTop(pageNotes, noteIndex) * 100}%`, '--note-color': note.color } as CSSProperties} onClick={() => openSavedNote(note)} key={note.id}><span>Page {index + 1}</span><p>{note.note_text}</p><small>{note.text}</small></button>)}</aside>}<span className="page-label">{index + 1}</span></div></div>; })}
           </PdfDocument>
           {screenshotMode && !screenshotDrag && <div className="screenshot-hint">Drag over the PDF to ask about it · Esc to cancel</div>}
           {screenshotDrag && <div className="screenshot-region" style={{ left: screenshotDrag.overlayLeft, top: screenshotDrag.overlayTop, width: screenshotDrag.overlayWidth, height: screenshotDrag.overlayHeight }} />}
         </section>
         <div className="pane-resizer" style={{ left: `${paperPercent}%` }} role="separator" aria-label="Resize paper and chat panes" aria-orientation="vertical" aria-valuemin={MIN_PAPER_PERCENT} aria-valuemax={80} aria-valuenow={Math.round(paperPercent)} tabIndex={0} onPointerDown={beginWorkspaceResize} onPointerMove={moveWorkspaceResize} onPointerUp={finishWorkspaceResize} onPointerCancel={() => { resizingRef.current = false; }} onDoubleClick={resetWorkspaceResize}><span /></div>
         <aside className="side-pane" style={{ '--chat-scale': chatScale } as CSSProperties}>
-          <div className="mode-tabs"><div className="tab-list"><button className="active">Chat</button><button disabled>Notes <span>Soon</span></button></div><div className="chat-text-controls" role="group" aria-label="Chat text size"><span className="control-label">Text size</span><div><button type="button" aria-label="Decrease chat text size" title="Decrease chat text size" disabled={chatScale <= MIN_CHAT_SCALE} onClick={() => changeChatScale(-CHAT_SCALE_STEP)}>A−</button><output aria-live="polite" aria-label={`Chat text size ${Math.round(chatScale * 100)} percent`}>{Math.round(chatScale * 100)}%</output><button type="button" aria-label="Increase chat text size" title="Increase chat text size" disabled={chatScale >= MAX_CHAT_SCALE} onClick={() => changeChatScale(CHAT_SCALE_STEP)}>A+</button></div></div></div>
+          <div className="mode-tabs"><div className="tab-list"><button className="active">Chat</button><button disabled title="Document notepad coming soon">Notes <span>Beta</span></button></div><div className="chat-text-controls" role="group" aria-label="Chat text size"><span className="control-label">Text size</span><div><button type="button" aria-label="Decrease chat text size" title="Decrease chat text size" disabled={chatScale <= MIN_CHAT_SCALE} onClick={() => changeChatScale(-CHAT_SCALE_STEP)}>A−</button><output aria-live="polite" aria-label={`Chat text size ${Math.round(chatScale * 100)} percent`}>{Math.round(chatScale * 100)}%</output><button type="button" aria-label="Increase chat text size" title="Increase chat text size" disabled={chatScale >= MAX_CHAT_SCALE} onClick={() => changeChatScale(CHAT_SCALE_STEP)}>A+</button></div></div></div>
           {historyOpen ? <section className="history-view">
             <div className="history-header"><div><p>Conversations</p><h2>Chat history</h2><span>{conversations.length} saved for this paper</span></div><button type="button" onClick={() => setHistoryOpen(false)} aria-label="Close chat history">×</button></div>
             <button type="button" className="new-chat-card" onClick={() => void createNewConversation()}><span>＋</span><div><strong>Start a new chat</strong><small>Uses your current default model</small></div><i>→</i></button>
@@ -1100,11 +1221,30 @@ export default function Home() {
           </>}
         </aside>
       </div>
-      {pendingSelection && <div className="selection-toolbar" style={{ left: pendingSelection.x, top: pendingSelection.y }} onMouseDown={(event) => event.preventDefault()} role="toolbar" aria-label="Text selection actions"><div className="highlight-colors" aria-label="Highlight color">{HIGHLIGHT_COLORS.map(({ color, label, key }) => <button type="button" className="color-swatch" style={{ backgroundColor: color }} aria-label={`Highlight ${label.toLowerCase()} (${key})`} aria-keyshortcuts={key} title={`${label} highlight · ${key}`} onClick={() => applyHighlight(color)} key={color}><kbd>{key}</kbd></button>)}</div><span className="toolbar-divider" /><button type="button" className="toolbar-action primary" aria-keyshortcuts="C" onClick={addSelectionToContext}><span>＋</span>Add to context <kbd>C</kbd></button><button type="button" className="toolbar-action" aria-keyshortcuts="A" onClick={openQuickAskFromSelection}><span>✦</span>Ask AI <kbd>A</kbd></button><button type="button" className="toolbar-action" disabled title="Coming soon"><span>▱</span>Note <small>Beta</small></button></div>}
+      {pendingSelection && <div className="selection-toolbar" style={{ left: pendingSelection.x, top: pendingSelection.y }} onMouseDown={(event) => event.preventDefault()} role="toolbar" aria-label="Text selection actions"><div className="highlight-colors" aria-label="Highlight color">{HIGHLIGHT_COLORS.map(({ color, label, key }) => <button type="button" className="color-swatch" style={{ backgroundColor: color }} aria-label={`Highlight ${label.toLowerCase()} (${key})`} aria-keyshortcuts={key} title={`${label} highlight · ${key}`} onClick={() => applyHighlight(color)} key={color}><kbd>{key}</kbd></button>)}</div><span className="toolbar-divider" /><button type="button" className="toolbar-action primary" aria-keyshortcuts="C" onClick={addSelectionToContext}><span>＋</span>Add to context <kbd>C</kbd></button><button type="button" className="toolbar-action" aria-keyshortcuts="A" onClick={openQuickAskFromSelection}><span>✦</span>Ask AI <kbd>A</kbd></button><button type="button" className="toolbar-action" aria-keyshortcuts="N" onClick={openNoteFromSelection}><span>▱</span>Note <kbd>N</kbd></button></div>}
+      {noteEditor && <form className="note-editor" style={{ left: noteEditor.x, top: noteEditor.y, '--note-color': noteEditor.entry.color } as CSSProperties} onSubmit={saveNote}><header onPointerDown={beginNoteDrag} onPointerMove={moveNoteDrag} onPointerUp={endNoteDrag} onPointerCancel={endNoteDrag}><span>⠿ &nbsp;▰ Note</span><button type="button" aria-label="Close note" onClick={() => setNoteEditor(null)}>×</button></header><blockquote>{noteEditor.entry.text}</blockquote><div className="note-colors" aria-label="Note color">{NOTE_COLORS.map(({ color, label }) => <button type="button" className={noteEditor.entry.color === color ? 'selected' : ''} style={{ backgroundColor: color, color }} aria-label={`${label} note`} title={label} onClick={() => setNoteEditor((current) => current && ({ ...current, entry: { ...current.entry, color } }))} key={color} />)}</div><textarea autoFocus value={noteEditor.text} onChange={(event) => setNoteEditor((current) => current && ({ ...current, text: event.target.value }))} placeholder="Write a note about this passage…" rows={7} /><footer><button type="button" className="delete-note" onClick={() => void deleteNote()} disabled={noteSaving}>{highlightEntries.some((item) => item.id === noteEditor.entry.id) ? 'Delete note' : 'Discard'}</button><button type="submit" disabled={!noteEditor.text.trim() || noteSaving}>{noteSaving ? 'Saving…' : 'Save note'}</button></footer></form>}
       {quickAskTarget && <form className="quick-ask-popover" style={{ left: quickAskTarget.x, top: quickAskTarget.y }} onSubmit={submitQuickAsk}><div className="quick-ask-head" onPointerDown={beginQuickDrag} onPointerMove={moveQuickDrag} onPointerUp={endQuickDrag} onPointerCancel={endQuickDrag}><span>⠿</span><span>✦ Quick Ask</span><small>{activeConversation?.model_id}</small><button type="button" aria-label="Close Quick Ask" onClick={closeQuickAsk}>×</button></div><div className={`quick-ask-context${quickAskTarget.imageDataUrl ? ' image' : ''}`}>{quickAskTarget.imageDataUrl ? <img src={quickAskTarget.imageDataUrl} alt="Selected PDF area" /> : <blockquote>{quickAskTarget.text}</blockquote>}</div><div className="quick-thread" ref={quickThreadRef} onWheelCapture={(event) => { if (event.deltaY < 0) quickFollowRef.current = false; }} onTouchMove={() => { quickFollowRef.current = false; }} onScroll={(event) => { const element = event.currentTarget; quickFollowRef.current = element.scrollHeight - element.scrollTop - element.clientHeight < 24; }}>{quickTurns.map((turn, index) => <div className="quick-turn" key={index}><div className="quick-user">{turn.question}</div><MarkdownAnswer>{turn.answer}</MarkdownAnswer></div>)}{(quickActiveQuestion && (quickAnswer || quickAsking)) && <div className="quick-turn"><div className="quick-user">{quickActiveQuestion}</div>{quickAnswer ? <MarkdownAnswer streaming={quickAsking}>{quickAnswer}</MarkdownAnswer> : <div className="answer-skeleton"><i /><i /><i /></div>}</div>}</div><div className="quick-ask-entry"><input ref={quickAskInputRef} value={quickQuestion} onChange={(event) => setQuickQuestion(event.target.value)} placeholder={quickTurns.length || quickAnswer ? 'Ask a follow-up…' : 'What would you like clarified?'} disabled={quickAsking} /><button type="submit" disabled={!quickQuestion.trim() || quickAsking}>{quickAsking ? '…' : '↑'}</button></div>{quickError && <p className="quick-ask-error">{quickError}</p>}<div className="quick-ask-footer"><span>Only this selection + this thread</span><div><button type="button" onClick={addQuickTargetToContext} disabled={quickAsking || quickImporting}>＋ Context <kbd>C</kbd></button><button type="button" className="move-to-chat" onClick={() => void importQuickAsk()} disabled={quickAsking || quickImporting || (!quickTurns.length && !quickAnswer)}>{quickImporting ? 'Saving…' : 'Save as new chat →'}</button></div></div></form>}
       {settingsOpen && <SettingsDialog onClose={closeSettings} />}
     </main>
   );
+}
+
+function compareNotePosition(a: HighlightEntry, b: HighlightEntry) {
+  const aRect = a.rects[0] ?? { top: 0, left: 0 };
+  const bRect = b.rects[0] ?? { top: 0, left: 0 };
+  return Math.abs(aRect.top - bRect.top) < .02 ? aRect.left - bRect.left : aRect.top - bRect.top;
+}
+
+function noteCardTop(notes: HighlightEntry[], index: number) {
+  let top = 0;
+  for (let current = 0; current <= index; current += 1) top = Math.max(notes[current].rects[0]?.top ?? 0, current === 0 ? 0 : top + .105);
+  return top;
+}
+
+function noteMarkerTop(notes: HighlightEntry[], index: number) {
+  let top = 0;
+  for (let current = 0; current <= index; current += 1) top = Math.max(notes[current].rects[0]?.top ?? 0, current === 0 ? 0 : top + .028);
+  return top;
 }
 
 function formatContext(selections: ContextSelection[]) {
@@ -1197,7 +1337,7 @@ function HighlightCanvas({ highlights, renderVersion }: { highlights: HighlightE
     const overlayContext = overlay.getContext('2d');
     if (!sourceContext || !overlayContext) return;
     overlayContext.clearRect(0, 0, overlay.width, overlay.height);
-    highlights.forEach((highlight) => {
+    highlights.filter((highlight) => !highlight.note_text).forEach((highlight) => {
       const red = Number.parseInt(highlight.color.slice(1, 3), 16);
       const green = Number.parseInt(highlight.color.slice(3, 5), 16);
       const blue = Number.parseInt(highlight.color.slice(5, 7), 16);
@@ -1220,6 +1360,18 @@ function HighlightCanvas({ highlights, renderVersion }: { highlights: HighlightE
         overlayContext.putImageData(marker, left, top);
       });
     });
+    overlayContext.lineWidth = Math.max(2, source.width / 700);
+    overlayContext.lineCap = 'round';
+    highlights.filter((highlight) => Boolean(highlight.note_text)).forEach((highlight) => highlight.rects.forEach((rect) => {
+      overlayContext.strokeStyle = highlight.color;
+      const left = Math.max(0, rect.left * source.width);
+      const right = Math.min(source.width, (rect.left + rect.width) * source.width);
+      const bottom = Math.min(source.height - overlayContext.lineWidth, (rect.top + rect.height) * source.height - overlayContext.lineWidth / 2);
+      overlayContext.beginPath();
+      overlayContext.moveTo(left, bottom);
+      overlayContext.lineTo(right, bottom);
+      overlayContext.stroke();
+    }));
   }, [highlights, renderVersion]);
   return <canvas className="pdf-highlight-canvas" ref={overlayRef} aria-hidden="true" />;
 }
