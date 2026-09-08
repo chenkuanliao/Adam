@@ -85,7 +85,7 @@ def test_upload_extract_reopen_and_missing_key() -> None:
     created_chat = client.post(f"/api/documents/{uploaded['id']}/conversations", json={})
     assert created_chat.status_code == 201
     conversation = created_chat.json()
-    assert conversation["model_id"] == "gemini-3.8-flash"
+    assert conversation["model_id"] == "gpt-5.6-terra"
     assert client.get(f"/api/documents/{uploaded['id']}/conversations").json()[0]["id"] == conversation["id"]
 
     chat = client.post(
@@ -108,7 +108,7 @@ def test_upload_extract_reopen_and_missing_key() -> None:
 def test_settings_are_persisted_without_exposing_the_key() -> None:
     initial = client.get("/api/settings")
     assert initial.status_code == 200
-    assert initial.json()["model"] == "gemini-3.8-flash"
+    assert initial.json()["model"] == "gpt-5.6-terra"
     assert initial.json()["provider"] == "zen"
     assert "You are Adam" in initial.json()["system_prompt"]
     assert "`$$...$$`" in initial.json()["system_prompt"]
@@ -132,7 +132,7 @@ def test_settings_are_persisted_without_exposing_the_key() -> None:
     assert starred.status_code == 200
     assert starred.json()["favorites"]["openai"] == ["gpt-5.6-luna"]
 
-    cleared = client.put("/api/settings", json={"provider": "zen", "model": "gemini-3.8-flash", "api_keys": {"openai": None}})
+    cleared = client.put("/api/settings", json={"provider": "zen", "model": "gpt-5.6-terra", "api_keys": {"openai": None}})
     assert cleared.status_code == 200
     assert cleared.json()["providers"]["openai"] is False
     assert cleared.json()["system_prompt"] == "You are Adam. Use only the supplied context."

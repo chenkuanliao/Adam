@@ -8,7 +8,7 @@ Status: active implementation, 2026-09-07. Durable per-paper conversations, relo
 - FastAPI upload/library/file/page-text/chat endpoints.
 - Content-addressed PDF storage and PyMuPDF native page-text extraction.
 - SQLite document/page/message schema with an initial Alembic migration.
-- OpenCode Zen Gemini adapter that sends the question, selected text, and page—not the PDF. The initial default model is `gemini-3.8-flash`.
+- OpenCode Zen provider adapter that sends the question, selected text, and page—not the PDF. The default model is `gpt-5.6-terra`.
 - Same-origin frontend API proxy and Docker Compose with `./data:/data` persistence.
 - Automated smoke coverage for upload, deduplication, extraction, PDF serving, and missing-key behavior.
 

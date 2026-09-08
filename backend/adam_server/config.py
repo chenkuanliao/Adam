@@ -38,7 +38,7 @@ class Settings(BaseSettings):
     max_upload_mb: int = 100
     opencode_api_key: str | None = None
     opencode_api_key_file: Path | None = None
-    opencode_model: str = "gemini-3.8-flash"
+    opencode_model: str = "gpt-5.6-terra"
     opencode_base_url: str = "https://opencode.ai/zen/v1"
 
     model_config = SettingsConfigDict(env_file=".env", env_prefix="ADAM_", extra="ignore")

@@ -10,7 +10,7 @@ The current vertical slice supports:
 - durable per-paper chat histories with create, switch, delete, and reload restoration
 - automatic full-paper context for every question, with selected passages and images treated as explicit focus
 - provider/model/system-prompt snapshots per conversation
-- streamed responses from OpenCode Zen, using Gemini 3.8 Flash by default
+- streamed responses from OpenCode Zen, using GPT-5.6 Terra by default
 - provider-aware model and API-key settings for OpenCode Zen, OpenRouter, OpenAI, Anthropic, and Google, available from either screen with `Cmd/Ctrl + ,`
 - Docker Compose deployment with host-mounted data
 
