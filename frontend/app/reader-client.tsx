@@ -1131,7 +1131,10 @@ function contextScope(value: string | null): string | null {
 }
 
 function formatConversationDate(value: string) {
-  const date = new Date(value);
+  // SQLite returns UTC datetimes without an offset even when the SQLAlchemy
+  // column is timezone-aware. Make that implicit UTC explicit before asking
+  // the browser to format it in the user's local timezone.
+  const date = new Date(/[zZ]$|[+-]\d{2}:?\d{2}$/.test(value) ? value : `${value}Z`);
   const today = new Date();
   if (date.toDateString() === today.toDateString()) return date.toLocaleTimeString([], { hour: 'numeric', minute: '2-digit' });
   return date.toLocaleDateString([], { month: 'short', day: 'numeric' });
