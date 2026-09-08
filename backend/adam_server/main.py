@@ -1,4 +1,5 @@
 import json
+import os
 from collections.abc import AsyncIterator
 from datetime import datetime, timezone
 from pathlib import Path
@@ -132,6 +133,36 @@ def get_document(document_id: str, db: Session = Depends(get_db)) -> Document:
     if not document:
         raise HTTPException(404, "Document not found.")
     return document
+
+
+@app.delete("/api/documents/{document_id}", status_code=204)
+def delete_document(document_id: str, db: Session = Depends(get_db), app_settings: Settings = Depends(get_settings)) -> Response:
+    document = db.get(Document, document_id)
+    if not document:
+        raise HTTPException(404, "Document not found.")
+    source = Path(document.storage_path).resolve()
+    document_root = (app_settings.data_dir / "documents").resolve()
+    staged: Path | None = None
+    if source.exists():
+        if not source.is_file() or not source.is_relative_to(document_root):
+            raise HTTPException(409, "The document file is outside managed storage and was not deleted.")
+        staged = app_settings.data_dir / "tmp" / f"delete-{document.id}.pdf"
+        os.replace(source, staged)
+    try:
+        db.delete(document)
+        db.commit()
+    except Exception:
+        db.rollback()
+        if staged and staged.exists():
+            os.replace(staged, source)
+        raise
+    if staged and staged.exists():
+        staged.unlink()
+        try:
+            source.parent.rmdir()
+        except OSError:
+            pass
+    return Response(status_code=204)
 
 
 @app.get("/api/documents/{document_id}/file")

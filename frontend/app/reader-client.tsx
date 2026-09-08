@@ -383,6 +383,29 @@ export default function Home() {
     }
   }
 
+  async function deletePaper(paper: Paper) {
+    const confirmed = window.confirm(`Permanently delete “${paper.original_name}”?\n\nThis will remove the PDF, all chats, messages, highlights, and other data associated with this paper. This cannot be undone.`);
+    if (!confirmed) return;
+    try {
+      const response = await fetch(`${API_BASE}/api/documents/${paper.id}`, { method: 'DELETE' });
+      if (!response.ok) {
+        const payload = await response.json().catch(() => ({}));
+        throw new Error(payload.detail ?? 'Could not delete this paper.');
+      }
+      setPapers((current) => current.filter((item) => item.id !== paper.id));
+      window.localStorage.removeItem(`adam.conversation.${paper.id}`);
+      if (active?.id === paper.id) {
+        window.localStorage.removeItem('adam.activePaper');
+        setActive(null);
+        setActiveConversation(null);
+        setConversations([]);
+      }
+      setError('');
+    } catch (reason) {
+      setError(reason instanceof Error ? reason.message : 'Could not delete this paper.');
+    }
+  }
+
   function openPaper(paper: Paper) {
     window.localStorage.setItem('adam.activePaper', paper.id);
     setActive(paper);
@@ -835,7 +858,7 @@ export default function Home() {
         <p className="intro">Your papers and reading context stay on this machine. Select a passage and ask without breaking focus.</p>
         <label className="dropzone" onDragOver={(event) => event.preventDefault()} onDrop={(event) => { event.preventDefault(); const file = event.dataTransfer.files[0]; if (file) void upload(file); }}><span className="drop-icon">↥</span><strong>{uploading ? 'Processing your paper…' : 'Drop a research paper here'}</strong><span>or click to choose a PDF</span><input type="file" accept="application/pdf" hidden disabled={uploading} onChange={(event) => event.target.files?.[0] && void upload(event.target.files[0])} /></label>
         {error && <p className="error-banner">{error}</p>}
-        {papers.length > 0 && <div className="paper-list"><div className="section-heading"><h2>Recent papers</h2><span>{papers.length}</span></div>{papers.map((paper) => <button className="paper-row" key={paper.id} onClick={() => openPaper(paper)}><span className="paper-badge">PDF</span><span><strong>{paper.original_name}</strong><small>{paper.page_count} pages · stored locally</small></span><span className="row-arrow">→</span></button>)}</div>}
+        {papers.length > 0 && <div className="paper-list"><div className="section-heading"><h2>Recent papers</h2><span>{papers.length}</span></div>{papers.map((paper) => <div className="paper-row" key={paper.id}><button className="paper-row-main" onClick={() => openPaper(paper)}><span className="paper-badge">PDF</span><span><strong>{paper.original_name}</strong><small>{paper.page_count} pages · stored locally</small></span><span className="row-arrow">→</span></button><button className="paper-delete" type="button" aria-label={`Delete ${paper.original_name}`} title="Delete paper" onClick={() => void deletePaper(paper)}><TrashIcon /></button></div>)}</div>}
       </section>
     </main>
     {settingsOpen && <SettingsDialog onClose={closeSettings} />}
@@ -843,7 +866,7 @@ export default function Home() {
 
   return (
     <main className="reader-shell">
-      <header className="reader-header"><button className="brand-button" onClick={() => { window.localStorage.removeItem('adam.activePaper'); setActive(null); }} aria-label="Back to library"><Brand /></button><div className="document-title"><strong>{active.original_name.replace(/\.pdf$/i, '')}</strong><span>{pages || active.page_count} pages · local</span></div><div className="reader-header-tools"><div className="paper-zoom"><span className="control-label">Paper</span><div className="header-actions" role="group" aria-label="Paper zoom"><button title="Zoom paper out" aria-label="Zoom paper out" disabled={zoom <= MIN_ZOOM} onClick={() => changeZoom(-.1)}>−</button><span>{Math.round(zoom * 100)}%</span><button title="Zoom paper in" aria-label="Zoom paper in" disabled={zoom >= MAX_ZOOM} onClick={() => changeZoom(.1)}>+</button></div></div><SettingsButton compact onClick={() => setSettingsOpen(true)} /></div></header>
+      <header className="reader-header"><button className="brand-button" onClick={() => { window.localStorage.removeItem('adam.activePaper'); setActive(null); }} aria-label="Back to library"><Brand /></button><div className="document-title"><strong>{active.original_name.replace(/\.pdf$/i, '')}</strong><span>{pages || active.page_count} pages · local</span></div><div className="reader-header-tools"><div className="paper-zoom"><span className="control-label">Paper</span><div className="header-actions" role="group" aria-label="Paper zoom"><button title="Zoom paper out" aria-label="Zoom paper out" disabled={zoom <= MIN_ZOOM} onClick={() => changeZoom(-.1)}>−</button><span>{Math.round(zoom * 100)}%</span><button title="Zoom paper in" aria-label="Zoom paper in" disabled={zoom >= MAX_ZOOM} onClick={() => changeZoom(.1)}>+</button></div></div><button type="button" className="reader-delete-button" aria-label="Delete paper" title="Delete paper" onClick={() => void deletePaper(active)}><TrashIcon /></button><SettingsButton compact onClick={() => setSettingsOpen(true)} /></div></header>
       <div className="reader-workspace" ref={workspaceRef} style={{ gridTemplateColumns: `minmax(0, ${paperPercent}fr) minmax(340px, ${100 - paperPercent}fr)` }}>
         <section className={`pdf-pane${screenshotMode ? ' screenshot-mode' : ''}`} ref={viewerRef} onMouseUp={(event) => { if (!screenshotMode) captureSelection(event); }} onPointerDown={beginScreenshot} onPointerMove={moveScreenshot} onPointerUp={finishScreenshot} onPointerCancel={() => { screenshotPointerRef.current = null; setScreenshotDrag(null); setScreenshotMode(false); }}>
           <PdfDocument file={`${API_BASE}/api/documents/${active.id}/file`} onLoadSuccess={({ numPages }) => setPages(numPages)} loading={<div className="viewer-message">Rendering paper…</div>} error={<div className="viewer-message error-banner">Could not render this PDF.</div>}>

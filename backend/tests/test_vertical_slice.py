@@ -16,10 +16,10 @@ from adam_server import main as main_module  # noqa: E402
 client = TestClient(app)
 
 
-def sample_pdf() -> bytes:
+def sample_pdf(text: str = "Attention lets a model weigh relevant context.") -> bytes:
     document = fitz.open()
     page = document.new_page()
-    page.insert_text((72, 72), "Attention lets a model weigh relevant context.")
+    page.insert_text((72, 72), text)
     value = document.tobytes()
     document.close()
     return value
@@ -150,3 +150,19 @@ def test_paper_context_and_history_are_owned_by_the_backend(monkeypatch) -> None
     pinned = client.post(f"/api/conversations/{conversation['id']}/sync-defaults").json()
     assert pinned["provider"] == "google"
     assert pinned["model_id"] == "gemini-test"
+
+
+def test_delete_paper_removes_file_and_related_records() -> None:
+    pdf_bytes = sample_pdf("This paper exists only for deletion testing.")
+    uploaded = client.post("/api/documents", files={"file": ("delete-me.pdf", BytesIO(pdf_bytes), "application/pdf")}).json()
+    conversation = client.post(f"/api/documents/{uploaded['id']}/conversations", json={}).json()
+    annotation = client.post(f"/api/documents/{uploaded['id']}/annotations", json={"id": "22222222-2222-4222-8222-222222222222", "page": 1, "text": "deletion", "color": "#f8e58c", "rects": [{"left": .1, "top": .1, "width": .2, "height": .03}]})
+    assert annotation.status_code == 201
+    assert client.get(f"/api/documents/{uploaded['id']}/file").status_code == 200
+
+    deleted = client.delete(f"/api/documents/{uploaded['id']}")
+    assert deleted.status_code == 204
+    assert client.get(f"/api/documents/{uploaded['id']}").status_code == 404
+    assert client.get(f"/api/documents/{uploaded['id']}/file").status_code == 404
+    assert client.get(f"/api/conversations/{conversation['id']}").status_code == 404
+    assert all(item["id"] != uploaded["id"] for item in client.get("/api/documents").json())
