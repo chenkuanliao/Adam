@@ -26,6 +26,7 @@ class Document(Base):
     page_count: Mapped[int] = mapped_column(Integer, default=0)
     status: Mapped[str] = mapped_column(String(32), default="ready")
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow, onupdate=utcnow)
     pages: Mapped[list["Page"]] = relationship(back_populates="document", cascade="all, delete-orphan")
     conversations: Mapped[list["Conversation"]] = relationship(back_populates="document", cascade="all, delete-orphan")
     paper_note: Mapped["PaperNote | None"] = relationship(back_populates="document", cascade="all, delete-orphan", uselist=False)

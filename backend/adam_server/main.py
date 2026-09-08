@@ -126,7 +126,7 @@ async def list_provider_models(provider: str, app_settings: Settings = Depends(g
 
 @app.get("/api/documents", response_model=list[DocumentOut])
 def list_documents(db: Session = Depends(get_db)) -> list[Document]:
-    return list(db.scalars(select(Document).order_by(Document.created_at.desc())))
+    return list(db.scalars(select(Document).order_by(Document.updated_at.desc())))
 
 
 @app.post("/api/documents", response_model=DocumentOut, status_code=201)
@@ -168,6 +168,7 @@ def update_document(document_id: str, request: DocumentUpdate, db: Session = Dep
     try:
         document.original_name = name
         document.storage_path = str(destination)
+        document.updated_at = datetime.now(timezone.utc)
         db.commit()
         db.refresh(document)
     except Exception:
@@ -236,7 +237,8 @@ def get_paper_note(document_id: str, db: Session = Depends(get_db)) -> PaperNote
 
 @app.put("/api/documents/{document_id}/paper-note", response_model=PaperNoteOut)
 def update_paper_note(document_id: str, request: PaperNoteUpdate, db: Session = Depends(get_db)) -> PaperNote:
-    if not db.get(Document, document_id):
+    document = db.get(Document, document_id)
+    if not document:
         raise HTTPException(404, "Document not found.")
     note = db.get(PaperNote, document_id)
     current_revision = note.revision if note else 0
@@ -248,6 +250,7 @@ def update_paper_note(document_id: str, request: PaperNoteUpdate, db: Session = 
     note.content_html = request.content_html
     note.plain_text = request.plain_text
     note.revision = current_revision + 1
+    document.updated_at = datetime.now(timezone.utc)
     db.commit()
     db.refresh(note)
     return note
@@ -263,7 +266,8 @@ def list_annotations(document_id: str, db: Session = Depends(get_db)) -> list[An
 
 @app.post("/api/documents/{document_id}/annotations", response_model=AnnotationOut, status_code=201)
 def create_annotation(document_id: str, request: AnnotationIn, db: Session = Depends(get_db)) -> AnnotationOut:
-    if not db.get(Document, document_id):
+    document = db.get(Document, document_id)
+    if not document:
         raise HTTPException(404, "Document not found.")
     existing = db.get(Annotation, request.id)
     if existing:
@@ -272,6 +276,7 @@ def create_annotation(document_id: str, request: AnnotationIn, db: Session = Dep
         return AnnotationOut(id=existing.id, page=existing.page_number, text=existing.selected_text, color=existing.color, rects=json.loads(existing.geometry_json), note_text=existing.note_text, created_at=existing.created_at)
     annotation = Annotation(id=request.id, document_id=document_id, page_number=request.page, kind="note" if request.note_text is not None else "highlight", selected_text=request.text, color=request.color, geometry_json=json.dumps([rect.model_dump() for rect in request.rects]), note_text=request.note_text)
     db.add(annotation)
+    document.updated_at = datetime.now(timezone.utc)
     db.commit()
     db.refresh(annotation)
     return AnnotationOut(id=annotation.id, page=annotation.page_number, text=annotation.selected_text, color=annotation.color, rects=request.rects, note_text=annotation.note_text, created_at=annotation.created_at)
@@ -286,6 +291,8 @@ def update_annotation(document_id: str, annotation_id: str, request: AnnotationU
     if request.color is not None:
         annotation.color = request.color
     annotation.kind = "note" if request.note_text else "highlight"
+    document = db.get(Document, document_id)
+    if document: document.updated_at = datetime.now(timezone.utc)
     db.commit()
     db.refresh(annotation)
     return AnnotationOut(id=annotation.id, page=annotation.page_number, text=annotation.selected_text, color=annotation.color, rects=json.loads(annotation.geometry_json), note_text=annotation.note_text, created_at=annotation.created_at)
@@ -297,6 +304,8 @@ def delete_annotation(document_id: str, annotation_id: str, db: Session = Depend
     if not annotation or annotation.document_id != document_id:
         raise HTTPException(404, "Annotation not found.")
     db.delete(annotation)
+    document = db.get(Document, document_id)
+    if document: document.updated_at = datetime.now(timezone.utc)
     db.commit()
     return Response(status_code=204)
 

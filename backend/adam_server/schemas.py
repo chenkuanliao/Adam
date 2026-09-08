@@ -11,6 +11,7 @@ class DocumentOut(BaseModel):
     page_count: int
     status: str
     created_at: datetime
+    updated_at: datetime
 
 
 class DocumentUpdate(BaseModel):

@@ -16,7 +16,7 @@ import 'react-pdf/dist/Page/TextLayer.css';
 // injects the HMR browser client into the worker, where `window` is unavailable.
 pdfjs.GlobalWorkerOptions.workerSrc = '/pdf.worker.min.mjs';
 
-type Paper = { id: string; original_name: string; page_count: number; status: string; created_at: string };
+type Paper = { id: string; original_name: string; byte_size: number; page_count: number; status: string; created_at: string; updated_at: string };
 type ContextSelection = { id: string; text: string; page: number | null; pageEnd?: number | null; imageDataUrl?: string };
 type PendingSelection = ContextSelection & { x: number; y: number; range: Range };
 type QuickAskTarget = ContextSelection & { x: number; y: number };
@@ -108,6 +108,9 @@ export default function Home() {
   const [asking, setAsking] = useState(false);
   const [error, setError] = useState('');
   const [settingsOpen, setSettingsOpen] = useState(false);
+  const [paperQuery, setPaperQuery] = useState('');
+  const [paperSort, setPaperSort] = useState<'modified' | 'created' | 'title'>('modified');
+  const [paperSearchOpen, setPaperSearchOpen] = useState(false);
   const [chatConfigured, setChatConfigured] = useState<boolean | null>(null);
   const [paneMode, setPaneMode] = useState<PaneMode>('chat');
   const [pendingNoteQuote, setPendingNoteQuote] = useState<ContextSelection | null>(null);
@@ -232,6 +235,17 @@ export default function Home() {
     // eslint-disable-next-line react-hooks/set-state-in-effect
     if (Number.isFinite(stored) && stored >= MIN_PAPER_PERCENT && stored <= 80) setPaperPercent(stored);
   }, []);
+
+  useEffect(() => {
+    const openPaperSearch = (event: KeyboardEvent) => {
+      if ((event.metaKey || event.ctrlKey) && event.key.toLowerCase() === 'k') {
+        event.preventDefault();
+        if (papers.length > 0) setPaperSearchOpen(true);
+      }
+    };
+    window.addEventListener('keydown', openPaperSearch);
+    return () => window.removeEventListener('keydown', openPaperSearch);
+  }, [papers.length]);
 
   useLayoutEffect(() => {
     const viewer = viewerRef.current;
@@ -1190,20 +1204,38 @@ export default function Home() {
   }
 
   const canAsk = chatConfigured !== false && Boolean(activeConversation);
+  const filteredPapers = papers.filter((paper) => paper.original_name.toLocaleLowerCase().includes(paperQuery.trim().toLocaleLowerCase())).toSorted((a, b) => {
+    if (paperSort === 'title') return a.original_name.localeCompare(b.original_name, undefined, { sensitivity: 'base' });
+    const field = paperSort === 'created' ? 'created_at' : 'updated_at';
+    return new Date(b[field]).getTime() - new Date(a[field]).getTime();
+  });
 
   if (!active) return (<>
     <main className="library-shell">
       <header className="library-header"><Brand /><div className="library-actions"><SettingsButton onClick={() => setSettingsOpen(true)} /><UploadButton uploading={uploading} upload={upload} /></div></header>
-      <section className="library-content">
-        <p className="eyebrow">Your research desk</p>
-        <h1>Read closely. Ask instantly.</h1>
+      {papers.length === 0 ? <section className="library-content library-empty">
+        <p className="eyebrow">Your research desk</p><h1>Read closely. Ask instantly.</h1>
         <p className="intro">Your papers and reading context stay on this machine. Select a passage and ask without breaking focus.</p>
-        <label className="dropzone" onDragOver={(event) => event.preventDefault()} onDrop={(event) => { event.preventDefault(); const file = event.dataTransfer.files[0]; if (file) void upload(file); }}><span className="drop-icon">↥</span><strong>{uploading ? 'Processing your paper…' : 'Drop a research paper here'}</strong><span>or click to choose a PDF</span><input type="file" accept="application/pdf" hidden disabled={uploading} onChange={(event) => event.target.files?.[0] && void upload(event.target.files[0])} /></label>
+        <LibraryDropzone uploading={uploading} upload={upload} />{error && <p className="error-banner">{error}</p>}
+      </section> : <section className="dashboard-content">
+        <div className="dashboard-heading"><div><p className="eyebrow">Your research desk</p><h1>Paper library</h1><p>Pick up where you left off or add something new to read.</p></div><div className="paper-count"><strong>{papers.length}</strong><span>{papers.length === 1 ? 'paper' : 'papers'}</span></div></div>
+        <div className="library-toolbar"><div className="library-search"><span aria-hidden="true">⌕</span><input type="search" aria-label="Search paper titles" placeholder="Search paper titles…" value={paperQuery} onChange={(event) => setPaperQuery(event.target.value)} /><kbd>⌘ K</kbd></div><label className="library-sort"><span>Sort by</span><select aria-label="Sort papers" value={paperSort} onChange={(event) => setPaperSort(event.target.value as 'modified' | 'created' | 'title')}><option value="modified">Last modified</option><option value="created">Date added</option><option value="title">Title A–Z</option></select></label></div>
         {error && <p className="error-banner">{error}</p>}
-        {papers.length > 0 && <div className="paper-list"><div className="section-heading"><h2>Recent papers</h2><span>{papers.length}</span></div>{papers.map((paper) => <div className="paper-row" key={paper.id}><button className="paper-row-main" onClick={() => openPaper(paper)}><span className="paper-badge">PDF</span><span><strong>{paper.original_name}</strong><small>{paper.page_count} pages · stored locally</small></span><span className="row-arrow">→</span></button><button className="paper-delete" type="button" aria-label={`Delete ${paper.original_name}`} title="Delete paper" onClick={() => void deletePaper(paper)}><TrashIcon /></button></div>)}</div>}
-      </section>
+        <div className="dashboard-grid">
+          {filteredPapers.map((paper) => <article className="paper-card" key={paper.id}>
+            <button className="paper-card-main" onClick={() => openPaper(paper)} aria-label={`Open ${paper.original_name}`}>
+              <PaperPreview paper={paper} />
+              <span className="paper-card-body"><span className="paper-card-format">PDF</span><strong>{paper.original_name.replace(/\.pdf$/i, '')}</strong><span className="paper-card-meta"><span>{paper.page_count} {paper.page_count === 1 ? 'page' : 'pages'}</span><i /> <span>{formatBytes(paper.byte_size)}</span></span><span className="paper-card-date"><small>Last modified</small>{formatPaperDate(paper.updated_at)}</span></span>
+            </button>
+            <button className="paper-card-delete" type="button" aria-label={`Delete ${paper.original_name}`} title="Delete paper" onClick={() => void deletePaper(paper)}><TrashIcon /></button>
+          </article>)}
+          {filteredPapers.length === 0 && <div className="paper-search-empty"><span>⌕</span><strong>No papers found</strong><p>Try a different title or clear your search.</p><button type="button" onClick={() => setPaperQuery('')}>Clear search</button></div>}
+          {!paperQuery && <label className="paper-card paper-card-add" onDragOver={(event) => event.preventDefault()} onDrop={(event) => { event.preventDefault(); const file = event.dataTransfer.files[0]; if (file) void upload(file); }}><span className="add-card-icon">+</span><strong>{uploading ? 'Processing paper…' : 'Add another paper'}</strong><span>Drop or choose a PDF</span><input type="file" accept="application/pdf" hidden disabled={uploading} onChange={(event) => event.target.files?.[0] && void upload(event.target.files[0])} /></label>}
+        </div>
+      </section>}
     </main>
     {settingsOpen && <SettingsDialog onClose={closeSettings} />}
+    {paperSearchOpen && <PaperSpotlight papers={papers} onClose={() => setPaperSearchOpen(false)} onOpen={(paper) => { setPaperSearchOpen(false); openPaper(paper); }} />}
   </>);
 
   return (
@@ -1240,6 +1272,7 @@ export default function Home() {
       {noteEditor && <form className="note-editor" style={{ left: noteEditor.x, top: noteEditor.y, '--note-color': noteEditor.entry.color } as CSSProperties} onSubmit={saveNote}><header onPointerDown={beginNoteDrag} onPointerMove={moveNoteDrag} onPointerUp={endNoteDrag} onPointerCancel={endNoteDrag}><span>⠿ &nbsp;▰ Note</span><button type="button" aria-label="Close note" onClick={() => setNoteEditor(null)}>×</button></header><blockquote>{noteEditor.entry.text}</blockquote><div className="note-colors" aria-label="Note color">{NOTE_COLORS.map(({ color, label }) => <button type="button" className={noteEditor.entry.color === color ? 'selected' : ''} style={{ backgroundColor: color, color }} aria-label={`${label} note`} title={label} onClick={() => setNoteEditor((current) => current && ({ ...current, entry: { ...current.entry, color } }))} key={color} />)}</div><textarea autoFocus value={noteEditor.text} onChange={(event) => setNoteEditor((current) => current && ({ ...current, text: event.target.value }))} placeholder="Write a note about this passage…" rows={7} /><footer><button type="button" className="delete-note" onClick={() => void deleteNote()} disabled={noteSaving}>{highlightEntries.some((item) => item.id === noteEditor.entry.id) ? 'Delete note' : 'Discard'}</button><button type="submit" disabled={!noteEditor.text.trim() || noteSaving}>{noteSaving ? 'Saving…' : 'Save note'}</button></footer></form>}
       {quickAskTarget && <form className="quick-ask-popover" style={{ left: quickAskTarget.x, top: quickAskTarget.y }} onSubmit={submitQuickAsk}><div className="quick-ask-head" onPointerDown={beginQuickDrag} onPointerMove={moveQuickDrag} onPointerUp={endQuickDrag} onPointerCancel={endQuickDrag}><span>⠿</span><span>✦ Quick Ask</span><small>{activeConversation?.model_id}</small><button type="button" aria-label="Close Quick Ask" onClick={closeQuickAsk}>×</button></div><div className={`quick-ask-context${quickAskTarget.imageDataUrl ? ' image' : ''}`}>{quickAskTarget.imageDataUrl ? <img src={quickAskTarget.imageDataUrl} alt="Selected PDF area" /> : <blockquote>{quickAskTarget.text}</blockquote>}</div><div className="quick-thread" ref={quickThreadRef} onWheelCapture={(event) => { if (event.deltaY < 0) quickFollowRef.current = false; }} onTouchMove={() => { quickFollowRef.current = false; }} onScroll={(event) => { const element = event.currentTarget; quickFollowRef.current = element.scrollHeight - element.scrollTop - element.clientHeight < 24; }}>{quickTurns.map((turn, index) => <div className="quick-turn" key={index}><div className="quick-user">{turn.question}</div><MarkdownAnswer>{turn.answer}</MarkdownAnswer></div>)}{(quickActiveQuestion && (quickAnswer || quickAsking)) && <div className="quick-turn"><div className="quick-user">{quickActiveQuestion}</div>{quickAnswer ? <MarkdownAnswer streaming={quickAsking}>{quickAnswer}</MarkdownAnswer> : <div className="answer-skeleton"><i /><i /><i /></div>}</div>}</div><div className="quick-ask-entry"><input ref={quickAskInputRef} value={quickQuestion} onChange={(event) => setQuickQuestion(event.target.value)} placeholder={quickTurns.length || quickAnswer ? 'Ask a follow-up…' : 'What would you like clarified?'} disabled={quickAsking} /><button type="submit" disabled={!quickQuestion.trim() || quickAsking}>{quickAsking ? '…' : '↑'}</button></div>{quickError && <p className="quick-ask-error">{quickError}</p>}<div className="quick-ask-footer"><span>Only this selection + this thread</span><div><button type="button" onClick={addQuickTargetToContext} disabled={quickAsking || quickImporting}>＋ Context <kbd>C</kbd></button><button type="button" className="move-to-chat" onClick={() => void importQuickAsk()} disabled={quickAsking || quickImporting || (!quickTurns.length && !quickAnswer)}>{quickImporting ? 'Saving…' : 'Save as new chat →'}</button></div></div></form>}
       {settingsOpen && <SettingsDialog onClose={closeSettings} />}
+      {paperSearchOpen && <PaperSpotlight papers={papers} onClose={() => setPaperSearchOpen(false)} onOpen={(paper) => { setPaperSearchOpen(false); openPaper(paper); }} />}
     </main>
   );
 }
@@ -1733,3 +1766,39 @@ function MarkdownAnswer({ children, streaming = false }: { children: string; str
   return <div className="markdown-answer"><ReactMarkdown remarkPlugins={[remarkGfm, remarkMath]} rehypePlugins={[rehypeKatex]} components={{ a: ({ children: linkText, ...props }) => <a {...props} target="_blank" rel="noreferrer">{linkText}</a> }}>{children}</ReactMarkdown>{streaming && <i className="stream-cursor" />}</div>;
 }
 function UploadButton({ uploading, upload }: { uploading: boolean; upload: (file: File) => Promise<void> }) { return <label className="primary-button">{uploading ? 'Opening…' : 'Open PDF'}<input type="file" accept="application/pdf" hidden disabled={uploading} onChange={(event) => event.target.files?.[0] && void upload(event.target.files[0])} /></label>; }
+
+function LibraryDropzone({ uploading, upload }: { uploading: boolean; upload: (file: File) => Promise<void> }) { return <label className="dropzone" onDragOver={(event) => event.preventDefault()} onDrop={(event) => { event.preventDefault(); const file = event.dataTransfer.files[0]; if (file) void upload(file); }}><span className="drop-icon">↥</span><strong>{uploading ? 'Processing your paper…' : 'Drop a research paper here'}</strong><span>or click to choose a PDF</span><input type="file" accept="application/pdf" hidden disabled={uploading} onChange={(event) => event.target.files?.[0] && void upload(event.target.files[0])} /></label>; }
+
+function PaperPreview({ paper }: { paper: Paper }) {
+  return <span className="paper-preview" aria-hidden="true"><PdfDocument file={`${API_BASE}/api/documents/${paper.id}/file`} loading={<span className="preview-loading">PDF</span>} error={<span className="preview-loading">PDF</span>}><Page pageNumber={1} width={270} renderTextLayer={false} renderAnnotationLayer={false} /></PdfDocument><span className="preview-shade" /><span className="preview-open">Open paper <b>→</b></span></span>;
+}
+
+function PaperSpotlight({ papers, onClose, onOpen }: { papers: Paper[]; onClose: () => void; onOpen: (paper: Paper) => void }) {
+  const [query, setQuery] = useState('');
+  const [selected, setSelected] = useState(0);
+  const results = papers.filter((paper) => paper.original_name.toLocaleLowerCase().includes(query.trim().toLocaleLowerCase()));
+  useEffect(() => {
+    const navigate = (event: KeyboardEvent) => {
+      if (event.key === 'Escape') { event.preventDefault(); onClose(); }
+      if (event.key === 'ArrowDown') { event.preventDefault(); setSelected((current) => Math.min(results.length - 1, current + 1)); }
+      if (event.key === 'ArrowUp') { event.preventDefault(); setSelected((current) => Math.max(0, current - 1)); }
+      if (event.key === 'Enter' && results[selected]) { event.preventDefault(); onOpen(results[selected]); }
+    };
+    window.addEventListener('keydown', navigate);
+    return () => window.removeEventListener('keydown', navigate);
+  }, [onClose, onOpen, results, selected]);
+  return <div className="spotlight-backdrop" role="presentation" onMouseDown={(event) => { if (event.target === event.currentTarget) onClose(); }}><section className="paper-spotlight" role="dialog" aria-modal="true" aria-label="Search papers">
+    <div className="spotlight-input"><span aria-hidden="true">⌕</span><input autoFocus type="search" placeholder="Search your papers…" aria-label="Search your papers" value={query} onChange={(event) => { setQuery(event.target.value); setSelected(0); }} /><kbd>ESC</kbd></div>
+    <div className="spotlight-results">{results.length > 0 ? results.map((paper, index) => <button type="button" className={index === selected ? 'selected' : ''} key={paper.id} onMouseEnter={() => setSelected(index)} onClick={() => onOpen(paper)}><span className="spotlight-pdf">PDF</span><span><strong>{paper.original_name.replace(/\.pdf$/i, '')}</strong><small>{paper.page_count} pages · {formatBytes(paper.byte_size)} · Modified {formatPaperDate(paper.updated_at).toLocaleLowerCase()}</small></span><i>↵</i></button>) : <div className="spotlight-empty"><strong>No matching papers</strong><span>Try searching with fewer words.</span></div>}</div>
+    <footer><span><kbd>↑</kbd><kbd>↓</kbd> Navigate</span><span><kbd>↵</kbd> Open</span><span><kbd>esc</kbd> Close</span></footer>
+  </section></div>;
+}
+
+function formatBytes(bytes: number) { return bytes >= 1_000_000 ? `${(bytes / 1_000_000).toFixed(1)} MB` : `${Math.max(1, Math.round(bytes / 1_000))} KB`; }
+function formatPaperDate(value: string) {
+  const date = new Date(value);
+  const days = Math.floor((Date.now() - date.getTime()) / 86_400_000);
+  if (days === 0) return `Today, ${date.toLocaleTimeString([], { hour: 'numeric', minute: '2-digit' })}`;
+  if (days === 1) return 'Yesterday';
+  return date.toLocaleDateString([], { month: 'short', day: 'numeric', year: date.getFullYear() === new Date().getFullYear() ? undefined : 'numeric' });
+}
