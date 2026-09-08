@@ -46,6 +46,13 @@ def test_upload_extract_reopen_and_missing_key() -> None:
     assert pdf.status_code == 200
     assert pdf.headers["content-type"] == "application/pdf"
 
+    renamed_document = client.patch(f"/api/documents/{uploaded['id']}", json={"name": "Attention notes"})
+    assert renamed_document.status_code == 200
+    assert renamed_document.json()["original_name"] == "Attention notes.pdf"
+    renamed_pdf = client.get(f"/api/documents/{uploaded['id']}/file")
+    assert "Attention%20notes.pdf" in renamed_pdf.headers["content-disposition"]
+    assert client.patch(f"/api/documents/{uploaded['id']}", json={"name": "../outside.pdf"}).status_code == 422
+
     annotation_id = "11111111-1111-4111-8111-111111111111"
     highlight = client.post(
         f"/api/documents/{uploaded['id']}/annotations",

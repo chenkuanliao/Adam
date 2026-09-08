@@ -14,7 +14,7 @@ import httpx
 from .config import Settings, get_settings
 from .database import SessionLocal, get_db, run_migrations
 from .models import Annotation, Conversation, Document, Message, ModelFavorite, Page
-from .schemas import AnnotationIn, AnnotationOut, AppSettingsOut, AppSettingsUpdate, ChatRequest, ConversationCreate, ConversationDetail, ConversationOut, ConversationUpdate, DocumentOut, ModelFavoriteUpdate, PageTextOut, ProviderKeyUpdate, ProviderModelsOut
+from .schemas import AnnotationIn, AnnotationOut, AppSettingsOut, AppSettingsUpdate, ChatRequest, ConversationCreate, ConversationDetail, ConversationOut, ConversationUpdate, DocumentOut, DocumentUpdate, ModelFavoriteUpdate, PageTextOut, ProviderKeyUpdate, ProviderModelsOut
 from .services.context import build_paper_context
 from .services.documents import ingest_pdf
 from .services.llm import AnthropicProvider, GoogleProvider, OpenAICompatibleProvider, OpenAIResponsesProvider, sse
@@ -132,6 +132,38 @@ def get_document(document_id: str, db: Session = Depends(get_db)) -> Document:
     document = db.get(Document, document_id)
     if not document:
         raise HTTPException(404, "Document not found.")
+    return document
+
+
+@app.patch("/api/documents/{document_id}", response_model=DocumentOut)
+def update_document(document_id: str, request: DocumentUpdate, db: Session = Depends(get_db), app_settings: Settings = Depends(get_settings)) -> Document:
+    document = db.get(Document, document_id)
+    if not document:
+        raise HTTPException(404, "Document not found.")
+    name = request.name.strip()
+    if not name.lower().endswith(".pdf"):
+        name += ".pdf"
+    if not name[:-4].strip() or Path(name).name != name or "/" in name or "\\" in name or any(ord(char) < 32 for char in name):
+        raise HTTPException(422, "Enter a valid PDF filename without folders.")
+    source = Path(document.storage_path).resolve()
+    document_root = (app_settings.data_dir / "documents").resolve()
+    if not source.is_file() or not source.is_relative_to(document_root):
+        raise HTTPException(409, "The document file is outside managed storage and was not renamed.")
+    destination = source.with_name(name)
+    if destination != source and destination.exists():
+        raise HTTPException(409, "A PDF with that filename already exists in this storage folder.")
+    if destination != source:
+        os.replace(source, destination)
+    try:
+        document.original_name = name
+        document.storage_path = str(destination)
+        db.commit()
+        db.refresh(document)
+    except Exception:
+        db.rollback()
+        if destination != source and destination.exists():
+            os.replace(destination, source)
+        raise
     return document
 
 

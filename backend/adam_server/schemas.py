@@ -13,6 +13,10 @@ class DocumentOut(BaseModel):
     created_at: datetime
 
 
+class DocumentUpdate(BaseModel):
+    name: str = Field(min_length=1, max_length=512)
+
+
 class PageTextOut(BaseModel):
     page: int
     text: str
