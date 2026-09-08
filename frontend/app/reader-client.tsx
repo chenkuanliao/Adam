@@ -145,6 +145,17 @@ export default function Home() {
     setZoom(nextZoom);
   }, []);
 
+  const fitPaperToPane = useCallback(() => {
+    const viewer = viewerRef.current;
+    if (!viewer) return;
+    const styles = window.getComputedStyle(viewer);
+    const horizontalPadding = parseFloat(styles.paddingLeft) + parseFloat(styles.paddingRight);
+    const availableWidth = viewer.clientWidth - horizontalPadding;
+    if (availableWidth <= 0) return;
+    const fittedZoom = Math.min(MAX_ZOOM, Math.max(MIN_ZOOM, availableWidth / BASE_PAGE_WIDTH));
+    changeZoom(fittedZoom - zoomRef.current);
+  }, [changeZoom]);
+
   const changeChatScale = useCallback((delta: number) => {
     setChatScale((current) => Math.min(MAX_CHAT_SCALE, Math.max(MIN_CHAT_SCALE, Number((current + delta).toFixed(2)))));
   }, []);
@@ -171,6 +182,15 @@ export default function Home() {
     // eslint-disable-next-line react-hooks/set-state-in-effect
     if (Number.isFinite(stored) && stored >= MIN_PAPER_PERCENT && stored <= 80) setPaperPercent(stored);
   }, []);
+
+  useLayoutEffect(() => {
+    const viewer = viewerRef.current;
+    if (!viewer || !active) return;
+    fitPaperToPane();
+    const observer = new ResizeObserver(fitPaperToPane);
+    observer.observe(viewer);
+    return () => observer.disconnect();
+  }, [active, fitPaperToPane]);
 
   const closeSettings = useCallback(() => {
     setSettingsOpen(false);
