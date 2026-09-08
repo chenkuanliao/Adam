@@ -13,8 +13,8 @@ import httpx
 
 from .config import Settings, get_settings
 from .database import SessionLocal, get_db, run_migrations
-from .models import Annotation, Conversation, Document, Message, ModelFavorite, Page
-from .schemas import AnnotationIn, AnnotationOut, AnnotationUpdate, AppSettingsOut, AppSettingsUpdate, ChatRequest, ConversationCreate, ConversationDetail, ConversationOut, ConversationUpdate, DocumentOut, DocumentUpdate, ModelFavoriteUpdate, PageTextOut, ProviderKeyUpdate, ProviderModelsOut, QuickAskImportRequest, QuickAskRequest
+from .models import Annotation, Conversation, Document, Message, ModelFavorite, Page, PaperNote
+from .schemas import AnnotationIn, AnnotationOut, AnnotationUpdate, AppSettingsOut, AppSettingsUpdate, ChatRequest, ConversationCreate, ConversationDetail, ConversationOut, ConversationUpdate, DocumentOut, DocumentUpdate, ModelFavoriteUpdate, PageTextOut, PaperNoteOut, PaperNoteUpdate, ProviderKeyUpdate, ProviderModelsOut, QuickAskImportRequest, QuickAskRequest
 from .services.context import build_paper_context
 from .services.documents import ingest_pdf
 from .services.llm import AnthropicProvider, GoogleProvider, OpenAICompatibleProvider, OpenAIResponsesProvider, generate_zen_title, sse
@@ -222,6 +222,35 @@ def get_page_text(document_id: str, page_number: int, db: Session = Depends(get_
     if not page:
         raise HTTPException(404, "Page not found.")
     return PageTextOut(page=page.page_number, text=page.native_text, width_pt=page.width_pt, height_pt=page.height_pt, rotation=page.rotation)
+
+
+@app.get("/api/documents/{document_id}/paper-note", response_model=PaperNoteOut)
+def get_paper_note(document_id: str, db: Session = Depends(get_db)) -> PaperNoteOut:
+    if not db.get(Document, document_id):
+        raise HTTPException(404, "Document not found.")
+    note = db.get(PaperNote, document_id)
+    if not note:
+        return PaperNoteOut(document_id=document_id, content_html="", plain_text="", revision=0)
+    return PaperNoteOut.model_validate(note, from_attributes=True)
+
+
+@app.put("/api/documents/{document_id}/paper-note", response_model=PaperNoteOut)
+def update_paper_note(document_id: str, request: PaperNoteUpdate, db: Session = Depends(get_db)) -> PaperNote:
+    if not db.get(Document, document_id):
+        raise HTTPException(404, "Document not found.")
+    note = db.get(PaperNote, document_id)
+    current_revision = note.revision if note else 0
+    if request.revision != current_revision:
+        raise HTTPException(409, "This note changed in another window. Reload it before saving again.")
+    if not note:
+        note = PaperNote(document_id=document_id)
+        db.add(note)
+    note.content_html = request.content_html
+    note.plain_text = request.plain_text
+    note.revision = current_revision + 1
+    db.commit()
+    db.refresh(note)
+    return note
 
 
 @app.get("/api/documents/{document_id}/annotations", response_model=list[AnnotationOut])

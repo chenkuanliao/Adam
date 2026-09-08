@@ -53,6 +53,22 @@ def test_upload_extract_reopen_and_missing_key() -> None:
     assert "Attention%20notes.pdf" in renamed_pdf.headers["content-disposition"]
     assert client.patch(f"/api/documents/{uploaded['id']}", json={"name": "../outside.pdf"}).status_code == 422
 
+    empty_note = client.get(f"/api/documents/{uploaded['id']}/paper-note")
+    assert empty_note.status_code == 200
+    assert empty_note.json()["revision"] == 0
+    saved_note = client.put(f"/api/documents/{uploaded['id']}/paper-note", json={
+        "content_html": "<h1>Main finding</h1><ul><li>Attention helps</li></ul>",
+        "plain_text": "Main finding\nAttention helps",
+        "revision": 0,
+    })
+    assert saved_note.status_code == 200
+    assert saved_note.json()["revision"] == 1
+    stale_note = client.put(f"/api/documents/{uploaded['id']}/paper-note", json={
+        "content_html": "stale", "plain_text": "stale", "revision": 0,
+    })
+    assert stale_note.status_code == 409
+    assert client.get(f"/api/documents/{uploaded['id']}/paper-note").json()["content_html"].startswith("<h1>Main finding")
+
     annotation_id = "11111111-1111-4111-8111-111111111111"
     highlight = client.post(
         f"/api/documents/{uploaded['id']}/annotations",

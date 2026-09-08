@@ -31,6 +31,8 @@ type Conversation = { id: string; document_id: string; title: string; provider: 
 type SavedMessage = { id: string; role: string; content: string; context_json: string | null };
 type ProviderId = 'zen' | 'openrouter' | 'openai' | 'anthropic' | 'google';
 type AppSettings = { provider: ProviderId; model: string; selected_models: Partial<Record<ProviderId, string>>; providers: Record<ProviderId, boolean>; favorites: Partial<Record<ProviderId, string[]>>; system_prompt: string; quick_ask_prompt: string };
+type PaneMode = 'chat' | 'notes';
+type PaperNote = { document_id: string; content_html: string; plain_text: string; revision: number; updated_at: string | null };
 const PROVIDERS: Array<{ id: ProviderId; name: string; keyLabel: string }> = [
   { id: 'zen', name: 'OpenCode Zen', keyLabel: 'OpenCode Zen key' },
   { id: 'openrouter', name: 'OpenRouter', keyLabel: 'OpenRouter key' },
@@ -107,6 +109,7 @@ export default function Home() {
   const [error, setError] = useState('');
   const [settingsOpen, setSettingsOpen] = useState(false);
   const [chatConfigured, setChatConfigured] = useState<boolean | null>(null);
+  const [paneMode, setPaneMode] = useState<PaneMode>('chat');
   const viewerRef = useRef<HTMLDivElement>(null);
   const workspaceRef = useRef<HTMLDivElement>(null);
   const resizingRef = useRef(false);
@@ -1204,8 +1207,8 @@ export default function Home() {
         </section>
         <div className="pane-resizer" style={{ left: `${paperPercent}%` }} role="separator" aria-label="Resize paper and chat panes" aria-orientation="vertical" aria-valuemin={MIN_PAPER_PERCENT} aria-valuemax={80} aria-valuenow={Math.round(paperPercent)} tabIndex={0} onPointerDown={beginWorkspaceResize} onPointerMove={moveWorkspaceResize} onPointerUp={finishWorkspaceResize} onPointerCancel={() => { resizingRef.current = false; }} onDoubleClick={resetWorkspaceResize}><span /></div>
         <aside className="side-pane" style={{ '--chat-scale': chatScale } as CSSProperties}>
-          <div className="mode-tabs"><div className="tab-list"><button className="active">Chat</button><button disabled title="Document notepad coming soon">Notes <span>Beta</span></button></div><div className="chat-text-controls" role="group" aria-label="Chat text size"><span className="control-label">Text size</span><div><button type="button" aria-label="Decrease chat text size" title="Decrease chat text size" disabled={chatScale <= MIN_CHAT_SCALE} onClick={() => changeChatScale(-CHAT_SCALE_STEP)}>A−</button><output aria-live="polite" aria-label={`Chat text size ${Math.round(chatScale * 100)} percent`}>{Math.round(chatScale * 100)}%</output><button type="button" aria-label="Increase chat text size" title="Increase chat text size" disabled={chatScale >= MAX_CHAT_SCALE} onClick={() => changeChatScale(CHAT_SCALE_STEP)}>A+</button></div></div></div>
-          {historyOpen ? <section className="history-view">
+          <div className="mode-tabs"><div className="tab-list"><button type="button" className={paneMode === 'chat' ? 'active' : ''} onClick={() => setPaneMode('chat')}>Chat</button><button type="button" className={paneMode === 'notes' ? 'active' : ''} onClick={() => setPaneMode('notes')}>Notes</button></div>{paneMode === 'chat' && <div className="chat-text-controls" role="group" aria-label="Chat text size"><span className="control-label">Text size</span><div><button type="button" aria-label="Decrease chat text size" title="Decrease chat text size" disabled={chatScale <= MIN_CHAT_SCALE} onClick={() => changeChatScale(-CHAT_SCALE_STEP)}>A−</button><output aria-live="polite" aria-label={`Chat text size ${Math.round(chatScale * 100)} percent`}>{Math.round(chatScale * 100)}%</output><button type="button" aria-label="Increase chat text size" title="Increase chat text size" disabled={chatScale >= MAX_CHAT_SCALE} onClick={() => changeChatScale(CHAT_SCALE_STEP)}>A+</button></div></div>}</div>
+          {paneMode === 'notes' ? <PaperNoteEditor documentId={active.id} paperName={active.original_name.replace(/\.pdf$/i, '')} /> : historyOpen ? <section className="history-view">
             <div className="history-header"><div><p>Conversations</p><h2>Chat history</h2><span>{conversations.length} saved for this paper</span></div><button type="button" onClick={() => setHistoryOpen(false)} aria-label="Close chat history">×</button></div>
             <button type="button" className="new-chat-card" onClick={() => void createNewConversation()}><span>＋</span><div><strong>Start a new chat</strong><small>Uses your current default model</small></div><i>→</i></button>
             <div className="history-list">{conversations.map((item) => <article className={`history-card${item.id === activeConversation?.id ? ' current' : ''}`} key={item.id}>{renamingChatId === item.id ? <form className="chat-title-form history-title-form" onSubmit={(event) => void renameConversation(event, item)}><input autoFocus value={chatTitleValue} maxLength={200} aria-label="Chat title" onChange={(event) => setChatTitleValue(event.target.value)} onKeyDown={(event) => { if (event.key === 'Escape') setRenamingChatId(null); }} /><button type="submit" disabled={!chatTitleValue.trim() || titleSaving}>Save</button><button type="button" onClick={() => setRenamingChatId(null)}>Cancel</button></form> : <button type="button" className="history-card-main" onClick={() => void openConversation(item)}><div className="history-card-top"><span className="history-model-mark">✦</span><time>{formatConversationDate(item.updated_at)}</time></div><strong>{item.title}</strong><p>{item.provider} · {item.model_id}</p><div className="history-card-meta"><span>{Math.ceil(item.message_count / 2)} {Math.ceil(item.message_count / 2) === 1 ? 'exchange' : 'exchanges'}</span><span>{item.context_builder_version === 'quick-ask-v1' ? 'Selection only' : 'Full paper'}</span>{item.id === activeConversation?.id && <em>Current</em>}</div></button>}<div className="history-card-actions"><button type="button" aria-label={`Rename ${item.title}`} title="Rename chat" onClick={() => beginChatRename(item)}>✎</button>{item.provider === 'zen' && item.message_count > 0 && <button type="button" aria-label={`Regenerate title for ${item.title}`} title="Regenerate title with GPT-5.6 Luna" disabled={titleSaving} onClick={() => void regenerateConversationTitle(item)}>↻</button>}<button type="button" className="history-delete" aria-label={`Delete ${item.title}`} title="Delete chat" onClick={() => void deleteConversation(item)}><TrashIcon /></button></div></article>)}</div>
@@ -1513,6 +1516,183 @@ function SettingsDialog({ onClose }: { onClose: () => void }) {
     </div>
   </div>;
 }
+
+const NOTE_ALLOWED_TAGS = new Set(['P', 'DIV', 'BR', 'H1', 'H2', 'H3', 'H4', 'H5', 'UL', 'OL', 'LI', 'BLOCKQUOTE', 'STRONG', 'B', 'EM', 'I', 'U', 'S', 'A', 'CODE', 'PRE', 'INPUT']);
+
+function sanitizeNoteHtml(source: string) {
+  const document = new DOMParser().parseFromString(source, 'text/html');
+  for (const element of Array.from(document.body.querySelectorAll('*'))) {
+    if (!NOTE_ALLOWED_TAGS.has(element.tagName)) {
+      element.replaceWith(...Array.from(element.childNodes));
+      continue;
+    }
+    const linkHref = element.tagName === 'A' ? element.getAttribute('href') ?? '' : '';
+    const checked = element.tagName === 'INPUT' && (element as HTMLInputElement).checked;
+    for (const attribute of Array.from(element.attributes)) element.removeAttribute(attribute.name);
+    if (element.tagName === 'A') {
+      if (/^https?:\/\//i.test(linkHref)) {
+        element.setAttribute('href', linkHref);
+        element.setAttribute('target', '_blank');
+        element.setAttribute('rel', 'noreferrer');
+      }
+    }
+    if (element.tagName === 'INPUT') {
+      element.setAttribute('type', 'checkbox');
+      element.setAttribute('contenteditable', 'false');
+      if (checked) element.setAttribute('checked', '');
+    }
+  }
+  return document.body.innerHTML;
+}
+
+function PaperNoteEditor({ documentId, paperName }: { documentId: string; paperName: string }) {
+  const editorRef = useRef<HTMLDivElement>(null);
+  const revisionRef = useRef(0);
+  const saveTimerRef = useRef<number | null>(null);
+  const saveSequenceRef = useRef(Promise.resolve());
+  const [status, setStatus] = useState<'loading' | 'saved' | 'saving' | 'error'>('loading');
+  const [errorMessage, setErrorMessage] = useState('');
+  const [empty, setEmpty] = useState(true);
+
+  useEffect(() => {
+    let cancelled = false;
+    void fetch(`${API_BASE}/api/documents/${documentId}/paper-note`).then(async (response) => {
+      const payload = await response.json() as PaperNote & { detail?: string };
+      if (!response.ok) throw new Error(payload.detail ?? 'Could not load this note.');
+      if (cancelled || !editorRef.current) return;
+      revisionRef.current = payload.revision;
+      editorRef.current.innerHTML = sanitizeNoteHtml(payload.content_html);
+      setEmpty(!payload.plain_text.trim());
+      setStatus('saved');
+    }).catch((reason) => { if (!cancelled) { setErrorMessage(reason instanceof Error ? reason.message : 'Could not load this note.'); setStatus('error'); } });
+    return () => { cancelled = true; if (saveTimerRef.current !== null) window.clearTimeout(saveTimerRef.current); };
+  }, [documentId]);
+
+  const save = useCallback(() => {
+    const editor = editorRef.current;
+    if (!editor) return Promise.resolve();
+    const content_html = sanitizeNoteHtml(editor.innerHTML);
+    const plain_text = editor.innerText;
+    setStatus('saving'); setErrorMessage('');
+    const operation = async () => {
+      const response = await fetch(`${API_BASE}/api/documents/${documentId}/paper-note`, { method: 'PUT', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ content_html, plain_text, revision: revisionRef.current }) });
+      const payload = await response.json() as PaperNote & { detail?: string };
+      if (!response.ok) throw new Error(payload.detail ?? 'Could not save this note.');
+      revisionRef.current = payload.revision;
+      setStatus('saved');
+    };
+    saveSequenceRef.current = saveSequenceRef.current.then(operation).catch((reason) => { setErrorMessage(reason instanceof Error ? reason.message : 'Could not save this note.'); setStatus('error'); });
+    return saveSequenceRef.current;
+  }, [documentId]);
+
+  function changed() {
+    setEmpty(!(editorRef.current?.innerText.trim()));
+    setStatus('saving');
+    if (saveTimerRef.current !== null) window.clearTimeout(saveTimerRef.current);
+    saveTimerRef.current = window.setTimeout(() => void save(), 650);
+  }
+
+  function command(name: string, value?: string) {
+    editorRef.current?.focus();
+    document.execCommand(name, false, value);
+    changed();
+  }
+
+  function addLink() {
+    const href = window.prompt('Paste a link');
+    if (href && /^https?:\/\//i.test(href)) command('createLink', href);
+  }
+
+  function addChecklist() {
+    editorRef.current?.focus();
+    document.execCommand('insertHTML', false, '<ul class="note-checklist"><li><input type="checkbox" contenteditable="false">&nbsp;Task</li></ul><p><br></p>');
+    changed();
+  }
+
+  function placeCaretAtStart(element: HTMLElement) {
+    const range = document.createRange();
+    range.selectNodeContents(element);
+    range.collapse(true);
+    const selection = window.getSelection();
+    selection?.removeAllRanges();
+    selection?.addRange(range);
+  }
+
+  function exitEmptyFormat(event: React.KeyboardEvent<HTMLDivElement>) {
+    if (event.key !== 'Backspace' || !editorRef.current) return false;
+    const selection = window.getSelection();
+    if (!selection?.rangeCount || !selection.isCollapsed || !editorRef.current) return;
+    const node = selection.anchorNode?.nodeType === Node.TEXT_NODE ? selection.anchorNode.parentElement : selection.anchorNode as HTMLElement | null;
+    const listItem = node?.closest('li');
+    const formattedBlock = node?.closest('h1, h2, h3, h4, h5, blockquote');
+    const target = listItem ?? formattedBlock;
+    if (!target || !editorRef.current.contains(target) || (target.textContent ?? '').replace(/\u00a0/g, ' ').trim()) return false;
+    event.preventDefault();
+    const paragraph = document.createElement('p');
+    paragraph.append(document.createElement('br'));
+    if (listItem) {
+      const list = listItem.parentElement!;
+      const trailingList = listItem.nextElementSibling ? list.cloneNode(false) as HTMLElement : null;
+      while (listItem.nextElementSibling) trailingList!.append(listItem.nextElementSibling);
+      list.after(paragraph);
+      if (trailingList?.children.length) paragraph.after(trailingList);
+      listItem.remove();
+      if (!list.children.length) list.remove();
+    } else {
+      target.replaceWith(paragraph);
+    }
+    placeCaretAtStart(paragraph);
+    changed();
+    return true;
+  }
+
+  function applyInputRule(event: React.KeyboardEvent<HTMLDivElement>) {
+    if (exitEmptyFormat(event)) return;
+    if (event.key !== ' ' || event.metaKey || event.ctrlKey || event.altKey || event.nativeEvent.isComposing) return;
+    const selection = window.getSelection();
+    if (!selection?.rangeCount || !selection.isCollapsed || !editorRef.current) return;
+    let block = selection.anchorNode?.nodeType === Node.TEXT_NODE ? selection.anchorNode.parentElement : selection.anchorNode as HTMLElement | null;
+    while (block?.parentElement && block.parentElement !== editorRef.current) block = block.parentElement;
+    if (block === editorRef.current && selection.anchorNode?.nodeType === Node.TEXT_NODE) {
+      const wrapper = document.createElement('div');
+      selection.anchorNode.before(wrapper);
+      wrapper.append(selection.anchorNode);
+      block = wrapper;
+    }
+    if (!block || block.parentElement !== editorRef.current) return;
+    const prefix = (block.textContent ?? '').replace(/\u00a0/g, ' ');
+    const heading = /^(#{1,5})$/.exec(prefix);
+    const unordered = /^[-*+]$/.test(prefix);
+    const ordered = /^1\.$/.test(prefix);
+    const quote = prefix === '>';
+    const task = /^- \[(?: |x|X)\]$/.test(prefix);
+    if (!heading && !unordered && !ordered && !quote && !task) return;
+    event.preventDefault();
+    const range = document.createRange();
+    range.selectNodeContents(block);
+    selection.removeAllRanges(); selection.addRange(range);
+    document.execCommand('delete');
+    if (heading) document.execCommand('formatBlock', false, `h${heading[1].length}`);
+    else if (unordered) document.execCommand('insertUnorderedList');
+    else if (ordered) document.execCommand('insertOrderedList');
+    else if (quote) document.execCommand('formatBlock', false, 'blockquote');
+    else document.execCommand('insertHTML', false, `<ul><li><input type="checkbox" contenteditable="false"${/[xX]/.test(prefix) ? ' checked' : ''}>&nbsp;</li></ul>`);
+    changed();
+  }
+
+  return <section className="paper-note-mode">
+    <header className="paper-note-header"><div><span>Paper note</span><h2>{paperName}</h2></div><small className={`paper-note-status ${status}`} role="status">{status === 'loading' ? 'Loading…' : status === 'saving' ? 'Saving…' : status === 'error' ? 'Not saved' : 'Saved'}</small></header>
+    <div className="paper-note-toolbar" role="toolbar" aria-label="Note formatting" onMouseDown={(event) => event.preventDefault()}>
+      <button type="button" title="Heading 1" onClick={() => command('formatBlock', 'h1')}>H1</button><button type="button" title="Heading 2" onClick={() => command('formatBlock', 'h2')}>H2</button><button type="button" title="Paragraph" onClick={() => command('formatBlock', 'p')}>¶</button><i />
+      <button type="button" title="Bold" onClick={() => command('bold')}><strong>B</strong></button><button type="button" title="Italic" onClick={() => command('italic')}><em>I</em></button><button type="button" title="Link" onClick={addLink}>↗</button><i />
+      <button type="button" title="Bulleted list" onClick={() => command('insertUnorderedList')}>• List</button><button type="button" title="Numbered list" onClick={() => command('insertOrderedList')}>1. List</button><button type="button" title="Checklist" onClick={addChecklist}>☐</button><button type="button" title="Quote" onClick={() => command('formatBlock', 'blockquote')}>❝</button>
+      <span /><button type="button" title="Undo" onClick={() => command('undo')}>↶</button><button type="button" title="Redo" onClick={() => command('redo')}>↷</button>
+    </div>
+    <div className="paper-note-canvas"><div ref={editorRef} className="paper-note-editor" contentEditable suppressContentEditableWarning role="textbox" aria-multiline="true" aria-label="Paper note" spellCheck onKeyDown={applyInputRule} onInput={changed} onClick={(event) => { if ((event.target as HTMLElement).matches('input[type="checkbox"]')) changed(); }} onBlur={() => void save()} /><div className={`paper-note-placeholder${empty ? ' visible' : ''}`} aria-hidden="true"><strong>Start writing about this paper…</strong><span>Try # through ##### for headings, - for bullets, 1. for numbers, - [ ] for tasks, or &gt; for quotes.</span></div></div>
+    {errorMessage && <button type="button" className="paper-note-error" onClick={() => void save()}>{errorMessage} Click to retry.</button>}
+  </section>;
+}
+
 function MarkdownAnswer({ children, streaming = false }: { children: string; streaming?: boolean }) {
   return <div className="markdown-answer"><ReactMarkdown remarkPlugins={[remarkGfm, remarkMath]} rehypePlugins={[rehypeKatex]} components={{ a: ({ children: linkText, ...props }) => <a {...props} target="_blank" rel="noreferrer">{linkText}</a> }}>{children}</ReactMarkdown>{streaming && <i className="stream-cursor" />}</div>;
 }

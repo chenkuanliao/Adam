@@ -17,6 +17,21 @@ class DocumentUpdate(BaseModel):
     name: str = Field(min_length=1, max_length=512)
 
 
+class PaperNoteUpdate(BaseModel):
+    content_html: str = Field(max_length=1_000_000)
+    plain_text: str = Field(max_length=300_000)
+    revision: int = Field(ge=0)
+
+
+class PaperNoteOut(BaseModel):
+    document_id: str
+    content_html: str
+    plain_text: str
+    revision: int
+    created_at: datetime | None = None
+    updated_at: datetime | None = None
+
+
 class PageTextOut(BaseModel):
     page: int
     text: str

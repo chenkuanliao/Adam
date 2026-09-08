@@ -28,6 +28,7 @@ class Document(Base):
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
     pages: Mapped[list["Page"]] = relationship(back_populates="document", cascade="all, delete-orphan")
     conversations: Mapped[list["Conversation"]] = relationship(back_populates="document", cascade="all, delete-orphan")
+    paper_note: Mapped["PaperNote | None"] = relationship(back_populates="document", cascade="all, delete-orphan", uselist=False)
 
 
 class Page(Base):
@@ -85,6 +86,18 @@ class Annotation(Base):
     geometry_json: Mapped[str] = mapped_column(Text)
     note_text: Mapped[str | None] = mapped_column(Text, nullable=True)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
+
+
+class PaperNote(Base):
+    __tablename__ = "paper_notes"
+
+    document_id: Mapped[str] = mapped_column(ForeignKey("documents.id", ondelete="CASCADE"), primary_key=True)
+    content_html: Mapped[str] = mapped_column(Text, default="")
+    plain_text: Mapped[str] = mapped_column(Text, default="")
+    revision: Mapped[int] = mapped_column(Integer, default=0)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow, onupdate=utcnow)
+    document: Mapped[Document] = relationship(back_populates="paper_note")
 
 
 class ModelFavorite(Base):
