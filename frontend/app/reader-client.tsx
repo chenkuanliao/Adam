@@ -707,8 +707,8 @@ export default function Home() {
 
   function openQuickAskFromSelection() {
     if (!pendingSelection) return;
-    const { id, text, page, x, y } = pendingSelection;
-    setQuickAskTarget({ id, text, page, x, y: Math.min(window.innerHeight - 500, Math.max(70, y + 12)) });
+    const { id, text, page, range } = pendingSelection;
+    setQuickAskTarget({ id, text, page, ...placeQuickAskBeside(range.getBoundingClientRect()) });
     setQuickQuestion(''); setQuickActiveQuestion(''); setQuickAnswer(''); setQuickTurns([]); setQuickError('');
     clearBrowserSelection();
     window.requestAnimationFrame(() => quickAskInputRef.current?.focus());
@@ -897,7 +897,13 @@ export default function Home() {
     });
     const page = Math.min(...intersectingPages.map((item) => item.page));
     const pageEnd = Math.max(...intersectingPages.map((item) => item.page));
-    setQuickAskTarget({ id: crypto.randomUUID(), text: 'Selected PDF area', page, pageEnd, imageDataUrl: output.toDataURL('image/jpeg', .92), x: Math.min(window.innerWidth - 220, Math.max(220, event.clientX)), y: Math.min(window.innerHeight - 500, Math.max(70, event.clientY - 12)) });
+    const target = {
+      left: viewerRect.left + selectionLeft - viewer.scrollLeft,
+      right: viewerRect.left + selectionRight - viewer.scrollLeft,
+      top: viewerRect.top + selectionTop - viewer.scrollTop,
+      bottom: viewerRect.top + selectionBottom - viewer.scrollTop,
+    };
+    setQuickAskTarget({ id: crypto.randomUUID(), text: 'Selected PDF area', page, pageEnd, imageDataUrl: output.toDataURL('image/jpeg', .92), ...placeQuickAskBeside(target) });
     setQuickQuestion(''); setQuickActiveQuestion(''); setQuickAnswer(''); setQuickTurns([]); setQuickError('');
     window.requestAnimationFrame(() => quickAskInputRef.current?.focus());
   }
@@ -923,8 +929,16 @@ export default function Home() {
   }
 
   function placeNoteBeside(target: Pick<DOMRect, 'left' | 'right' | 'top' | 'bottom'>) {
-    const editorWidth = Math.min(340, window.innerWidth - 24);
-    const editorHeight = 330;
+    return placePopoverBeside(target, 340, 330);
+  }
+
+  function placeQuickAskBeside(target: Pick<DOMRect, 'left' | 'right' | 'top' | 'bottom'>) {
+    return placePopoverBeside(target, 430, 620);
+  }
+
+  function placePopoverBeside(target: Pick<DOMRect, 'left' | 'right' | 'top' | 'bottom'>, preferredWidth: number, preferredHeight: number) {
+    const editorWidth = Math.min(preferredWidth, window.innerWidth - 24);
+    const editorHeight = Math.min(preferredHeight, window.innerHeight - 24);
     const gap = 18;
     let x = target.right + gap + editorWidth / 2;
     let y = Math.max(8, Math.min(window.innerHeight - editorHeight - 8, target.top));
