@@ -78,6 +78,9 @@ export default function Home() {
   const [renaming, setRenaming] = useState(false);
   const [renameValue, setRenameValue] = useState('');
   const [renameSaving, setRenameSaving] = useState(false);
+  const [renamingChatId, setRenamingChatId] = useState<string | null>(null);
+  const [chatTitleValue, setChatTitleValue] = useState('');
+  const [titleSaving, setTitleSaving] = useState(false);
   const [asking, setAsking] = useState(false);
   const [error, setError] = useState('');
   const [settingsOpen, setSettingsOpen] = useState(false);
@@ -532,6 +535,42 @@ export default function Home() {
     }
   }
 
+  function beginChatRename(conversation: Conversation) {
+    setRenamingChatId(conversation.id);
+    setChatTitleValue(conversation.title);
+  }
+
+  async function renameConversation(event: FormEvent<HTMLFormElement>, conversation: Conversation) {
+    event.preventDefault();
+    const title = chatTitleValue.trim();
+    if (!title || titleSaving) return;
+    setTitleSaving(true); setError('');
+    try {
+      const response = await fetch(`${API_BASE}/api/conversations/${conversation.id}`, { method: 'PATCH', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ title }) });
+      const payload = await response.json();
+      if (!response.ok) throw new Error(payload.detail ?? 'Could not rename this chat.');
+      const updated = payload as Conversation;
+      setConversations((current) => current.map((item) => item.id === updated.id ? { ...item, ...updated } : item));
+      setActiveConversation((current) => current?.id === updated.id ? { ...current, ...updated } : current);
+      setRenamingChatId(null);
+    } catch (reason) { setError(reason instanceof Error ? reason.message : 'Could not rename this chat.'); }
+    finally { setTitleSaving(false); }
+  }
+
+  async function regenerateConversationTitle(conversation: Conversation) {
+    if (titleSaving) return;
+    setTitleSaving(true); setError('');
+    try {
+      const response = await fetch(`${API_BASE}/api/conversations/${conversation.id}/regenerate-title`, { method: 'POST' });
+      const payload = await response.json();
+      if (!response.ok) throw new Error(payload.detail ?? 'Could not regenerate this title.');
+      const updated = payload as Conversation;
+      setConversations((current) => current.map((item) => item.id === updated.id ? { ...item, ...updated } : item));
+      setActiveConversation((current) => current?.id === updated.id ? { ...current, ...updated } : current);
+    } catch (reason) { setError(reason instanceof Error ? reason.message : 'Could not regenerate this title.'); }
+    finally { setTitleSaving(false); }
+  }
+
   useEffect(() => {
     if (active || papers.length === 0) return;
     const saved = papers.find((paper) => paper.id === window.localStorage.getItem('adam.activePaper'));
@@ -873,14 +912,21 @@ export default function Home() {
           const line = block.split('\n').find((item) => item.startsWith('data: '));
           if (!line) continue;
           const data = JSON.parse(line.slice(6));
-          if (data.type === 'started') setStreamStatus('connecting');
+          if (data.type === 'started') {
+            setStreamStatus('connecting');
+            if (data.title) {
+              setActiveConversation((current) => current?.id === sendingConversation.id ? { ...current, title: data.title } : current);
+              setConversations((current) => current.map((item) => item.id === sendingConversation.id ? { ...item, title: data.title } : item));
+            }
+          }
           if (data.type === 'delta') answerQueueRef.current += data.text;
           if (data.type === 'completed') streamFinishedRef.current = true;
           if (data.type === 'error') throw new Error(data.message);
         }
       }
       streamFinishedRef.current = true;
-      const updatedConversation = { ...sendingConversation, title: sendingConversation.title === 'New chat' ? sentQuestion.slice(0, 80) : sendingConversation.title, message_count: sendingConversation.message_count + 2, updated_at: new Date().toISOString() };
+      const savedConversation = await fetch(`${API_BASE}/api/conversations/${sendingConversation.id}`).then((result) => result.ok ? result.json() as Promise<Conversation> : null).catch(() => null);
+      const updatedConversation = { ...sendingConversation, ...(savedConversation ?? {}), message_count: sendingConversation.message_count + 2, updated_at: new Date().toISOString() };
       setActiveConversation(updatedConversation);
       setConversations((current) => current.map((item) => item.id === updatedConversation.id ? updatedConversation : item));
     } catch (reason) {
@@ -927,9 +973,9 @@ export default function Home() {
           {historyOpen ? <section className="history-view">
             <div className="history-header"><div><p>Conversations</p><h2>Chat history</h2><span>{conversations.length} saved for this paper</span></div><button type="button" onClick={() => setHistoryOpen(false)} aria-label="Close chat history">×</button></div>
             <button type="button" className="new-chat-card" onClick={() => void createNewConversation()}><span>＋</span><div><strong>Start a new chat</strong><small>Uses your current default model</small></div><i>→</i></button>
-            <div className="history-list">{conversations.map((item) => <article className={`history-card${item.id === activeConversation?.id ? ' current' : ''}`} key={item.id}><button type="button" className="history-card-main" onClick={() => void openConversation(item)}><div className="history-card-top"><span className="history-model-mark">✦</span><time>{formatConversationDate(item.updated_at)}</time></div><strong>{item.title}</strong><p>{item.provider} · {item.model_id}</p><div className="history-card-meta"><span>{Math.ceil(item.message_count / 2)} {Math.ceil(item.message_count / 2) === 1 ? 'exchange' : 'exchanges'}</span><span>Full paper</span>{item.id === activeConversation?.id && <em>Current</em>}</div></button><button type="button" className="history-delete" aria-label={`Delete ${item.title}`} title="Delete chat" onClick={() => void deleteConversation(item)}><TrashIcon /></button></article>)}</div>
+            <div className="history-list">{conversations.map((item) => <article className={`history-card${item.id === activeConversation?.id ? ' current' : ''}`} key={item.id}>{renamingChatId === item.id ? <form className="chat-title-form history-title-form" onSubmit={(event) => void renameConversation(event, item)}><input autoFocus value={chatTitleValue} maxLength={200} aria-label="Chat title" onChange={(event) => setChatTitleValue(event.target.value)} onKeyDown={(event) => { if (event.key === 'Escape') setRenamingChatId(null); }} /><button type="submit" disabled={!chatTitleValue.trim() || titleSaving}>Save</button><button type="button" onClick={() => setRenamingChatId(null)}>Cancel</button></form> : <button type="button" className="history-card-main" onClick={() => void openConversation(item)}><div className="history-card-top"><span className="history-model-mark">✦</span><time>{formatConversationDate(item.updated_at)}</time></div><strong>{item.title}</strong><p>{item.provider} · {item.model_id}</p><div className="history-card-meta"><span>{Math.ceil(item.message_count / 2)} {Math.ceil(item.message_count / 2) === 1 ? 'exchange' : 'exchanges'}</span><span>Full paper</span>{item.id === activeConversation?.id && <em>Current</em>}</div></button>}<div className="history-card-actions"><button type="button" aria-label={`Rename ${item.title}`} title="Rename chat" onClick={() => beginChatRename(item)}>✎</button>{item.provider === 'zen' && item.message_count > 0 && <button type="button" aria-label={`Regenerate title for ${item.title}`} title="Regenerate title with GPT-5.6 Luna" disabled={titleSaving} onClick={() => void regenerateConversationTitle(item)}>↻</button>}<button type="button" className="history-delete" aria-label={`Delete ${item.title}`} title="Delete chat" onClick={() => void deleteConversation(item)}><TrashIcon /></button></div></article>)}</div>
           </section> : <>
-            <div className="conversation-header"><div><strong>{activeConversation?.title ?? 'Loading chat…'}</strong><small>{activeConversation ? `${activeConversation.provider} · ${activeConversation.model_id}` : 'Preparing paper context'}</small></div><div className="conversation-actions"><button type="button" onClick={() => void createNewConversation()} title="Start a new chat"><span>＋</span> New</button><button type="button" onClick={() => setHistoryOpen(true)}><span>☰</span> History</button></div></div>
+            <div className="conversation-header"><div>{activeConversation && renamingChatId === activeConversation.id ? <form className="chat-title-form" onSubmit={(event) => void renameConversation(event, activeConversation)}><input autoFocus value={chatTitleValue} maxLength={200} aria-label="Chat title" onChange={(event) => setChatTitleValue(event.target.value)} onKeyDown={(event) => { if (event.key === 'Escape') setRenamingChatId(null); }} /><button type="submit" disabled={!chatTitleValue.trim() || titleSaving}>Save</button></form> : <button type="button" className="chat-title-button" title="Rename chat" onClick={() => activeConversation && beginChatRename(activeConversation)}><strong>{activeConversation?.title ?? 'Loading chat…'}</strong><span>✎</span></button>}<small>{activeConversation ? `${activeConversation.provider} · ${activeConversation.model_id}` : 'Preparing paper context'}</small></div><div className="conversation-actions">{activeConversation?.provider === 'zen' && activeConversation.message_count > 0 && <button type="button" disabled={titleSaving} onClick={() => void regenerateConversationTitle(activeConversation)} title="Regenerate title with GPT-5.6 Luna"><span>↻</span> Title</button>}<button type="button" onClick={() => void createNewConversation()} title="Start a new chat"><span>＋</span> New</button><button type="button" onClick={() => setHistoryOpen(true)}><span>☰</span> History</button></div></div>
             <div className="chat-body" ref={chatBodyRef} onWheelCapture={(event) => { if (event.deltaY < 0) pauseChatFollow(); }} onTouchMove={pauseChatFollow} onPointerDown={(event) => { if (event.target === event.currentTarget) pauseChatFollow(); }} onScroll={(event) => { const element = event.currentTarget; followOutputRef.current = element.scrollHeight - element.scrollTop - element.clientHeight < 40; }}><div className="chat-heading"><span className="spark">✦</span><div><strong>Ask about this paper</strong><p>The full paper is available automatically. Select text only when you want to focus the answer.</p></div></div>{chatConfigured === false && <button type="button" className="no-key-notice" onClick={() => setSettingsOpen(true)}><strong>No API key configured</strong><span>Choose a provider and add a key in Settings to enable chat.</span></button>}
               {chatHistory.map((turn) => <div className="chat-turn" key={turn.id}><ContextList selections={turn.context} /><div className="user-message"><span>You</span><p>{turn.question}</p></div><div className="answer-card complete"><div className="answer-meta"><span>Adam</span><span className="stream-state">Done</span></div><MarkdownAnswer>{turn.answer}</MarkdownAnswer></div></div>)}
               {submittedQuestion && <><ContextList selections={submittedContext} /><div className="user-message"><span>You</span><p>{submittedQuestion}</p></div></>}

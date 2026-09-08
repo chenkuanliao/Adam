@@ -17,7 +17,7 @@ from .models import Annotation, Conversation, Document, Message, ModelFavorite, 
 from .schemas import AnnotationIn, AnnotationOut, AppSettingsOut, AppSettingsUpdate, ChatRequest, ConversationCreate, ConversationDetail, ConversationOut, ConversationUpdate, DocumentOut, DocumentUpdate, ModelFavoriteUpdate, PageTextOut, ProviderKeyUpdate, ProviderModelsOut
 from .services.context import build_paper_context
 from .services.documents import ingest_pdf
-from .services.llm import AnthropicProvider, GoogleProvider, OpenAICompatibleProvider, OpenAIResponsesProvider, sse
+from .services.llm import AnthropicProvider, GoogleProvider, OpenAICompatibleProvider, OpenAIResponsesProvider, generate_zen_title, sse
 
 settings = get_settings()
 run_migrations()
@@ -27,7 +27,7 @@ app.add_middleware(
     CORSMiddleware,
     allow_origins=[origin.strip() for origin in settings.cors_origins.split(",")],
     allow_credentials=False,
-    allow_methods=["GET", "POST", "PUT", "DELETE", "OPTIONS"],
+    allow_methods=["GET", "POST", "PUT", "PATCH", "DELETE", "OPTIONS"],
     allow_headers=["Content-Type"],
 )
 
@@ -282,7 +282,34 @@ def update_conversation(conversation_id: str, request: ConversationUpdate, db: S
     conversation = db.get(Conversation, conversation_id)
     if not conversation:
         raise HTTPException(404, "Conversation not found.")
-    conversation.title = request.title.strip()
+    title = request.title.strip()
+    if not title:
+        raise HTTPException(422, "Chat title cannot be blank.")
+    conversation.title = title
+    db.commit()
+    db.refresh(conversation)
+    return conversation
+
+
+@app.post("/api/conversations/{conversation_id}/regenerate-title", response_model=ConversationOut)
+async def regenerate_conversation_title(conversation_id: str, db: Session = Depends(get_db)) -> Conversation:
+    conversation = db.get(Conversation, conversation_id)
+    if not conversation:
+        raise HTTPException(404, "Conversation not found.")
+    if conversation.provider != "zen":
+        raise HTTPException(409, "AI title generation is available for OpenCode Zen chats.")
+    api_key = settings.provider_api_key("zen")
+    if not api_key:
+        raise HTTPException(503, "No OpenCode Zen API key is configured.")
+    messages = list(db.scalars(select(Message).where(Message.conversation_id == conversation.id).order_by(Message.created_at)))
+    if not messages:
+        raise HTTPException(409, "Send a message before generating a title.")
+    transcript = "\n\n".join(f"{message.role.title()}: {message.content}" for message in messages)
+    fallback = next((message.content for message in messages if message.role == "user"), conversation.title)[:80]
+    try:
+        conversation.title = await generate_zen_title(api_key, transcript, fallback)
+    except (httpx.HTTPError, ValueError, KeyError) as exc:
+        raise HTTPException(502, "OpenCode Zen could not generate a title.") from exc
     db.commit()
     db.refresh(conversation)
     return conversation
@@ -329,9 +356,19 @@ async def chat_stream(conversation_id: str, request: ChatRequest, db: Session = 
     context = {"scope": "selection" if request.selected_text or request.images else "paper", "page": request.page, "selected_text": request.selected_text, "images": [image.model_dump() for image in request.images], "context_mode": context_mode}
     user_message = Message(document_id=conversation.document_id, conversation_id=conversation.id, role="user", content=request.question, context_json=json.dumps(context))
     db.add(user_message)
+    should_generate_title = conversation.title == "New chat" and provider_name == "zen"
     if conversation.title == "New chat":
         conversation.title = request.question.strip()[:80]
     db.commit()
+
+    if should_generate_title:
+        try:
+            conversation.title = await generate_zen_title(api_key, f"User: {request.question.strip()}", conversation.title)
+            db.commit()
+        except (httpx.HTTPError, ValueError, KeyError):
+            # A title must never prevent the actual chat request from succeeding.
+            db.rollback()
+            conversation = db.get(Conversation, conversation_id)
 
     model = conversation.model_id
     system_prompt = conversation.system_prompt + paper_context
@@ -361,7 +398,7 @@ async def chat_stream(conversation_id: str, request: ChatRequest, db: Session = 
                     prior, saved = pending
                     history.append(ChatTurnIn(question=prior.content, answer=message.content, selected_text=saved.get("selected_text", ""), page=saved.get("page"), images=[ContextImageIn(**item) for item in saved.get("images", [])]))
                     pending = None
-            yield sse({"type": "started", "provider": provider_name, "model": model, "context_mode": context_mode, "conversation_id": conversation.id})
+            yield sse({"type": "started", "provider": provider_name, "model": model, "context_mode": context_mode, "conversation_id": conversation.id, "title": conversation.title})
             async for delta in provider.stream_answer(request.question, request.selected_text, request.images, request.page, history[-20:]):
                 complete += delta
                 yield sse({"type": "delta", "text": delta})

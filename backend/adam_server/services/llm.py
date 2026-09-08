@@ -6,6 +6,12 @@ import httpx
 
 from ..schemas import ChatTurnIn, ContextImageIn
 
+TITLE_MODEL = "gpt-5.6-luna"
+TITLE_SYSTEM_PROMPT = (
+    "Write a short, specific title for this research-paper chat. Return only the title, "
+    "with no quotation marks, markdown, or ending punctuation. Use at most 8 words."
+)
+
 
 def request_headers(api_key: str, base_url: str, **extra: str) -> dict[str, str]:
     headers = {"Authorization": f"Bearer {api_key}", "Content-Type": "application/json", "User-Agent": "Adam-Paper-Reader/0.1", **extra}
@@ -21,6 +27,36 @@ def user_prompt(question: str, selection: str, page: int | None) -> str:
     return ("The passage below is the user's explicit focus for this question. Prioritize it while using the rest of the paper when helpful. "
             "Selection does not imply that the user agrees with it. Be precise and distinguish the paper's claim from your interpretation.\n\n"
             f"Selection ({location}):\n<selection>\n{selection}\n</selection>\n\nQuestion: {question}")
+
+
+def clean_title(value: str, fallback: str) -> str:
+    title = value.strip().strip('"\'`').splitlines()[0].strip() if value.strip() else ""
+    title = title.removesuffix(".").strip()
+    return (title or fallback.strip() or "New chat")[:200]
+
+
+async def generate_zen_title(api_key: str, transcript: str, fallback: str) -> str:
+    """Generate a title through OpenCode Zen's Responses-compatible Luna model."""
+    payload = {
+        "model": TITLE_MODEL,
+        "instructions": TITLE_SYSTEM_PROMPT,
+        "input": transcript[:30000],
+    }
+    async with httpx.AsyncClient(timeout=httpx.Timeout(connect=15, read=45, write=30, pool=15)) as client:
+        response = await client.post(
+            "https://opencode.ai/zen/v1/responses",
+            headers=request_headers(api_key, "https://opencode.ai/zen/v1"),
+            json=payload,
+        )
+        response.raise_for_status()
+        data = response.json()
+    text = data.get("output_text", "")
+    if not text:
+        for item in data.get("output", []):
+            for content in item.get("content", []):
+                if content.get("type") in {"output_text", "text"}:
+                    text += content.get("text", "")
+    return clean_title(text, fallback)
 
 
 class GoogleProvider:

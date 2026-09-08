@@ -173,3 +173,35 @@ def test_delete_paper_removes_file_and_related_records() -> None:
     assert client.get(f"/api/documents/{uploaded['id']}/file").status_code == 404
     assert client.get(f"/api/conversations/{conversation['id']}").status_code == 404
     assert all(item["id"] != uploaded["id"] for item in client.get("/api/documents").json())
+
+
+def test_zen_auto_title_manual_rename_and_regeneration(monkeypatch) -> None:
+    uploaded = client.post("/api/documents", files={"file": ("titles.pdf", BytesIO(sample_pdf("A unique title test paper.")), "application/pdf")}).json()
+    client.put("/api/settings", json={"provider": "zen", "model": "gpt-5.6-luna", "api_keys": {}})
+    monkeypatch.setattr(type(main_module.settings), "provider_api_key", lambda _self, _provider: "test-key")
+
+    generated_from: list[str] = []
+    async def fake_title(_key, transcript, _fallback):
+        generated_from.append(transcript)
+        return "Attention Mechanisms Explained" if len(generated_from) == 1 else "Attention Follow-up Analysis"
+
+    async def fake_stream(self, question, selected_text, images, page, history):
+        yield "A useful answer."
+
+    monkeypatch.setattr(main_module, "generate_zen_title", fake_title)
+    monkeypatch.setattr(main_module.OpenAIResponsesProvider, "stream_answer", fake_stream)
+    conversation = client.post(f"/api/documents/{uploaded['id']}/conversations", json={}).json()
+    response = client.post(f"/api/conversations/{conversation['id']}/messages/stream", json={"question": "How does attention work?"})
+    assert response.status_code == 200
+    assert '"title": "Attention Mechanisms Explained"' in response.text
+    assert client.get(f"/api/conversations/{conversation['id']}").json()["title"] == "Attention Mechanisms Explained"
+
+    renamed = client.patch(f"/api/conversations/{conversation['id']}", json={"title": "My own title"})
+    assert renamed.json()["title"] == "My own title"
+    assert client.patch(f"/api/conversations/{conversation['id']}", json={"title": "   "}).status_code == 422
+
+    regenerated = client.post(f"/api/conversations/{conversation['id']}/regenerate-title")
+    assert regenerated.status_code == 200
+    assert regenerated.json()["title"] == "Attention Follow-up Analysis"
+    assert "User: How does attention work?" in generated_from[-1]
+    assert "Assistant: A useful answer." in generated_from[-1]
