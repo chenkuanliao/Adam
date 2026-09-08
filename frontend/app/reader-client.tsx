@@ -24,6 +24,8 @@ type HighlightRect = { left: number; top: number; width: number; height: number 
 type HighlightEntry = ContextSelection & { color: string; range: Range | null; rects: HighlightRect[] };
 type StreamStatus = 'idle' | 'connecting' | 'streaming' | 'complete' | 'error';
 type ChatTurn = { id: string; question: string; answer: string; context: ContextSelection[] };
+type Conversation = { id: string; document_id: string; title: string; provider: string; model_id: string; context_builder_version: string; updated_at: string; message_count: number };
+type SavedMessage = { id: string; role: string; content: string; context_json: string | null };
 type ProviderId = 'zen' | 'openrouter' | 'openai' | 'anthropic' | 'google';
 type AppSettings = { provider: ProviderId; model: string; selected_models: Partial<Record<ProviderId, string>>; providers: Record<ProviderId, boolean>; favorites: Partial<Record<ProviderId, string[]>>; system_prompt: string };
 const PROVIDERS: Array<{ id: ProviderId; name: string; keyLabel: string }> = [
@@ -42,6 +44,8 @@ const MAX_CHAT_SCALE = 1.35;
 const CHAT_SCALE_STEP = .1;
 const DEFAULT_CHAT_SCALE = 1.2;
 const BASE_PAGE_WIDTH = 760;
+const DEFAULT_PAPER_PERCENT = 68;
+const MIN_PAPER_PERCENT = 52;
 const HIGHLIGHT_COLORS = [
   { color: '#f8e58c', label: 'Yellow', key: '1' },
   { color: '#bfe6cd', label: 'Green', key: '2' },
@@ -63,15 +67,21 @@ export default function Home() {
   const [submittedContext, setSubmittedContext] = useState<ContextSelection[]>([]);
   const [answer, setAnswer] = useState('');
   const [chatHistory, setChatHistory] = useState<ChatTurn[]>([]);
+  const [conversations, setConversations] = useState<Conversation[]>([]);
+  const [activeConversation, setActiveConversation] = useState<Conversation | null>(null);
+  const [historyOpen, setHistoryOpen] = useState(false);
   const [streamStatus, setStreamStatus] = useState<StreamStatus>('idle');
   const [zoom, setZoom] = useState(DEFAULT_ZOOM);
   const [chatScale, setChatScale] = useState(DEFAULT_CHAT_SCALE);
+  const [paperPercent, setPaperPercent] = useState(DEFAULT_PAPER_PERCENT);
   const [uploading, setUploading] = useState(false);
   const [asking, setAsking] = useState(false);
   const [error, setError] = useState('');
   const [settingsOpen, setSettingsOpen] = useState(false);
   const [chatConfigured, setChatConfigured] = useState<boolean | null>(null);
   const viewerRef = useRef<HTMLDivElement>(null);
+  const workspaceRef = useRef<HTMLDivElement>(null);
+  const resizingRef = useRef(false);
   const chatBodyRef = useRef<HTMLDivElement>(null);
   const composerRef = useRef<HTMLTextAreaElement>(null);
   const focusComposerAfterContextRef = useRef(false);
@@ -136,6 +146,15 @@ export default function Home() {
     setChatScale((current) => Math.min(MAX_CHAT_SCALE, Math.max(MIN_CHAT_SCALE, Number((current + delta).toFixed(2)))));
   }, []);
 
+  async function syncConversationDefaults(conversation: Conversation) {
+    const response = await fetch(`${API_BASE}/api/conversations/${conversation.id}/sync-defaults`, { method: 'POST' });
+    if (!response.ok) return conversation;
+    const updated = await response.json() as Conversation;
+    setActiveConversation((current) => current?.id === updated.id ? updated : current);
+    setConversations((current) => current.map((item) => item.id === updated.id ? updated : item));
+    return updated;
+  }
+
   useEffect(() => {
     // The initial library fetch intentionally synchronizes remote state after mount.
     // eslint-disable-next-line react-hooks/set-state-in-effect
@@ -143,10 +162,18 @@ export default function Home() {
     void fetch(`${API_BASE}/api/settings`).then((response) => response.json()).then((value: AppSettings) => setChatConfigured(Boolean(value.providers[value.provider]))).catch(() => setChatConfigured(false));
   }, [loadPapers]);
 
+  useEffect(() => {
+    const stored = Number(window.localStorage.getItem('adam.paperPercent'));
+    // The persisted split is external browser state restored after hydration.
+    // eslint-disable-next-line react-hooks/set-state-in-effect
+    if (Number.isFinite(stored) && stored >= MIN_PAPER_PERCENT && stored <= 80) setPaperPercent(stored);
+  }, []);
+
   const closeSettings = useCallback(() => {
     setSettingsOpen(false);
     void fetch(`${API_BASE}/api/settings`).then((response) => response.json()).then((value: AppSettings) => setChatConfigured(Boolean(value.providers[value.provider]))).catch(() => setChatConfigured(false));
-  }, []);
+    if (activeConversation?.message_count === 0) void syncConversationDefaults(activeConversation);
+  }, [activeConversation]);
 
   useEffect(() => {
     const openSettings = (event: KeyboardEvent) => {
@@ -279,6 +306,41 @@ export default function Home() {
     autoScrollFrameRef.current = null;
   }
 
+  function resizeWorkspace(clientX: number) {
+    const workspace = workspaceRef.current;
+    if (!workspace) return;
+    const rect = workspace.getBoundingClientRect();
+    const minimumChatPixels = 340;
+    const maximum = Math.min(80, 100 - minimumChatPixels / rect.width * 100);
+    const next = Math.min(maximum, Math.max(MIN_PAPER_PERCENT, (clientX - rect.left) / rect.width * 100));
+    const rounded = Number(next.toFixed(2));
+    setPaperPercent(rounded);
+    window.localStorage.setItem('adam.paperPercent', String(rounded));
+  }
+
+  function beginWorkspaceResize(event: React.PointerEvent<HTMLDivElement>) {
+    if (event.button !== 0) return;
+    event.preventDefault();
+    resizingRef.current = true;
+    event.currentTarget.setPointerCapture(event.pointerId);
+    resizeWorkspace(event.clientX);
+  }
+
+  function moveWorkspaceResize(event: React.PointerEvent<HTMLDivElement>) {
+    if (resizingRef.current) resizeWorkspace(event.clientX);
+  }
+
+  function finishWorkspaceResize(event: React.PointerEvent<HTMLDivElement>) {
+    if (!resizingRef.current) return;
+    resizingRef.current = false;
+    event.currentTarget.releasePointerCapture(event.pointerId);
+  }
+
+  function resetWorkspaceResize() {
+    setPaperPercent(DEFAULT_PAPER_PERCENT);
+    window.localStorage.setItem('adam.paperPercent', String(DEFAULT_PAPER_PERCENT));
+  }
+
   function startAnswerReveal() {
     if (revealTimerRef.current !== null) return;
     revealTimerRef.current = window.setInterval(() => {
@@ -322,6 +384,7 @@ export default function Home() {
   }
 
   function openPaper(paper: Paper) {
+    window.localStorage.setItem('adam.activePaper', paper.id);
     setActive(paper);
     setPages(0);
     setContextSelections([]);
@@ -332,12 +395,81 @@ export default function Home() {
     setSubmittedContext([]);
     setAnswer('');
     setChatHistory([]);
+    setConversations([]);
+    setActiveConversation(null);
+    setHistoryOpen(false);
     setStreamStatus('idle');
     zoomRef.current = DEFAULT_ZOOM;
     setZoom(DEFAULT_ZOOM);
     setError('');
     void loadAnnotations(paper.id);
+    void loadConversations(paper.id);
   }
+
+  async function loadConversations(documentId: string) {
+    try {
+      let response = await fetch(`${API_BASE}/api/documents/${documentId}/conversations`);
+      if (!response.ok) throw new Error('Could not load saved chats.');
+      let items = await response.json() as Conversation[];
+      if (items.length === 0) {
+        response = await fetch(`${API_BASE}/api/documents/${documentId}/conversations`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: '{}' });
+        if (!response.ok) throw new Error('Could not create a chat.');
+        items = [await response.json() as Conversation];
+      }
+      setConversations(items);
+      const preferred = window.localStorage.getItem(`adam.conversation.${documentId}`);
+      await openConversation(items.find((item) => item.id === preferred) ?? items[0]);
+    } catch (reason) {
+      setError(reason instanceof Error ? reason.message : 'Could not load saved chats.');
+    }
+  }
+
+  async function openConversation(conversation: Conversation) {
+    const response = await fetch(`${API_BASE}/api/conversations/${conversation.id}`);
+    if (!response.ok) throw new Error('Could not open this chat.');
+    const detail = await response.json() as Conversation & { messages: SavedMessage[] };
+    window.localStorage.setItem(`adam.conversation.${conversation.document_id}`, conversation.id);
+    setActiveConversation(conversation);
+    setHistoryOpen(false);
+    const turns: ChatTurn[] = [];
+    for (let index = 0; index < detail.messages.length; index += 1) {
+      const user = detail.messages[index];
+      const assistant = detail.messages[index + 1];
+      if (user.role !== 'user' || assistant?.role !== 'assistant') continue;
+      turns.push({ id: user.id, question: user.content, answer: assistant.content, context: contextFromJson(user.context_json) });
+      index += 1;
+    }
+    setChatHistory(turns);
+    setSubmittedQuestion(''); setSubmittedContext([]); setAnswer(''); setStreamStatus('idle'); setContextSelections([]); setError('');
+  }
+
+  async function createNewConversation() {
+    if (!active) return;
+    const response = await fetch(`${API_BASE}/api/documents/${active.id}/conversations`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: '{}' });
+    if (!response.ok) { setError('Could not create a chat.'); return; }
+    const conversation = await response.json() as Conversation;
+    setConversations((current) => [conversation, ...current]);
+    await openConversation(conversation);
+  }
+
+  async function deleteConversation(conversation: Conversation) {
+    if (!window.confirm(`Delete “${conversation.title}”?`)) return;
+    const response = await fetch(`${API_BASE}/api/conversations/${conversation.id}`, { method: 'DELETE' });
+    if (!response.ok) { setError('Could not delete this chat.'); return; }
+    const remaining = conversations.filter((item) => item.id !== conversation.id);
+    setConversations(remaining);
+    if (activeConversation?.id === conversation.id) {
+      if (remaining[0]) await openConversation(remaining[0]); else await createNewConversation();
+    }
+  }
+
+  useEffect(() => {
+    if (active || papers.length === 0) return;
+    const saved = papers.find((paper) => paper.id === window.localStorage.getItem('adam.activePaper'));
+    if (saved) openPaper(saved);
+    // Workspace restoration intentionally runs only after the library changes.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [papers]);
 
   async function loadAnnotations(documentId: string) {
     try {
@@ -629,8 +761,8 @@ export default function Home() {
 
   async function ask(event: FormEvent) {
     event.preventDefault();
-    const hasConversationContext = Boolean(submittedQuestion && answer);
-    if (!active || (contextSelections.length === 0 && !hasConversationContext) || !question.trim() || asking) return;
+    if (!active || !activeConversation || !question.trim() || asking) return;
+    const sendingConversation = activeConversation.message_count === 0 ? await syncConversationDefaults(activeConversation) : activeConversation;
     const sentQuestion = question.trim();
     const sentContext = contextSelections.map((selection) => ({ ...selection }));
     if (submittedQuestion && answer) {
@@ -651,9 +783,9 @@ export default function Home() {
     revealTimerRef.current = null;
     startAnswerReveal();
     try {
-      const response = await fetch(`${API_BASE}/api/chat/stream`, {
+      const response = await fetch(`${API_BASE}/api/conversations/${sendingConversation.id}/messages/stream`, {
         method: 'POST', headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ document_id: active.id, question: sentQuestion, selected_text: formatContext(sentContext), images: formatImages(sentContext), page: sentContext.length === 1 ? sentContext[0].page : null, history: [...chatHistory, ...(submittedQuestion && answer ? [{ id: 'current', question: submittedQuestion, answer, context: submittedContext }] : [])].slice(-10).map(({ question: priorQuestion, answer: priorAnswer, context }) => ({ question: priorQuestion, answer: priorAnswer, selected_text: formatContext(context), images: formatImages(context), page: context.length === 1 ? context[0].page : null })) }),
+        body: JSON.stringify({ question: sentQuestion, selected_text: formatContext(sentContext), images: formatImages(sentContext), page: sentContext.length === 1 ? sentContext[0].page : null }),
       });
       if (!response.ok || !response.body) {
         const payload = await response.json().catch(() => ({}));
@@ -679,6 +811,9 @@ export default function Home() {
         }
       }
       streamFinishedRef.current = true;
+      const updatedConversation = { ...sendingConversation, title: sendingConversation.title === 'New chat' ? sentQuestion.slice(0, 80) : sendingConversation.title, message_count: sendingConversation.message_count + 2, updated_at: new Date().toISOString() };
+      setActiveConversation(updatedConversation);
+      setConversations((current) => current.map((item) => item.id === updatedConversation.id ? updatedConversation : item));
     } catch (reason) {
       setError(reason instanceof Error ? reason.message : 'The model request failed.');
       streamFinishedRef.current = false;
@@ -689,8 +824,7 @@ export default function Home() {
     }
   }
 
-  const hasChatContext = contextSelections.length > 0 || Boolean(submittedQuestion && answer);
-  const canAsk = chatConfigured !== false && hasChatContext;
+  const canAsk = chatConfigured !== false && Boolean(activeConversation);
 
   if (!active) return (<>
     <main className="library-shell">
@@ -709,8 +843,8 @@ export default function Home() {
 
   return (
     <main className="reader-shell">
-      <header className="reader-header"><button className="brand-button" onClick={() => setActive(null)} aria-label="Back to library"><Brand /></button><div className="document-title"><strong>{active.original_name.replace(/\.pdf$/i, '')}</strong><span>{pages || active.page_count} pages · local</span></div><div className="reader-header-tools"><div className="paper-zoom"><span className="control-label">Paper</span><div className="header-actions" role="group" aria-label="Paper zoom"><button title="Zoom paper out" aria-label="Zoom paper out" disabled={zoom <= MIN_ZOOM} onClick={() => changeZoom(-.1)}>−</button><span>{Math.round(zoom * 100)}%</span><button title="Zoom paper in" aria-label="Zoom paper in" disabled={zoom >= MAX_ZOOM} onClick={() => changeZoom(.1)}>+</button></div></div><SettingsButton compact onClick={() => setSettingsOpen(true)} /></div></header>
-      <div className="reader-workspace">
+      <header className="reader-header"><button className="brand-button" onClick={() => { window.localStorage.removeItem('adam.activePaper'); setActive(null); }} aria-label="Back to library"><Brand /></button><div className="document-title"><strong>{active.original_name.replace(/\.pdf$/i, '')}</strong><span>{pages || active.page_count} pages · local</span></div><div className="reader-header-tools"><div className="paper-zoom"><span className="control-label">Paper</span><div className="header-actions" role="group" aria-label="Paper zoom"><button title="Zoom paper out" aria-label="Zoom paper out" disabled={zoom <= MIN_ZOOM} onClick={() => changeZoom(-.1)}>−</button><span>{Math.round(zoom * 100)}%</span><button title="Zoom paper in" aria-label="Zoom paper in" disabled={zoom >= MAX_ZOOM} onClick={() => changeZoom(.1)}>+</button></div></div><SettingsButton compact onClick={() => setSettingsOpen(true)} /></div></header>
+      <div className="reader-workspace" ref={workspaceRef} style={{ gridTemplateColumns: `minmax(0, ${paperPercent}fr) minmax(340px, ${100 - paperPercent}fr)` }}>
         <section className={`pdf-pane${screenshotMode ? ' screenshot-mode' : ''}`} ref={viewerRef} onMouseUp={(event) => { if (!screenshotMode) captureSelection(event); }} onPointerDown={beginScreenshot} onPointerMove={moveScreenshot} onPointerUp={finishScreenshot} onPointerCancel={() => { screenshotPointerRef.current = null; setScreenshotDrag(null); setScreenshotMode(false); }}>
           <PdfDocument file={`${API_BASE}/api/documents/${active.id}/file`} onLoadSuccess={({ numPages }) => setPages(numPages)} loading={<div className="viewer-message">Rendering paper…</div>} error={<div className="viewer-message error-banner">Could not render this PDF.</div>}>
             {Array.from({ length: pages }, (_, index) => <div className="pdf-page-stage" data-page-number={index + 1} key={index + 1}><div className="pdf-page-wrap" style={{ zoom: zoom / MAX_ZOOM }}><PdfPageWithHighlights pageNumber={index + 1} highlights={highlightEntries.filter((entry) => entry.page === index + 1)} /><span className="page-label">{index + 1}</span></div></div>)}
@@ -718,15 +852,23 @@ export default function Home() {
           {screenshotMode && !screenshotDrag && <div className="screenshot-hint">Drag over the PDF to add an image · Esc to cancel</div>}
           {screenshotDrag && <div className="screenshot-region" style={{ left: screenshotDrag.overlayLeft, top: screenshotDrag.overlayTop, width: screenshotDrag.overlayWidth, height: screenshotDrag.overlayHeight }} />}
         </section>
+        <div className="pane-resizer" style={{ left: `${paperPercent}%` }} role="separator" aria-label="Resize paper and chat panes" aria-orientation="vertical" aria-valuemin={MIN_PAPER_PERCENT} aria-valuemax={80} aria-valuenow={Math.round(paperPercent)} tabIndex={0} onPointerDown={beginWorkspaceResize} onPointerMove={moveWorkspaceResize} onPointerUp={finishWorkspaceResize} onPointerCancel={() => { resizingRef.current = false; }} onDoubleClick={resetWorkspaceResize}><span /></div>
         <aside className="side-pane" style={{ '--chat-scale': chatScale } as CSSProperties}>
           <div className="mode-tabs"><div className="tab-list"><button className="active">Chat</button><button disabled>Notes <span>Soon</span></button></div><div className="chat-text-controls" role="group" aria-label="Chat text size"><span className="control-label">Text size</span><div><button type="button" aria-label="Decrease chat text size" title="Decrease chat text size" disabled={chatScale <= MIN_CHAT_SCALE} onClick={() => changeChatScale(-CHAT_SCALE_STEP)}>A−</button><output aria-live="polite" aria-label={`Chat text size ${Math.round(chatScale * 100)} percent`}>{Math.round(chatScale * 100)}%</output><button type="button" aria-label="Increase chat text size" title="Increase chat text size" disabled={chatScale >= MAX_CHAT_SCALE} onClick={() => changeChatScale(CHAT_SCALE_STEP)}>A+</button></div></div></div>
-          <div className="chat-body" ref={chatBodyRef} onWheelCapture={(event) => { if (event.deltaY < 0) pauseChatFollow(); }} onTouchMove={pauseChatFollow} onPointerDown={(event) => { if (event.target === event.currentTarget) pauseChatFollow(); }} onScroll={(event) => { const element = event.currentTarget; followOutputRef.current = element.scrollHeight - element.scrollTop - element.clientHeight < 40; }}><div className="chat-heading"><span className="spark">✦</span><div><strong>Ask about this paper</strong><p>Select text in the paper to give the model precise context.</p></div></div>{chatConfigured === false && <button type="button" className="no-key-notice" onClick={() => setSettingsOpen(true)}><strong>No API key configured</strong><span>Choose a provider and add a key in Settings to enable chat.</span></button>}
-            {chatHistory.map((turn) => <div className="chat-turn" key={turn.id}><ContextList selections={turn.context} /><div className="user-message"><span>You</span><p>{turn.question}</p></div><div className="answer-card complete"><div className="answer-meta"><span>Adam</span><span className="stream-state">Done</span></div><MarkdownAnswer>{turn.answer}</MarkdownAnswer></div></div>)}
-            {submittedQuestion && <><ContextList selections={submittedContext} /><div className="user-message"><span>You</span><p>{submittedQuestion}</p></div></>}
-            {streamStatus !== 'idle' && streamStatus !== 'error' && <div className={`answer-card ${streamStatus}`} aria-live="polite"><div className="answer-meta"><span>Adam</span><span className="stream-state">{streamStatus === 'connecting' ? <>Thinking<span className="thinking-dots"><i /><i /><i /></span></> : streamStatus === 'streaming' ? 'Responding…' : 'Done'}</span></div>{answer ? <MarkdownAnswer streaming={streamStatus === 'streaming'}>{answer}</MarkdownAnswer> : <div className="answer-skeleton"><i /><i /><i /></div>}</div>}{error && <p className="error-banner compact">{error}</p>}
-            {contextSelections.length > 0 ? <ContextList selections={contextSelections} onRemove={(id) => setContextSelections((current) => current.filter((item) => item.id !== id))} /> : !submittedQuestion && <div className="empty-context"><span>⌁</span><p>Highlight a passage, then add it to context.</p></div>}
-          </div>
-          <form className="composer" onSubmit={ask}><textarea ref={composerRef} value={question} onChange={(event) => setQuestion(event.target.value)} onKeyDown={(event) => { if (event.key === 'Enter' && !event.shiftKey && !event.nativeEvent.isComposing) { event.preventDefault(); event.currentTarget.form?.requestSubmit(); } }} placeholder={chatConfigured === false ? 'Add an API key in Settings to chat…' : contextSelections.length ? 'Ask about your context…' : canAsk ? 'Ask a follow-up…' : 'Highlight text or press R to capture an area…'} disabled={!canAsk || asking} rows={3} /><div><span>{chatConfigured === false ? 'Chat unavailable' : contextSelections.length ? `${contextSelections.length} context ${contextSelections.length === 1 ? 'item' : 'items'}` : canAsk ? 'Using conversation context' : 'Press R for screenshot'}</span><button type="submit" disabled={!canAsk || !question.trim() || asking}>{asking ? '…' : '↑'}</button></div></form>
+          {historyOpen ? <section className="history-view">
+            <div className="history-header"><div><p>Conversations</p><h2>Chat history</h2><span>{conversations.length} saved for this paper</span></div><button type="button" onClick={() => setHistoryOpen(false)} aria-label="Close chat history">×</button></div>
+            <button type="button" className="new-chat-card" onClick={() => void createNewConversation()}><span>＋</span><div><strong>Start a new chat</strong><small>Uses your current default model</small></div><i>→</i></button>
+            <div className="history-list">{conversations.map((item) => <article className={`history-card${item.id === activeConversation?.id ? ' current' : ''}`} key={item.id}><button type="button" className="history-card-main" onClick={() => void openConversation(item)}><div className="history-card-top"><span className="history-model-mark">✦</span><time>{formatConversationDate(item.updated_at)}</time></div><strong>{item.title}</strong><p>{item.provider} · {item.model_id}</p><div className="history-card-meta"><span>{Math.ceil(item.message_count / 2)} {Math.ceil(item.message_count / 2) === 1 ? 'exchange' : 'exchanges'}</span><span>Full paper</span>{item.id === activeConversation?.id && <em>Current</em>}</div></button><button type="button" className="history-delete" aria-label={`Delete ${item.title}`} title="Delete chat" onClick={() => void deleteConversation(item)}><TrashIcon /></button></article>)}</div>
+          </section> : <>
+            <div className="conversation-header"><div><strong>{activeConversation?.title ?? 'Loading chat…'}</strong><small>{activeConversation ? `${activeConversation.provider} · ${activeConversation.model_id}` : 'Preparing paper context'}</small></div><div className="conversation-actions"><button type="button" onClick={() => void createNewConversation()} title="Start a new chat"><span>＋</span> New</button><button type="button" onClick={() => setHistoryOpen(true)}><span>☰</span> History</button></div></div>
+            <div className="chat-body" ref={chatBodyRef} onWheelCapture={(event) => { if (event.deltaY < 0) pauseChatFollow(); }} onTouchMove={pauseChatFollow} onPointerDown={(event) => { if (event.target === event.currentTarget) pauseChatFollow(); }} onScroll={(event) => { const element = event.currentTarget; followOutputRef.current = element.scrollHeight - element.scrollTop - element.clientHeight < 40; }}><div className="chat-heading"><span className="spark">✦</span><div><strong>Ask about this paper</strong><p>The full paper is available automatically. Select text only when you want to focus the answer.</p></div></div>{chatConfigured === false && <button type="button" className="no-key-notice" onClick={() => setSettingsOpen(true)}><strong>No API key configured</strong><span>Choose a provider and add a key in Settings to enable chat.</span></button>}
+              {chatHistory.map((turn) => <div className="chat-turn" key={turn.id}><ContextList selections={turn.context} /><div className="user-message"><span>You</span><p>{turn.question}</p></div><div className="answer-card complete"><div className="answer-meta"><span>Adam</span><span className="stream-state">Done</span></div><MarkdownAnswer>{turn.answer}</MarkdownAnswer></div></div>)}
+              {submittedQuestion && <><ContextList selections={submittedContext} /><div className="user-message"><span>You</span><p>{submittedQuestion}</p></div></>}
+              {streamStatus !== 'idle' && streamStatus !== 'error' && <div className={`answer-card ${streamStatus}`} aria-live="polite"><div className="answer-meta"><span>Adam</span><span className="stream-state">{streamStatus === 'connecting' ? <>Thinking<span className="thinking-dots"><i /><i /><i /></span></> : streamStatus === 'streaming' ? 'Responding…' : 'Done'}</span></div>{answer ? <MarkdownAnswer streaming={streamStatus === 'streaming'}>{answer}</MarkdownAnswer> : <div className="answer-skeleton"><i /><i /><i /></div>}</div>}{error && <p className="error-banner compact">{error}</p>}
+              {contextSelections.length > 0 ? <ContextList selections={contextSelections} onRemove={(id) => setContextSelections((current) => current.filter((item) => item.id !== id))} /> : !submittedQuestion && chatHistory.length === 0 && <div className="empty-context"><span>✦</span><p>Ask anything about the paper, or select a passage for precise focus.</p></div>}
+            </div>
+            <form className="composer" onSubmit={ask}><textarea ref={composerRef} value={question} onChange={(event) => setQuestion(event.target.value)} onKeyDown={(event) => { if (event.key === 'Enter' && !event.shiftKey && !event.nativeEvent.isComposing) { event.preventDefault(); event.currentTarget.form?.requestSubmit(); } }} placeholder={chatConfigured === false ? 'Add an API key in Settings to chat…' : contextSelections.length ? 'Ask about your context…' : 'Ask anything about this paper…'} disabled={!canAsk || asking} rows={3} /><div><span>{chatConfigured === false ? 'Chat unavailable' : contextSelections.length ? `${contextSelections.length} context ${contextSelections.length === 1 ? 'item' : 'items'}` : 'Full paper context'}</span><button type="submit" disabled={!canAsk || !question.trim() || asking}>{asking ? '…' : '↑'}</button></div></form>
+          </>}
         </aside>
       </div>
       {pendingSelection && <div className="selection-toolbar" style={{ left: pendingSelection.x, top: pendingSelection.y }} onMouseDown={(event) => event.preventDefault()} role="toolbar" aria-label="Text selection actions"><div className="highlight-colors" aria-label="Highlight color">{HIGHLIGHT_COLORS.map(({ color, label, key }) => <button type="button" className="color-swatch" style={{ backgroundColor: color }} aria-label={`Highlight ${label.toLowerCase()} (${key})`} aria-keyshortcuts={key} title={`${label} highlight · ${key}`} onClick={() => applyHighlight(color)} key={color}><kbd>{key}</kbd></button>)}</div><span className="toolbar-divider" /><button type="button" className="toolbar-action primary" aria-keyshortcuts="C" onClick={addSelectionToContext}><span>＋</span>Add to context <kbd>C</kbd></button><button type="button" className="toolbar-action" disabled title="Coming soon"><span>✦</span>Ask <small>Beta</small></button><button type="button" className="toolbar-action" disabled title="Coming soon"><span>▱</span>Note <small>Beta</small></button></div>}
@@ -741,6 +883,28 @@ function formatContext(selections: ContextSelection[]) {
 
 function formatImages(selections: ContextSelection[]) {
   return selections.flatMap((item) => item.imageDataUrl ? [{ data_url: item.imageDataUrl, page: item.page }] : []);
+}
+
+function contextFromJson(value: string | null): ContextSelection[] {
+  if (!value) return [];
+  try {
+    const context = JSON.parse(value) as { selected_text?: string; page?: number | null; images?: Array<{ data_url: string; page?: number | null }> };
+    const items: ContextSelection[] = [];
+    if (context.selected_text) items.push({ id: crypto.randomUUID(), text: context.selected_text, page: context.page ?? null });
+    for (const image of context.images ?? []) items.push({ id: crypto.randomUUID(), text: 'Selected PDF area', page: image.page ?? null, imageDataUrl: image.data_url });
+    return items;
+  } catch { return []; }
+}
+
+function formatConversationDate(value: string) {
+  const date = new Date(value);
+  const today = new Date();
+  if (date.toDateString() === today.toDateString()) return date.toLocaleTimeString([], { hour: 'numeric', minute: '2-digit' });
+  return date.toLocaleDateString([], { month: 'short', day: 'numeric' });
+}
+
+function TrashIcon() {
+  return <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M4 7h16M9 7V4h6v3m3 0-1 13H7L6 7m4 4v5m4-5v5" /></svg>;
 }
 
 function ContextList({ selections, onRemove }: { selections: ContextSelection[]; onRemove?: (id: string) => void }) {

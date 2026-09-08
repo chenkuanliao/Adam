@@ -10,6 +10,7 @@ os.environ.pop("ADAM_OPENCODE_API_KEY", None)
 from fastapi.testclient import TestClient  # noqa: E402
 
 from adam_server.main import app  # noqa: E402
+from adam_server import main as main_module  # noqa: E402
 
 
 client = TestClient(app)
@@ -58,10 +59,15 @@ def test_upload_extract_reopen_and_missing_key() -> None:
     assert deleted.status_code == 204
     assert client.get(f"/api/documents/{uploaded['id']}/annotations").json() == []
 
+    created_chat = client.post(f"/api/documents/{uploaded['id']}/conversations", json={})
+    assert created_chat.status_code == 201
+    conversation = created_chat.json()
+    assert conversation["model_id"] == "gemini-3.8-flash"
+    assert client.get(f"/api/documents/{uploaded['id']}/conversations").json()[0]["id"] == conversation["id"]
+
     chat = client.post(
-        "/api/chat/stream",
+        f"/api/conversations/{conversation['id']}/messages/stream",
         json={
-            "document_id": uploaded["id"],
             "question": "Why is this useful?",
             "selected_text": "Attention lets a model weigh relevant context.",
             "page": 1,
@@ -69,6 +75,11 @@ def test_upload_extract_reopen_and_missing_key() -> None:
     )
     assert chat.status_code == 503
     assert "No API key is configured" in chat.json()["detail"]
+
+    renamed = client.patch(f"/api/conversations/{conversation['id']}", json={"title": "Attention questions"})
+    assert renamed.status_code == 200
+    assert renamed.json()["title"] == "Attention questions"
+    assert client.delete(f"/api/conversations/{conversation['id']}").status_code == 204
 
 
 def test_settings_are_persisted_without_exposing_the_key() -> None:
@@ -105,3 +116,37 @@ def test_settings_are_persisted_without_exposing_the_key() -> None:
     assert key_only.status_code == 200
     assert key_only.json()["providers"]["anthropic"] is True
     assert "anthropic" not in key_only.json()["selected_models"]
+
+
+def test_paper_context_and_history_are_owned_by_the_backend(monkeypatch) -> None:
+    uploaded = client.post("/api/documents", files={"file": ("paper.pdf", BytesIO(PDF_BYTES), "application/pdf")}).json()
+    conversation = client.post(f"/api/documents/{uploaded['id']}/conversations", json={}).json()
+    captured: list[tuple[str, int]] = []
+
+    client.put("/api/settings", json={"provider": "google", "model": "gemini-test", "api_keys": {}})
+    conversation = client.post(f"/api/conversations/{conversation['id']}/sync-defaults").json()
+    assert conversation["provider"] == "google"
+    assert conversation["model_id"] == "gemini-test"
+
+    monkeypatch.setattr(type(main_module.settings), "provider_api_key", lambda _self, _provider: "test-key")
+
+    async def fake_stream(self, question, selected_text, images, page, history):
+        captured.append((self.system_prompt, len(history)))
+        yield "The paper explains relevant context."
+
+    monkeypatch.setattr(main_module.GoogleProvider, "stream_answer", fake_stream)
+    first = client.post(f"/api/conversations/{conversation['id']}/messages/stream", json={"question": "What does the paper say?"})
+    assert first.status_code == 200
+    assert "weigh relevant context" in captured[0][0]
+    assert captured[0][1] == 0
+
+    second = client.post(f"/api/conversations/{conversation['id']}/messages/stream", json={"question": "Explain that further."})
+    assert second.status_code == 200
+    assert captured[1][1] == 1
+    saved = client.get(f"/api/conversations/{conversation['id']}").json()
+    assert saved["title"] == "What does the paper say?"
+    assert [message["role"] for message in saved["messages"]] == ["user", "assistant", "user", "assistant"]
+    client.put("/api/settings", json={"provider": "zen", "model": "gemini-other", "api_keys": {}})
+    pinned = client.post(f"/api/conversations/{conversation['id']}/sync-defaults").json()
+    assert pinned["provider"] == "google"
+    assert pinned["model_id"] == "gemini-test"

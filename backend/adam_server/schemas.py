@@ -54,12 +54,44 @@ class ChatTurnIn(BaseModel):
 
 
 class ChatRequest(BaseModel):
-    document_id: str
     question: str = Field(min_length=1, max_length=8000)
     selected_text: str = Field(default="", max_length=30000)
     page: int | None = Field(default=None, ge=1)
     images: list[ContextImageIn] = Field(default_factory=list, max_length=6)
-    history: list[ChatTurnIn] = Field(default_factory=list, max_length=20)
+
+
+class ConversationCreate(BaseModel):
+    title: str | None = Field(default=None, max_length=200)
+
+
+class ConversationUpdate(BaseModel):
+    title: str = Field(min_length=1, max_length=200)
+
+
+class MessageOut(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
+    id: str
+    role: str
+    content: str
+    context_json: str | None
+    created_at: datetime
+
+
+class ConversationOut(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
+    id: str
+    document_id: str
+    title: str
+    provider: str
+    model_id: str
+    context_builder_version: str
+    created_at: datetime
+    updated_at: datetime
+    message_count: int = 0
+
+
+class ConversationDetail(ConversationOut):
+    messages: list[MessageOut]
 
 
 class AppSettingsOut(BaseModel):

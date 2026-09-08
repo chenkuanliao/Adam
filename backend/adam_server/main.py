@@ -1,18 +1,20 @@
 import json
 from collections.abc import AsyncIterator
+from datetime import datetime, timezone
 from pathlib import Path
 
 from fastapi import Depends, FastAPI, HTTPException, Response, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse, StreamingResponse
-from sqlalchemy import select
+from sqlalchemy import func, select
 from sqlalchemy.orm import Session
 import httpx
 
 from .config import Settings, get_settings
 from .database import SessionLocal, get_db, run_migrations
-from .models import Annotation, Document, Message, ModelFavorite, Page
-from .schemas import AnnotationIn, AnnotationOut, AppSettingsOut, AppSettingsUpdate, ChatRequest, DocumentOut, ModelFavoriteUpdate, PageTextOut, ProviderKeyUpdate, ProviderModelsOut
+from .models import Annotation, Conversation, Document, Message, ModelFavorite, Page
+from .schemas import AnnotationIn, AnnotationOut, AppSettingsOut, AppSettingsUpdate, ChatRequest, ConversationCreate, ConversationDetail, ConversationOut, ConversationUpdate, DocumentOut, ModelFavoriteUpdate, PageTextOut, ProviderKeyUpdate, ProviderModelsOut
+from .services.context import build_paper_context
 from .services.documents import ingest_pdf
 from .services.llm import AnthropicProvider, GoogleProvider, OpenAICompatibleProvider, OpenAIResponsesProvider, sse
 
@@ -182,22 +184,94 @@ def delete_annotation(document_id: str, annotation_id: str, db: Session = Depend
     return Response(status_code=204)
 
 
-@app.post("/api/chat/stream")
-async def chat_stream(request: ChatRequest, db: Session = Depends(get_db)) -> StreamingResponse:
-    if not db.get(Document, request.document_id):
+@app.get("/api/documents/{document_id}/conversations", response_model=list[ConversationOut])
+def list_conversations(document_id: str, db: Session = Depends(get_db)) -> list[dict]:
+    if not db.get(Document, document_id):
+        raise HTTPException(404, "Document not found.")
+    rows = db.execute(select(Conversation, func.count(Message.id)).outerjoin(Message, Message.conversation_id == Conversation.id).where(Conversation.document_id == document_id).group_by(Conversation.id).order_by(Conversation.updated_at.desc())).all()
+    return [{**ConversationOut.model_validate(conversation).model_dump(), "message_count": count} for conversation, count in rows]
+
+
+@app.post("/api/documents/{document_id}/conversations", response_model=ConversationOut, status_code=201)
+def create_conversation(document_id: str, request: ConversationCreate, db: Session = Depends(get_db)) -> Conversation:
+    if not db.get(Document, document_id):
         raise HTTPException(404, "Document not found.")
     runtime = settings.runtime_settings
-    provider_name = runtime.get("provider", "zen")
+    provider = runtime.get("provider", "zen")
+    conversation = Conversation(document_id=document_id, title=request.title or "New chat", provider=provider,
+                                model_id=settings.resolved_opencode_model, system_prompt=settings.system_prompt)
+    db.add(conversation)
+    db.commit()
+    db.refresh(conversation)
+    return conversation
+
+
+@app.get("/api/conversations/{conversation_id}", response_model=ConversationDetail)
+def get_conversation(conversation_id: str, db: Session = Depends(get_db)) -> Conversation:
+    conversation = db.get(Conversation, conversation_id)
+    if not conversation:
+        raise HTTPException(404, "Conversation not found.")
+    return conversation
+
+
+@app.patch("/api/conversations/{conversation_id}", response_model=ConversationOut)
+def update_conversation(conversation_id: str, request: ConversationUpdate, db: Session = Depends(get_db)) -> Conversation:
+    conversation = db.get(Conversation, conversation_id)
+    if not conversation:
+        raise HTTPException(404, "Conversation not found.")
+    conversation.title = request.title.strip()
+    db.commit()
+    db.refresh(conversation)
+    return conversation
+
+
+@app.post("/api/conversations/{conversation_id}/sync-defaults", response_model=ConversationOut)
+def sync_conversation_defaults(conversation_id: str, db: Session = Depends(get_db)) -> ConversationOut:
+    conversation = db.get(Conversation, conversation_id)
+    if not conversation:
+        raise HTTPException(404, "Conversation not found.")
+    message_count = db.scalar(select(func.count(Message.id)).where(Message.conversation_id == conversation.id)) or 0
+    if message_count == 0:
+        runtime = settings.runtime_settings
+        conversation.provider = runtime.get("provider", "zen")
+        conversation.model_id = settings.resolved_opencode_model
+        conversation.system_prompt = settings.system_prompt
+        db.commit()
+        db.refresh(conversation)
+    result = ConversationOut.model_validate(conversation)
+    return result.model_copy(update={"message_count": message_count})
+
+
+@app.delete("/api/conversations/{conversation_id}", status_code=204)
+def delete_conversation(conversation_id: str, db: Session = Depends(get_db)) -> Response:
+    conversation = db.get(Conversation, conversation_id)
+    if not conversation:
+        raise HTTPException(404, "Conversation not found.")
+    db.delete(conversation)
+    db.commit()
+    return Response(status_code=204)
+
+
+@app.post("/api/conversations/{conversation_id}/messages/stream")
+async def chat_stream(conversation_id: str, request: ChatRequest, db: Session = Depends(get_db)) -> StreamingResponse:
+    conversation = db.get(Conversation, conversation_id)
+    if not conversation:
+        raise HTTPException(404, "Conversation not found.")
+    provider_name = conversation.provider
     api_key = settings.provider_api_key(provider_name)
     if not api_key:
         raise HTTPException(503, f"No API key is configured for {provider_name}. Open Settings to enable chat.")
 
-    context = {"scope": "selection", "page": request.page, "selected_text": request.selected_text, "image_count": len(request.images)}
-    db.add(Message(document_id=request.document_id, role="user", content=request.question, context_json=json.dumps(context)))
+    paper_context, context_mode = build_paper_context(db, conversation, request.question, request.selected_text)
+    context = {"scope": "selection" if request.selected_text or request.images else "paper", "page": request.page, "selected_text": request.selected_text, "images": [image.model_dump() for image in request.images], "context_mode": context_mode}
+    user_message = Message(document_id=conversation.document_id, conversation_id=conversation.id, role="user", content=request.question, context_json=json.dumps(context))
+    db.add(user_message)
+    if conversation.title == "New chat":
+        conversation.title = request.question.strip()[:80]
     db.commit()
 
-    model = settings.resolved_opencode_model
-    system_prompt = settings.system_prompt
+    model = conversation.model_id
+    system_prompt = conversation.system_prompt + paper_context
     if provider_name == "google": provider = GoogleProvider(api_key, model, "https://generativelanguage.googleapis.com/v1beta", system_prompt)
     elif provider_name == "anthropic": provider = AnthropicProvider(api_key, model, system_prompt=system_prompt)
     elif provider_name == "openai": provider = OpenAIResponsesProvider(api_key, model, "https://api.openai.com/v1", system_prompt)
@@ -212,12 +286,26 @@ async def chat_stream(request: ChatRequest, db: Session = Depends(get_db)) -> St
     async def events() -> AsyncIterator[str]:
         complete = ""
         try:
-            yield sse({"type": "started", "provider": provider_name, "model": model})
-            async for delta in provider.stream_answer(request.question, request.selected_text, request.images, request.page, request.history):
+            history_messages = list(db.scalars(select(Message).where(Message.conversation_id == conversation.id, Message.id != user_message.id).order_by(Message.created_at)))
+            history = []
+            pending = None
+            from .schemas import ChatTurnIn, ContextImageIn
+            for message in history_messages:
+                if message.role == "user":
+                    saved = json.loads(message.context_json or "{}")
+                    pending = (message, saved)
+                elif message.role == "assistant" and pending:
+                    prior, saved = pending
+                    history.append(ChatTurnIn(question=prior.content, answer=message.content, selected_text=saved.get("selected_text", ""), page=saved.get("page"), images=[ContextImageIn(**item) for item in saved.get("images", [])]))
+                    pending = None
+            yield sse({"type": "started", "provider": provider_name, "model": model, "context_mode": context_mode, "conversation_id": conversation.id})
+            async for delta in provider.stream_answer(request.question, request.selected_text, request.images, request.page, history[-20:]):
                 complete += delta
                 yield sse({"type": "delta", "text": delta})
             with SessionLocal() as stream_db:
-                stream_db.add(Message(document_id=request.document_id, role="assistant", content=complete, context_json=None))
+                stream_db.add(Message(document_id=conversation.document_id, conversation_id=conversation.id, role="assistant", content=complete, context_json=None))
+                stored = stream_db.get(Conversation, conversation.id)
+                if stored: stored.updated_at = datetime.now(timezone.utc)
                 stream_db.commit()
             yield sse({"type": "completed"})
         except Exception as exc:

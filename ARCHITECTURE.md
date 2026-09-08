@@ -1,6 +1,6 @@
 # Architecture: Local-First AI Research-Paper Reader
 
-Status: active implementation, 2026-09-03. Milestone 0 and the first selection-to-AI vertical slice are implemented; persistent annotations and paper notes remain next.
+Status: active implementation, 2026-09-07. Durable per-paper conversations, reload restoration, pinned model configuration, and automatic full-paper chat context are implemented. Structured section/chunk retrieval and paper notes remain next.
 
 ### Implemented baseline
 

@@ -16,10 +16,10 @@ def request_headers(api_key: str, base_url: str, **extra: str) -> dict[str, str]
 
 def user_prompt(question: str, selection: str, page: int | None) -> str:
     if not selection:
-        return f"The user is asking a follow-up about the research paper. Use the preceding conversation as context.\n\nQuestion: {question}"
+        return f"Answer the user's question using the paper reference and conversation context.\n\nQuestion: {question}"
     location = f"page {page}" if page else "one or more pages"
-    return ("The user is reading a research paper. Answer using the exact selected passage below. "
-            "Be precise, distinguish the paper's claim from your interpretation, and say when the passage alone is insufficient.\n\n"
+    return ("The passage below is the user's explicit focus for this question. Prioritize it while using the rest of the paper when helpful. "
+            "Selection does not imply that the user agrees with it. Be precise and distinguish the paper's claim from your interpretation.\n\n"
             f"Selection ({location}):\n<selection>\n{selection}\n</selection>\n\nQuestion: {question}")
 
 
