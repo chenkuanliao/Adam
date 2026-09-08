@@ -110,6 +110,7 @@ export default function Home() {
   const [settingsOpen, setSettingsOpen] = useState(false);
   const [chatConfigured, setChatConfigured] = useState<boolean | null>(null);
   const [paneMode, setPaneMode] = useState<PaneMode>('chat');
+  const [pendingNoteQuote, setPendingNoteQuote] = useState<ContextSelection | null>(null);
   const viewerRef = useRef<HTMLDivElement>(null);
   const workspaceRef = useRef<HTMLDivElement>(null);
   const resizingRef = useRef(false);
@@ -682,6 +683,14 @@ export default function Home() {
     if (alreadyAdded) window.requestAnimationFrame(() => composerRef.current?.focus({ preventScroll: true }));
   }
 
+  function addSelectionToPaperNote() {
+    if (!pendingSelection) return;
+    const { id, text, page } = pendingSelection;
+    setPendingNoteQuote({ id, text, page });
+    setPaneMode('notes');
+    clearBrowserSelection();
+  }
+
   function openQuickAskFromSelection() {
     if (!pendingSelection) return;
     const { id, text, page, x, y } = pendingSelection;
@@ -1090,6 +1099,9 @@ export default function Home() {
       } else if (event.key.toLowerCase() === 'c') {
         event.preventDefault();
         addSelectionToContext();
+      } else if (event.key.toLowerCase() === 'q') {
+        event.preventDefault();
+        addSelectionToPaperNote();
       } else if (event.key.toLowerCase() === 'a') {
         event.preventDefault();
         openQuickAskFromSelection();
@@ -1208,7 +1220,7 @@ export default function Home() {
         <div className="pane-resizer" style={{ left: `${paperPercent}%` }} role="separator" aria-label="Resize paper and chat panes" aria-orientation="vertical" aria-valuemin={MIN_PAPER_PERCENT} aria-valuemax={80} aria-valuenow={Math.round(paperPercent)} tabIndex={0} onPointerDown={beginWorkspaceResize} onPointerMove={moveWorkspaceResize} onPointerUp={finishWorkspaceResize} onPointerCancel={() => { resizingRef.current = false; }} onDoubleClick={resetWorkspaceResize}><span /></div>
         <aside className="side-pane" style={{ '--chat-scale': chatScale } as CSSProperties}>
           <div className="mode-tabs"><div className="tab-list"><button type="button" className={paneMode === 'chat' ? 'active' : ''} onClick={() => setPaneMode('chat')}>Chat</button><button type="button" className={paneMode === 'notes' ? 'active' : ''} onClick={() => setPaneMode('notes')}>Notes</button></div>{paneMode === 'chat' && <div className="chat-text-controls" role="group" aria-label="Chat text size"><span className="control-label">Text size</span><div><button type="button" aria-label="Decrease chat text size" title="Decrease chat text size" disabled={chatScale <= MIN_CHAT_SCALE} onClick={() => changeChatScale(-CHAT_SCALE_STEP)}>A−</button><output aria-live="polite" aria-label={`Chat text size ${Math.round(chatScale * 100)} percent`}>{Math.round(chatScale * 100)}%</output><button type="button" aria-label="Increase chat text size" title="Increase chat text size" disabled={chatScale >= MAX_CHAT_SCALE} onClick={() => changeChatScale(CHAT_SCALE_STEP)}>A+</button></div></div>}</div>
-          {paneMode === 'notes' ? <PaperNoteEditor documentId={active.id} paperName={active.original_name.replace(/\.pdf$/i, '')} /> : historyOpen ? <section className="history-view">
+          {paneMode === 'notes' ? <PaperNoteEditor documentId={active.id} paperName={active.original_name.replace(/\.pdf$/i, '')} pendingQuote={pendingNoteQuote} onQuoteConsumed={() => setPendingNoteQuote(null)} /> : historyOpen ? <section className="history-view">
             <div className="history-header"><div><p>Conversations</p><h2>Chat history</h2><span>{conversations.length} saved for this paper</span></div><button type="button" onClick={() => setHistoryOpen(false)} aria-label="Close chat history">×</button></div>
             <button type="button" className="new-chat-card" onClick={() => void createNewConversation()}><span>＋</span><div><strong>Start a new chat</strong><small>Uses your current default model</small></div><i>→</i></button>
             <div className="history-list">{conversations.map((item) => <article className={`history-card${item.id === activeConversation?.id ? ' current' : ''}`} key={item.id}>{renamingChatId === item.id ? <form className="chat-title-form history-title-form" onSubmit={(event) => void renameConversation(event, item)}><input autoFocus value={chatTitleValue} maxLength={200} aria-label="Chat title" onChange={(event) => setChatTitleValue(event.target.value)} onKeyDown={(event) => { if (event.key === 'Escape') setRenamingChatId(null); }} /><button type="submit" disabled={!chatTitleValue.trim() || titleSaving}>Save</button><button type="button" onClick={() => setRenamingChatId(null)}>Cancel</button></form> : <button type="button" className="history-card-main" onClick={() => void openConversation(item)}><div className="history-card-top"><span className="history-model-mark">✦</span><time>{formatConversationDate(item.updated_at)}</time></div><strong>{item.title}</strong><p>{item.provider} · {item.model_id}</p><div className="history-card-meta"><span>{Math.ceil(item.message_count / 2)} {Math.ceil(item.message_count / 2) === 1 ? 'exchange' : 'exchanges'}</span><span>{item.context_builder_version === 'quick-ask-v1' ? 'Selection only' : 'Full paper'}</span>{item.id === activeConversation?.id && <em>Current</em>}</div></button>}<div className="history-card-actions"><button type="button" aria-label={`Rename ${item.title}`} title="Rename chat" onClick={() => beginChatRename(item)}>✎</button>{item.provider === 'zen' && item.message_count > 0 && <button type="button" aria-label={`Regenerate title for ${item.title}`} title="Regenerate title with GPT-5.6 Luna" disabled={titleSaving} onClick={() => void regenerateConversationTitle(item)}>↻</button>}<button type="button" className="history-delete" aria-label={`Delete ${item.title}`} title="Delete chat" onClick={() => void deleteConversation(item)}><TrashIcon /></button></div></article>)}</div>
@@ -1224,7 +1236,7 @@ export default function Home() {
           </>}
         </aside>
       </div>
-      {pendingSelection && <div className="selection-toolbar" style={{ left: pendingSelection.x, top: pendingSelection.y }} onMouseDown={(event) => event.preventDefault()} role="toolbar" aria-label="Text selection actions"><div className="highlight-colors" aria-label="Highlight color">{HIGHLIGHT_COLORS.map(({ color, label, key }) => <button type="button" className="color-swatch" style={{ backgroundColor: color }} aria-label={`Highlight ${label.toLowerCase()} (${key})`} aria-keyshortcuts={key} title={`${label} highlight · ${key}`} onClick={() => applyHighlight(color)} key={color}><kbd>{key}</kbd></button>)}</div><span className="toolbar-divider" /><button type="button" className="toolbar-action primary" aria-keyshortcuts="C" onClick={addSelectionToContext}><span>＋</span>Add to context <kbd>C</kbd></button><button type="button" className="toolbar-action" aria-keyshortcuts="A" onClick={openQuickAskFromSelection}><span>✦</span>Ask AI <kbd>A</kbd></button><button type="button" className="toolbar-action" aria-keyshortcuts="N" onClick={openNoteFromSelection}><span>▱</span>Note <kbd>N</kbd></button></div>}
+      {pendingSelection && <div className="selection-toolbar" style={{ left: pendingSelection.x, top: pendingSelection.y }} onMouseDown={(event) => event.preventDefault()} role="toolbar" aria-label="Text selection actions"><div className="highlight-colors" aria-label="Highlight color">{HIGHLIGHT_COLORS.map(({ color, label, key }) => <button type="button" className="color-swatch" style={{ backgroundColor: color }} aria-label={`Highlight ${label.toLowerCase()} (${key})`} aria-keyshortcuts={key} title={`${label} highlight · ${key}`} onClick={() => applyHighlight(color)} key={color}><kbd>{key}</kbd></button>)}</div><span className="toolbar-divider" /><button type="button" className="toolbar-action primary" aria-keyshortcuts="C" onClick={addSelectionToContext}><span>＋</span>Add to context <kbd>C</kbd></button><button type="button" className="toolbar-action quote-note-action" aria-keyshortcuts="Q" onClick={addSelectionToPaperNote}><span>❝</span>Quote in note <kbd>Q</kbd></button><button type="button" className="toolbar-action" aria-keyshortcuts="A" onClick={openQuickAskFromSelection}><span>✦</span>Ask AI <kbd>A</kbd></button><button type="button" className="toolbar-action" aria-keyshortcuts="N" onClick={openNoteFromSelection}><span>▱</span>Note <kbd>N</kbd></button></div>}
       {noteEditor && <form className="note-editor" style={{ left: noteEditor.x, top: noteEditor.y, '--note-color': noteEditor.entry.color } as CSSProperties} onSubmit={saveNote}><header onPointerDown={beginNoteDrag} onPointerMove={moveNoteDrag} onPointerUp={endNoteDrag} onPointerCancel={endNoteDrag}><span>⠿ &nbsp;▰ Note</span><button type="button" aria-label="Close note" onClick={() => setNoteEditor(null)}>×</button></header><blockquote>{noteEditor.entry.text}</blockquote><div className="note-colors" aria-label="Note color">{NOTE_COLORS.map(({ color, label }) => <button type="button" className={noteEditor.entry.color === color ? 'selected' : ''} style={{ backgroundColor: color, color }} aria-label={`${label} note`} title={label} onClick={() => setNoteEditor((current) => current && ({ ...current, entry: { ...current.entry, color } }))} key={color} />)}</div><textarea autoFocus value={noteEditor.text} onChange={(event) => setNoteEditor((current) => current && ({ ...current, text: event.target.value }))} placeholder="Write a note about this passage…" rows={7} /><footer><button type="button" className="delete-note" onClick={() => void deleteNote()} disabled={noteSaving}>{highlightEntries.some((item) => item.id === noteEditor.entry.id) ? 'Delete note' : 'Discard'}</button><button type="submit" disabled={!noteEditor.text.trim() || noteSaving}>{noteSaving ? 'Saving…' : 'Save note'}</button></footer></form>}
       {quickAskTarget && <form className="quick-ask-popover" style={{ left: quickAskTarget.x, top: quickAskTarget.y }} onSubmit={submitQuickAsk}><div className="quick-ask-head" onPointerDown={beginQuickDrag} onPointerMove={moveQuickDrag} onPointerUp={endQuickDrag} onPointerCancel={endQuickDrag}><span>⠿</span><span>✦ Quick Ask</span><small>{activeConversation?.model_id}</small><button type="button" aria-label="Close Quick Ask" onClick={closeQuickAsk}>×</button></div><div className={`quick-ask-context${quickAskTarget.imageDataUrl ? ' image' : ''}`}>{quickAskTarget.imageDataUrl ? <img src={quickAskTarget.imageDataUrl} alt="Selected PDF area" /> : <blockquote>{quickAskTarget.text}</blockquote>}</div><div className="quick-thread" ref={quickThreadRef} onWheelCapture={(event) => { if (event.deltaY < 0) quickFollowRef.current = false; }} onTouchMove={() => { quickFollowRef.current = false; }} onScroll={(event) => { const element = event.currentTarget; quickFollowRef.current = element.scrollHeight - element.scrollTop - element.clientHeight < 24; }}>{quickTurns.map((turn, index) => <div className="quick-turn" key={index}><div className="quick-user">{turn.question}</div><MarkdownAnswer>{turn.answer}</MarkdownAnswer></div>)}{(quickActiveQuestion && (quickAnswer || quickAsking)) && <div className="quick-turn"><div className="quick-user">{quickActiveQuestion}</div>{quickAnswer ? <MarkdownAnswer streaming={quickAsking}>{quickAnswer}</MarkdownAnswer> : <div className="answer-skeleton"><i /><i /><i /></div>}</div>}</div><div className="quick-ask-entry"><input ref={quickAskInputRef} value={quickQuestion} onChange={(event) => setQuickQuestion(event.target.value)} placeholder={quickTurns.length || quickAnswer ? 'Ask a follow-up…' : 'What would you like clarified?'} disabled={quickAsking} /><button type="submit" disabled={!quickQuestion.trim() || quickAsking}>{quickAsking ? '…' : '↑'}</button></div>{quickError && <p className="quick-ask-error">{quickError}</p>}<div className="quick-ask-footer"><span>Only this selection + this thread</span><div><button type="button" onClick={addQuickTargetToContext} disabled={quickAsking || quickImporting}>＋ Context <kbd>C</kbd></button><button type="button" className="move-to-chat" onClick={() => void importQuickAsk()} disabled={quickAsking || quickImporting || (!quickTurns.length && !quickAnswer)}>{quickImporting ? 'Saving…' : 'Save as new chat →'}</button></div></div></form>}
       {settingsOpen && <SettingsDialog onClose={closeSettings} />}
@@ -1517,7 +1529,7 @@ function SettingsDialog({ onClose }: { onClose: () => void }) {
   </div>;
 }
 
-const NOTE_ALLOWED_TAGS = new Set(['P', 'DIV', 'BR', 'H1', 'H2', 'H3', 'H4', 'H5', 'UL', 'OL', 'LI', 'BLOCKQUOTE', 'STRONG', 'B', 'EM', 'I', 'U', 'S', 'A', 'CODE', 'PRE', 'INPUT']);
+const NOTE_ALLOWED_TAGS = new Set(['P', 'DIV', 'BR', 'H1', 'H2', 'H3', 'H4', 'H5', 'UL', 'OL', 'LI', 'BLOCKQUOTE', 'CITE', 'STRONG', 'B', 'EM', 'I', 'U', 'S', 'A', 'CODE', 'PRE', 'INPUT']);
 
 function sanitizeNoteHtml(source: string) {
   const document = new DOMParser().parseFromString(source, 'text/html');
@@ -1545,11 +1557,12 @@ function sanitizeNoteHtml(source: string) {
   return document.body.innerHTML;
 }
 
-function PaperNoteEditor({ documentId, paperName }: { documentId: string; paperName: string }) {
+function PaperNoteEditor({ documentId, paperName, pendingQuote, onQuoteConsumed }: { documentId: string; paperName: string; pendingQuote: ContextSelection | null; onQuoteConsumed: () => void }) {
   const editorRef = useRef<HTMLDivElement>(null);
   const revisionRef = useRef(0);
   const saveTimerRef = useRef<number | null>(null);
   const saveSequenceRef = useRef(Promise.resolve());
+  const insertedQuoteRef = useRef<string | null>(null);
   const [status, setStatus] = useState<'loading' | 'saved' | 'saving' | 'error'>('loading');
   const [errorMessage, setErrorMessage] = useState('');
   const [empty, setEmpty] = useState(true);
@@ -1591,6 +1604,29 @@ function PaperNoteEditor({ documentId, paperName }: { documentId: string; paperN
     if (saveTimerRef.current !== null) window.clearTimeout(saveTimerRef.current);
     saveTimerRef.current = window.setTimeout(() => void save(), 650);
   }
+
+  useEffect(() => {
+    const editor = editorRef.current;
+    if (!pendingQuote || status === 'loading' || !editor || insertedQuoteRef.current === pendingQuote.id) return;
+    insertedQuoteRef.current = pendingQuote.id;
+    const quote = document.createElement('blockquote');
+    quote.className = 'paper-source-quote';
+    const content = document.createElement('p');
+    content.textContent = pendingQuote.text;
+    const citation = document.createElement('cite');
+    citation.textContent = pendingQuote.page ? `Quoted from paper · Page ${pendingQuote.page}` : 'Quoted from paper';
+    quote.append(content, citation);
+    const nextLine = document.createElement('p');
+    nextLine.append(document.createElement('br'));
+    editor.append(quote, nextLine);
+    setEmpty(false);
+    changed();
+    placeCaretAtStart(nextLine);
+    quote.scrollIntoView({ behavior: 'smooth', block: 'center' });
+    onQuoteConsumed();
+    // The pending quote is an external insertion request; `changed` schedules its autosave.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [pendingQuote, status]);
 
   function command(name: string, value?: string) {
     editorRef.current?.focus();
