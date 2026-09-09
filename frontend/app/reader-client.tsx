@@ -17,13 +17,14 @@ import 'react-pdf/dist/Page/TextLayer.css';
 pdfjs.GlobalWorkerOptions.workerSrc = '/pdf.worker.min.mjs';
 
 type Paper = { id: string; original_name: string; byte_size: number; page_count: number; status: string; created_at: string; updated_at: string };
-type ContextSelection = { id: string; text: string; page: number | null; pageEnd?: number | null; imageDataUrl?: string };
+type ContextSelection = { id: string; text: string; page: number | null; pageEnd?: number | null; imageDataUrl?: string; rects?: HighlightRect[] };
 type PendingSelection = ContextSelection & { x: number; y: number; range: Range };
 type QuickAskTarget = ContextSelection & { x: number; y: number };
 type ScreenshotSelection = ContextSelection & { left: number; right: number; top: number; bottom: number; x: number; y: number };
 type ScreenshotDrag = { startContentX: number; startContentY: number; currentContentX: number; currentContentY: number; overlayLeft: number; overlayTop: number; overlayWidth: number; overlayHeight: number };
 type HighlightRect = { left: number; top: number; width: number; height: number };
-type HighlightEntry = ContextSelection & { color: string; range: Range | null; rects: HighlightRect[]; note_text?: string | null };
+type AiNoteLink = { conversation_id: string; title: string; question: string; created_at: string };
+type HighlightEntry = ContextSelection & { color: string; range: Range | null; rects: HighlightRect[]; note_text?: string | null; ai_links?: AiNoteLink[] };
 type NoteEditor = { entry: HighlightEntry; text: string; x: number; y: number };
 type StreamStatus = 'idle' | 'connecting' | 'streaming' | 'complete' | 'error';
 type ChatTurn = { id: string; question: string; answer: string; context: ContextSelection[]; importedQuickAsk?: boolean };
@@ -82,6 +83,7 @@ export default function Home() {
   const [quickAsking, setQuickAsking] = useState(false);
   const [quickImporting, setQuickImporting] = useState(false);
   const [quickError, setQuickError] = useState('');
+  const [selectedAiNote, setSelectedAiNote] = useState<HighlightEntry | null>(null);
   const [screenshotMode, setScreenshotMode] = useState(false);
   const [screenshotDrag, setScreenshotDrag] = useState<ScreenshotDrag | null>(null);
   const [highlightEntries, setHighlightEntries] = useState<HighlightEntry[]>([]);
@@ -589,6 +591,7 @@ export default function Home() {
     const conversation = await response.json() as Conversation;
     setConversations((current) => [conversation, ...current]);
     await openConversation(conversation);
+    return conversation;
   }
 
   async function deleteConversation(conversation: Conversation) {
@@ -651,7 +654,7 @@ export default function Home() {
     try {
       const response = await fetch(`${API_BASE}/api/documents/${documentId}/annotations`);
       if (!response.ok) throw new Error('Could not load saved highlights.');
-      const annotations = await response.json() as Array<{ id: string; page: number; text: string; color: string; rects: HighlightRect[]; note_text?: string | null }>;
+      const annotations = await response.json() as Array<{ id: string; page: number; text: string; color: string; rects: HighlightRect[]; note_text?: string | null; ai_links?: AiNoteLink[] }>;
       const entries = annotations.map((item) => ({ ...item, range: null }));
       highlightEntriesRef.current = entries;
       highlightUndoRef.current = [];
@@ -673,7 +676,9 @@ export default function Home() {
     const rect = range.getBoundingClientRect();
     const pageElement = (event.target as HTMLElement).closest<HTMLElement>('[data-page-number]');
     const page = pageElement ? Number(pageElement.dataset.pageNumber) : null;
-    const existing = highlightEntriesRef.current.find((item) => item.page === page && (item.text === text || (item.range && item.range.startContainer === range.startContainer && item.range.startOffset === range.startOffset && item.range.endContainer === range.endContainer && item.range.endOffset === range.endOffset)));
+    // Selecting an existing plain highlight toggles it off. Notes and linked AI
+    // anchors are persistent records and must never be deleted by selection.
+    const existing = highlightEntriesRef.current.find((item) => !item.note_text && !item.ai_links?.length && item.page === page && (item.text === text || (item.range && item.range.startContainer === range.startContainer && item.range.startOffset === range.startOffset && item.range.endContainer === range.endContainer && item.range.endOffset === range.endOffset)));
     if (existing) {
       commitHighlights(highlightEntriesRef.current.filter((item) => item.id !== existing.id));
       clearBrowserSelection();
@@ -687,15 +692,19 @@ export default function Home() {
     setPendingSelection(null);
   }
 
-  function addSelectionToContext() {
+  async function addSelectionToContext() {
     if (!pendingSelection) return;
-    const { id, text, page } = pendingSelection;
-    const alreadyAdded = contextSelections.some((item) => item.text === text && item.page === page);
-    if (!alreadyAdded) {
-      revealNewContext();
-      setContextSelections((current) => [...current, { id, text, page }]);
-    }
+    const { id, text, page, range } = pendingSelection;
+    const shouldStartNewChat = historyOpen;
+    const alreadyAdded = !shouldStartNewChat && contextSelections.some((item) => item.text === text && item.page === page);
+    const pageElement = (range.startContainer.nodeType === Node.ELEMENT_NODE ? range.startContainer as Element : range.startContainer.parentElement)?.closest<HTMLElement>('.react-pdf__Page');
+    const selection = { id, text, page, rects: pageElement ? getHighlightRects(range, pageElement) : undefined };
     clearBrowserSelection();
+    if (!alreadyAdded) {
+      if (shouldStartNewChat && !await createNewConversation()) return;
+      revealNewContext();
+      setContextSelections((current) => [...current, selection]);
+    }
     if (alreadyAdded) window.requestAnimationFrame(() => composerRef.current?.focus({ preventScroll: true }));
   }
 
@@ -734,24 +743,26 @@ export default function Home() {
   function openQuickAskFromSelection() {
     if (!pendingSelection) return;
     const { id, text, page, range } = pendingSelection;
-    setQuickAskTarget({ id, text, page, ...placeQuickAskBeside(range.getBoundingClientRect()) });
+    const pageElement = (range.startContainer.nodeType === Node.ELEMENT_NODE ? range.startContainer as Element : range.startContainer.parentElement)?.closest<HTMLElement>('.react-pdf__Page');
+    setQuickAskTarget({ id, text, page, rects: pageElement ? getHighlightRects(range, pageElement) : undefined, ...placeQuickAskBeside(range.getBoundingClientRect()) });
     setQuickQuestion(''); setQuickActiveQuestion(''); setQuickAnswer(''); setQuickTurns([]); setQuickError('');
     clearBrowserSelection();
     window.requestAnimationFrame(() => quickAskInputRef.current?.focus());
   }
 
-  function addScreenshotToContext() {
+  async function addScreenshotToContext() {
     if (!screenshotSelection) return;
-    const { id, text, page, pageEnd, imageDataUrl } = screenshotSelection;
-    setContextSelections((current) => current.some((item) => item.id === id) ? current : [...current, { id, text, page, pageEnd, imageDataUrl }]);
-    revealNewContext();
+    const { id, text, page, pageEnd, imageDataUrl, rects } = screenshotSelection;
     setScreenshotSelection(null);
+    if (historyOpen && !await createNewConversation()) return;
+    setContextSelections((current) => current.some((item) => item.id === id) ? current : [...current, { id, text, page, pageEnd, imageDataUrl, rects }]);
+    revealNewContext();
   }
 
   function openQuickAskFromScreenshot() {
     if (!screenshotSelection) return;
-    const { id, text, page, pageEnd, imageDataUrl, left, right, top, bottom } = screenshotSelection;
-    setQuickAskTarget({ id, text, page, pageEnd, imageDataUrl, ...placeQuickAskBeside({ left, right, top, bottom }) });
+    const { id, text, page, pageEnd, imageDataUrl, rects, left, right, top, bottom } = screenshotSelection;
+    setQuickAskTarget({ id, text, page, pageEnd, imageDataUrl, rects, ...placeQuickAskBeside({ left, right, top, bottom }) });
     setQuickQuestion(''); setQuickActiveQuestion(''); setQuickAnswer(''); setQuickTurns([]); setQuickError('');
     setScreenshotSelection(null);
     window.requestAnimationFrame(() => quickAskInputRef.current?.focus());
@@ -816,12 +827,47 @@ export default function Home() {
     if (!turns.length) return;
     setQuickImporting(true); setQuickError('');
     try {
-      const response = await fetch(`${API_BASE}/api/conversations/${activeConversation.id}/quick-ask/import`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ selected_text: quickAskTarget.imageDataUrl ? '' : quickAskTarget.text, images: quickAskTarget.imageDataUrl ? [{ data_url: quickAskTarget.imageDataUrl, page: quickAskTarget.page }] : [], page: quickAskTarget.page, turns: turns.map((turn) => ({ ...turn, selected_text: '', images: [], page: quickAskTarget.page })) }) });
+      const response = await fetch(`${API_BASE}/api/conversations/${activeConversation.id}/quick-ask/import`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ selected_text: quickAskTarget.imageDataUrl ? '' : quickAskTarget.text, images: quickAskTarget.imageDataUrl ? [{ data_url: quickAskTarget.imageDataUrl, page: quickAskTarget.page }] : [], anchors: quickAskTarget.page && quickAskTarget.rects?.length ? [{ text: quickAskTarget.text, page: quickAskTarget.page, rects: quickAskTarget.rects }] : [], page: quickAskTarget.page, turns: turns.map((turn) => ({ ...turn, selected_text: '', images: [], page: quickAskTarget.page })) }) });
       const updated = await response.json() as Conversation; if (!response.ok) throw new Error((updated as unknown as { detail?: string }).detail ?? 'Could not move Quick Ask to chat.');
       setActiveConversation(updated); setConversations((current) => [updated, ...current]);
       await openConversation(updated); setQuickAskTarget(null); setQuickQuestion(''); setQuickActiveQuestion(''); setQuickAnswer(''); setQuickTurns([]);
     } catch (reason) { setQuickError(reason instanceof Error ? reason.message : 'Could not move Quick Ask to chat.'); }
     finally { setQuickImporting(false); }
+  }
+
+  async function saveAiNote(selection: ContextSelection, conversation: Conversation, linkedQuestion: string) {
+    if (!active || !selection.page || !selection.rects?.length) return;
+    const response = await fetch(`${API_BASE}/api/documents/${active.id}/ai-notes`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ page: selection.page, text: selection.text, rects: selection.rects, link: { conversation_id: conversation.id, question: linkedQuestion } }) });
+    if (!response.ok) throw new Error('The chat was saved, but its PDF link could not be created.');
+    const saved = await response.json() as HighlightEntry;
+    const next = [...highlightEntriesRef.current.filter((item) => item.id !== saved.id), { ...saved, range: null }];
+    highlightEntriesRef.current = next;
+    paintHighlights(next);
+  }
+
+  async function openAiConversation(link: AiNoteLink) {
+    const conversation = conversations.find((item) => item.id === link.conversation_id) ?? await fetch(`${API_BASE}/api/conversations/${link.conversation_id}`).then((response) => response.json() as Promise<Conversation>);
+    setSelectedAiNote(null);
+    setPaneMode('chat');
+    setHistoryOpen(false);
+    await openConversation(conversation);
+  }
+
+  function isAiLinked(conversationId: string, linkedQuestion: string) {
+    return highlightEntries.some((entry) => entry.ai_links?.some((link) => link.conversation_id === conversationId && link.question === linkedQuestion));
+  }
+
+  async function toggleAiLink(conversation: Conversation, linkedQuestion: string, selections: ContextSelection[]) {
+    if (!active) return;
+    try {
+      if (isAiLinked(conversation.id, linkedQuestion)) {
+        const response = await fetch(`${API_BASE}/api/documents/${active.id}/ai-notes/unlink`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ conversation_id: conversation.id, question: linkedQuestion }) });
+        if (!response.ok) throw new Error();
+        await loadAnnotations(active.id);
+      } else {
+        for (const selection of selections.filter((item) => item.page && item.rects?.length)) await saveAiNote(selection, conversation, linkedQuestion);
+      }
+    } catch { setError('The PDF link could not be updated. Please try again.'); }
   }
 
   useEffect(() => {
@@ -931,6 +977,17 @@ export default function Home() {
     });
     const page = Math.min(...intersectingPages.map((item) => item.page));
     const pageEnd = Math.max(...intersectingPages.map((item) => item.page));
+    const anchorPage = intersectingPages.find((item) => item.page === page)!;
+    const anchorLeft = Math.max(selectionLeft, anchorPage.left);
+    const anchorTop = Math.max(selectionTop, anchorPage.top);
+    const anchorRight = Math.min(selectionRight, anchorPage.right);
+    const anchorBottom = Math.min(selectionBottom, anchorPage.bottom);
+    const rects = [{
+      left: (anchorLeft - anchorPage.left) / anchorPage.rect.width,
+      top: (anchorTop - anchorPage.top) / anchorPage.rect.height,
+      width: (anchorRight - anchorLeft) / anchorPage.rect.width,
+      height: (anchorBottom - anchorTop) / anchorPage.rect.height,
+    }];
     const target = {
       left: viewerRect.left + selectionLeft - viewer.scrollLeft,
       right: viewerRect.left + selectionRight - viewer.scrollLeft,
@@ -943,6 +1000,7 @@ export default function Home() {
       page,
       pageEnd,
       imageDataUrl: output.toDataURL('image/jpeg', .92),
+      rects,
       ...target,
       x: Math.min(window.innerWidth - 24, Math.max(24, (target.left + target.right) / 2)),
       y: Math.max(48, target.top - 12),
@@ -1208,7 +1266,7 @@ export default function Home() {
     try {
       const response = await fetch(`${API_BASE}/api/conversations/${sendingConversation.id}/messages/stream`, {
         method: 'POST', headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ question: sentQuestion, selected_text: formatContext(sentContext), images: formatImages(sentContext), page: sentContext.length === 1 ? sentContext[0].page : null }),
+        body: JSON.stringify({ question: sentQuestion, selected_text: formatContext(sentContext), images: formatImages(sentContext), anchors: sentContext.filter((item) => item.page && item.rects?.length).map((item) => ({ text: item.text, page: item.page, rects: item.rects })), page: sentContext.length === 1 ? sentContext[0].page : null }),
       });
       if (!response.ok || !response.body) {
         const payload = await response.json().catch(() => ({}));
@@ -1295,7 +1353,7 @@ export default function Home() {
       <div className={`reader-workspace${notesVisible ? ' notes-mode' : ''}`} ref={workspaceRef} style={{ gridTemplateColumns: `minmax(0, ${paperPercent}fr) minmax(340px, ${100 - paperPercent}fr)` }}>
         <section className={`pdf-pane${screenshotMode ? ' screenshot-mode' : ''}`} ref={viewerRef} onMouseUp={(event) => { if (!screenshotMode) captureSelection(event); }} onPointerDown={beginScreenshot} onPointerMove={moveScreenshot} onPointerUp={finishScreenshot} onPointerCancel={() => { screenshotPointerRef.current = null; setScreenshotDrag(null); setScreenshotMode(false); }}>
           <PdfDocument file={`${API_BASE}/api/documents/${active.id}/file`} onLoadSuccess={({ numPages }) => setPages(numPages)} loading={<div className="viewer-message">Rendering paper…</div>} error={<div className="viewer-message error-banner">Could not render this PDF.</div>}>
-            {Array.from({ length: pages }, (_, index) => { const pageNotes = highlightEntries.filter((entry) => entry.page === index + 1 && entry.note_text).sort(compareNotePosition); const pageScale = zoom / MAX_ZOOM; return <div className="pdf-page-stage" data-page-number={index + 1} key={index + 1}><div className="pdf-page-wrap" style={{ zoom: pageScale, '--page-scale': pageScale } as CSSProperties}><PdfPageWithHighlights pageNumber={index + 1} highlights={highlightEntries.filter((entry) => entry.page === index + 1)} />{!notesVisible && pageNotes.map((note, noteIndex) => <button type="button" className="note-anchor" style={{ top: `${noteMarkerTop(pageNotes, noteIndex) * 100}%`, '--note-color': note.color } as CSSProperties} title="Open note" aria-label="Open note" onClick={() => openSavedNote(note)} key={note.id}>▰</button>)}{notesVisible && <aside className="page-notes" aria-label={`Notes for page ${index + 1}`}>{pageNotes.map((note, noteIndex) => <button type="button" className="page-note-card" style={{ top: `${noteCardTop(pageNotes, noteIndex) * 100}%`, '--note-color': note.color } as CSSProperties} onClick={() => openSavedNote(note)} key={note.id}><span>Page {index + 1}</span><p>{note.note_text}</p><small>{note.text}</small></button>)}</aside>}<span className="page-label">{index + 1}</span></div></div>; })}
+            {Array.from({ length: pages }, (_, index) => { const pageEntries = highlightEntries.filter((entry) => entry.page === index + 1); const pageNotes = pageEntries.filter((entry) => entry.note_text).sort(compareNotePosition); const aiNotes = pageEntries.filter((entry) => entry.ai_links?.length).sort(compareNotePosition); const markers = pageEntries.filter((entry) => entry.note_text || entry.ai_links?.length).sort(compareNotePosition); const pageScale = zoom / MAX_ZOOM; return <div className="pdf-page-stage" data-page-number={index + 1} key={index + 1}><div className="pdf-page-wrap" style={{ zoom: pageScale, '--page-scale': pageScale } as CSSProperties}><PdfPageWithHighlights pageNumber={index + 1} highlights={pageEntries} />{aiNotes.map((note) => <button type="button" className="ai-note-anchor" style={{ top: `${noteMarkerTop(markers, markers.indexOf(note)) * 100}%` }} title={`${note.ai_links!.length} linked AI ${note.ai_links!.length === 1 ? 'note' : 'notes'}`} aria-label="Open linked AI notes" onClick={() => setSelectedAiNote(note)} key={`ai-${note.id}`}>✦<small>{note.ai_links!.length}</small></button>)}{!notesVisible && pageNotes.map((note) => <button type="button" className="note-anchor" style={{ top: `${noteMarkerTop(markers, markers.indexOf(note)) * 100}%`, '--note-color': note.color } as CSSProperties} title="Open note" aria-label="Open note" onClick={() => openSavedNote(note)} key={note.id}>▰</button>)}{notesVisible && <aside className="page-notes" aria-label={`Notes for page ${index + 1}`}>{pageNotes.map((note, noteIndex) => <button type="button" className="page-note-card" style={{ top: `${noteCardTop(pageNotes, noteIndex) * 100}%`, '--note-color': note.color } as CSSProperties} onClick={() => openSavedNote(note)} key={note.id}><span>Page {index + 1}</span><p>{note.note_text}</p><small>{note.text}</small></button>)}</aside>}<span className="page-label">{index + 1}</span></div></div>; })}
           </PdfDocument>
           {screenshotMode && !screenshotDrag && <div className="screenshot-hint">Drag over the PDF to ask about it · Esc to cancel</div>}
           {screenshotDrag && <div className="screenshot-region" style={{ left: screenshotDrag.overlayLeft, top: screenshotDrag.overlayTop, width: screenshotDrag.overlayWidth, height: screenshotDrag.overlayHeight }} />}
@@ -1310,8 +1368,8 @@ export default function Home() {
           </section> : <>
             <div className="conversation-header"><div>{activeConversation && renamingChatId === activeConversation.id ? <form className="chat-title-form" onSubmit={(event) => void renameConversation(event, activeConversation)}><input autoFocus value={chatTitleValue} maxLength={200} aria-label="Chat title" onChange={(event) => setChatTitleValue(event.target.value)} onKeyDown={(event) => { if (event.key === 'Escape') setRenamingChatId(null); }} /><button type="submit" disabled={!chatTitleValue.trim() || titleSaving}>Save</button></form> : <button type="button" className="chat-title-button" title="Rename chat" onClick={() => activeConversation && beginChatRename(activeConversation)}><strong>{activeConversation?.title ?? 'Loading chat…'}</strong><span>✎</span></button>}<small>{activeConversation ? `${activeConversation.provider} · ${activeConversation.model_id}` : 'Preparing paper context'}</small></div><div className="conversation-actions">{activeConversation?.provider === 'zen' && activeConversation.message_count > 0 && <button type="button" disabled={titleSaving} onClick={() => void regenerateConversationTitle(activeConversation)} title="Regenerate title with GPT-5.6 Luna"><span>↻</span> Title</button>}<button type="button" onClick={() => void createNewConversation()} title="Start a new chat"><span>＋</span> New</button><button type="button" onClick={() => setHistoryOpen(true)}><span>☰</span> History</button></div></div>
             <div className="chat-body" ref={chatBodyRef} onWheelCapture={(event) => { if (event.deltaY < 0) pauseChatFollow(); }} onTouchMove={pauseChatFollow} onPointerDown={(event) => { if (event.target === event.currentTarget) pauseChatFollow(); }} onScroll={(event) => { const element = event.currentTarget; followOutputRef.current = element.scrollHeight - element.scrollTop - element.clientHeight < 40; }}><div className="chat-heading"><span className="spark">✦</span><div><strong>{activeConversation?.context_builder_version === 'quick-ask-v1' ? 'Saved Quick Ask' : 'Ask about this paper'}</strong><p>{activeConversation?.context_builder_version === 'quick-ask-v1' ? 'This saved thread uses only its original selection and Quick Ask prompt.' : 'The full paper is available automatically. Select text only when you want to focus the answer.'}</p></div></div>{chatConfigured === false && <button type="button" className="no-key-notice" onClick={() => setSettingsOpen(true)}><strong>No API key configured</strong><span>Choose a provider and add a key in Settings to enable chat.</span></button>}
-              {chatHistory.map((turn) => <div className="chat-turn" key={turn.id}>{turn.importedQuickAsk && <div className="quick-import-badge">✦ Saved Quick Ask · selection only</div>}<ContextList selections={turn.context} /><div className="user-message"><span>You</span><p>{turn.question}</p></div><div className="answer-card complete"><div className="answer-meta"><span>Adam</span><span className="stream-state">Done</span></div><MarkdownAnswer>{turn.answer}</MarkdownAnswer></div></div>)}
-              {submittedQuestion && <><ContextList selections={submittedContext} /><div className="user-message"><span>You</span><p>{submittedQuestion}</p></div></>}
+              {chatHistory.map((turn) => <div className="chat-turn" key={turn.id}>{turn.importedQuickAsk && <div className="quick-import-badge">✦ Saved Quick Ask · selection only</div>}<ContextList selections={turn.context} />{activeConversation && turn.context.some((item) => item.rects?.length) && <button type="button" className={`turn-link-button${isAiLinked(activeConversation.id, turn.question) ? ' linked' : ''}`} onClick={() => void toggleAiLink(activeConversation, turn.question, turn.context)}>{isAiLinked(activeConversation.id, turn.question) ? '✦ Linked to PDF · click to unlink' : '✦ Link reference to PDF'}</button>}<div className="user-message"><span>You</span><p>{turn.question}</p></div><div className="answer-card complete"><div className="answer-meta"><span>Adam</span><span className="stream-state">Done</span></div><MarkdownAnswer>{turn.answer}</MarkdownAnswer></div></div>)}
+              {submittedQuestion && <><ContextList selections={submittedContext} />{activeConversation && streamStatus === 'complete' && submittedContext.some((item) => item.rects?.length) && <button type="button" className={`turn-link-button${isAiLinked(activeConversation.id, submittedQuestion) ? ' linked' : ''}`} onClick={() => void toggleAiLink(activeConversation, submittedQuestion, submittedContext)}>{isAiLinked(activeConversation.id, submittedQuestion) ? '✦ Linked to PDF · click to unlink' : '✦ Link reference to PDF'}</button>}<div className="user-message"><span>You</span><p>{submittedQuestion}</p></div></>}
               {streamStatus !== 'idle' && streamStatus !== 'error' && <div className={`answer-card ${streamStatus}`} aria-live="polite"><div className="answer-meta"><span>Adam</span><span className="stream-state">{streamStatus === 'connecting' ? <>Thinking<span className="thinking-dots"><i /><i /><i /></span></> : streamStatus === 'streaming' ? 'Responding…' : 'Done'}</span></div>{answer ? <MarkdownAnswer streaming={streamStatus === 'streaming'}>{answer}</MarkdownAnswer> : <div className="answer-skeleton"><i /><i /><i /></div>}</div>}{error && <p className="error-banner compact">{error}</p>}
               {contextSelections.length > 0 ? <ContextList selections={contextSelections} onRemove={(id) => setContextSelections((current) => current.filter((item) => item.id !== id))} /> : !submittedQuestion && chatHistory.length === 0 && <div className="empty-context"><span>✦</span><p>Ask anything about the paper, or select a passage for precise focus.</p></div>}
             </div>
@@ -1322,7 +1380,8 @@ export default function Home() {
       {pendingSelection && <div className="selection-toolbar" style={{ left: pendingSelection.x, top: pendingSelection.y }} onMouseDown={(event) => event.preventDefault()} role="toolbar" aria-label="Text selection actions"><div className="highlight-colors" aria-label="Highlight color">{HIGHLIGHT_COLORS.map(({ color, label, key }) => <button type="button" className="color-swatch" style={{ backgroundColor: color }} aria-label={`Highlight ${label.toLowerCase()} (${key})`} aria-keyshortcuts={key} title={`${label} highlight · ${key}`} onClick={() => applyHighlight(color)} key={color}><kbd>{key}</kbd></button>)}</div><span className="toolbar-divider" /><button type="button" className="toolbar-action primary" aria-keyshortcuts="C" onClick={addSelectionToContext}><span>＋</span>Add to context <kbd>C</kbd></button><button type="button" className="toolbar-action quote-note-action" aria-keyshortcuts="Q" onClick={addSelectionToPaperNote}><span>❝</span>Quote in note <kbd>Q</kbd></button><button type="button" className="toolbar-action" aria-keyshortcuts="A" onClick={openQuickAskFromSelection}><span>✦</span>Ask AI <kbd>A</kbd></button><button type="button" className="toolbar-action" aria-keyshortcuts="N" onClick={openNoteFromSelection}><span>▱</span>Note <kbd>N</kbd></button></div>}
       {screenshotSelection && <div className="selection-toolbar screenshot-actions" style={{ left: screenshotSelection.x, top: screenshotSelection.y }} role="toolbar" aria-label="Screenshot actions"><span className="screenshot-action-label">▧ Screenshot</span><span className="toolbar-divider" /><button type="button" className="toolbar-action primary" aria-keyshortcuts="C" onClick={addScreenshotToContext}><span>＋</span>Add to context <kbd>C</kbd></button><button type="button" className="toolbar-action" aria-keyshortcuts="A" onClick={openQuickAskFromScreenshot}><span>✦</span>Ask AI <kbd>A</kbd></button></div>}
       {noteEditor && <form className="note-editor" style={{ left: noteEditor.x, top: noteEditor.y, '--note-color': noteEditor.entry.color } as CSSProperties} onSubmit={saveNote}><header onPointerDown={beginNoteDrag} onPointerMove={moveNoteDrag} onPointerUp={endNoteDrag} onPointerCancel={endNoteDrag}><span>⠿ &nbsp;▰ Note</span><button type="button" aria-label="Close note" onClick={() => setNoteEditor(null)}>×</button></header><blockquote>{noteEditor.entry.text}</blockquote><div className="note-colors" aria-label="Note color">{NOTE_COLORS.map(({ color, label }) => <button type="button" className={noteEditor.entry.color === color ? 'selected' : ''} style={{ backgroundColor: color, color }} aria-label={`${label} note`} title={label} onClick={() => setNoteEditor((current) => current && ({ ...current, entry: { ...current.entry, color } }))} key={color} />)}</div><textarea autoFocus value={noteEditor.text} onChange={(event) => setNoteEditor((current) => current && ({ ...current, text: event.target.value }))} placeholder="Write a note about this passage…" rows={7} /><footer><button type="button" className="delete-note" onClick={() => void deleteNote()} disabled={noteSaving}>{highlightEntries.some((item) => item.id === noteEditor.entry.id) ? 'Delete note' : 'Discard'}</button><button type="submit" disabled={!noteEditor.text.trim() || noteSaving}>{noteSaving ? 'Saving…' : 'Save note'}</button></footer></form>}
-      {quickAskTarget && <form className="quick-ask-popover" style={{ left: quickAskTarget.x, top: quickAskTarget.y }} onSubmit={submitQuickAsk}><div className="quick-ask-head" onPointerDown={beginQuickDrag} onPointerMove={moveQuickDrag} onPointerUp={endQuickDrag} onPointerCancel={endQuickDrag}><span>⠿</span><span>✦ Quick Ask</span><small>{activeConversation?.model_id}</small><button type="button" aria-label="Close Quick Ask" onClick={closeQuickAsk}>×</button></div><div className={`quick-ask-context${quickAskTarget.imageDataUrl ? ' image' : ''}`}>{quickAskTarget.imageDataUrl ? <img src={quickAskTarget.imageDataUrl} alt="Selected PDF area" /> : <blockquote>{quickAskTarget.text}</blockquote>}</div><div className="quick-thread" ref={quickThreadRef} onWheelCapture={(event) => { if (event.deltaY < 0) quickFollowRef.current = false; }} onTouchMove={() => { quickFollowRef.current = false; }} onScroll={(event) => { const element = event.currentTarget; quickFollowRef.current = element.scrollHeight - element.scrollTop - element.clientHeight < 24; }}>{quickTurns.map((turn, index) => <div className="quick-turn" key={index}><div className="quick-user">{turn.question}</div><MarkdownAnswer>{turn.answer}</MarkdownAnswer></div>)}{(quickActiveQuestion && (quickAnswer || quickAsking)) && <div className="quick-turn"><div className="quick-user">{quickActiveQuestion}</div>{quickAnswer ? <MarkdownAnswer streaming={quickAsking}>{quickAnswer}</MarkdownAnswer> : <div className="answer-skeleton"><i /><i /><i /></div>}</div>}</div><div className="quick-ask-entry"><input ref={quickAskInputRef} value={quickQuestion} onChange={(event) => setQuickQuestion(event.target.value)} placeholder={quickTurns.length || quickAnswer ? 'Ask a follow-up…' : 'What would you like clarified?'} disabled={quickAsking} /><button type="submit" disabled={!quickQuestion.trim() || quickAsking}>{quickAsking ? '…' : '↑'}</button></div>{quickError && <p className="quick-ask-error">{quickError}</p>}<div className="quick-ask-footer"><span>Only this selection + this thread</span><div><button type="button" className="move-to-chat" onClick={() => void importQuickAsk()} disabled={quickAsking || quickImporting || (!quickTurns.length && !quickAnswer)}>{quickImporting ? 'Saving…' : 'Save as new chat →'}</button></div></div></form>}
+      {selectedAiNote && <div className="ai-note-backdrop" onMouseDown={() => setSelectedAiNote(null)}><section className="ai-note-dialog" onMouseDown={(event) => event.stopPropagation()}><header><span>✦ Linked AI notes</span><button type="button" onClick={() => setSelectedAiNote(null)}>×</button></header><blockquote>{selectedAiNote.text}</blockquote><div>{selectedAiNote.ai_links?.map((link, index) => <button type="button" className="ai-note-link" onClick={() => void openAiConversation(link)} key={`${link.conversation_id}-${index}`}><small>{link.title}</small><strong>{link.question}</strong><span>Open chat →</span></button>)}</div></section></div>}
+      {quickAskTarget && <form className="quick-ask-popover" style={{ left: quickAskTarget.x, top: quickAskTarget.y }} onSubmit={submitQuickAsk}><div className="quick-ask-head" onPointerDown={beginQuickDrag} onPointerMove={moveQuickDrag} onPointerUp={endQuickDrag} onPointerCancel={endQuickDrag}><span>⠿</span><span>✦ Quick Ask</span><small>{activeConversation?.model_id}</small><button type="button" aria-label="Close Quick Ask" onClick={closeQuickAsk}>×</button></div><div className={`quick-ask-context${quickAskTarget.imageDataUrl ? ' image' : ''}`}>{quickAskTarget.imageDataUrl ? <img src={quickAskTarget.imageDataUrl} alt="Selected PDF area" /> : <blockquote>{quickAskTarget.text}</blockquote>}</div><div className="quick-thread" ref={quickThreadRef} onWheelCapture={(event) => { if (event.deltaY < 0) quickFollowRef.current = false; }} onTouchMove={() => { quickFollowRef.current = false; }} onScroll={(event) => { const element = event.currentTarget; quickFollowRef.current = element.scrollHeight - element.scrollTop - element.clientHeight < 24; }}>{quickTurns.map((turn, index) => <div className="quick-turn" key={index}><div className="quick-user">{turn.question}</div><MarkdownAnswer>{turn.answer}</MarkdownAnswer></div>)}{(quickActiveQuestion && (quickAnswer || quickAsking)) && <div className="quick-turn"><div className="quick-user">{quickActiveQuestion}</div>{quickAnswer ? <MarkdownAnswer streaming={quickAsking}>{quickAnswer}</MarkdownAnswer> : <div className="answer-skeleton"><i /><i /><i /></div>}</div>}</div><div className="quick-ask-entry"><input ref={quickAskInputRef} value={quickQuestion} onChange={(event) => setQuickQuestion(event.target.value)} placeholder={quickTurns.length || quickAnswer ? 'Ask a follow-up…' : 'What would you like clarified?'} disabled={quickAsking} /><button type="submit" disabled={!quickQuestion.trim() || quickAsking}>{quickAsking ? '…' : '↑'}</button></div>{quickError && <p className="quick-ask-error">{quickError}</p>}<div className="quick-ask-footer"><span>Save this thread before linking it to the PDF</span><div><button type="button" className="move-to-chat" onClick={() => void importQuickAsk()} disabled={quickAsking || quickImporting || (!quickTurns.length && !quickAnswer)}>{quickImporting ? 'Saving…' : 'Save as new chat →'}</button></div></div></form>}
       {settingsOpen && <SettingsDialog onClose={closeSettings} />}
       {paperSearchOpen && <PaperSpotlight papers={papers} onClose={() => setPaperSearchOpen(false)} onOpen={(paper) => { setPaperSearchOpen(false); openPaper(paper); }} />}
     </main>
@@ -1358,8 +1417,9 @@ function formatImages(selections: ContextSelection[]) {
 function contextFromJson(value: string | null): ContextSelection[] {
   if (!value) return [];
   try {
-    const context = JSON.parse(value) as { selected_text?: string; page?: number | null; images?: Array<{ data_url: string; page?: number | null }> };
+    const context = JSON.parse(value) as { selected_text?: string; page?: number | null; images?: Array<{ data_url: string; page?: number | null }>; anchors?: Array<{ text: string; page: number; rects: HighlightRect[] }> };
     const items: ContextSelection[] = [];
+    if (context.anchors?.length) return context.anchors.map((anchor) => ({ id: crypto.randomUUID(), text: anchor.text, page: anchor.page, rects: anchor.rects, imageDataUrl: anchor.text === 'Selected PDF area' ? context.images?.find((image) => image.page === anchor.page)?.data_url : undefined }));
     if (context.selected_text) items.push({ id: crypto.randomUUID(), text: context.selected_text, page: context.page ?? null });
     for (const image of context.images ?? []) items.push({ id: crypto.randomUUID(), text: 'Selected PDF area', page: image.page ?? null, imageDataUrl: image.data_url });
     return items;
@@ -1437,7 +1497,7 @@ function HighlightCanvas({ highlights, renderVersion }: { highlights: HighlightE
     const overlayContext = overlay.getContext('2d');
     if (!sourceContext || !overlayContext) return;
     overlayContext.clearRect(0, 0, overlay.width, overlay.height);
-    highlights.filter((highlight) => !highlight.note_text).forEach((highlight) => {
+    highlights.filter((highlight) => !highlight.note_text && !highlight.ai_links?.length).forEach((highlight) => {
       const red = Number.parseInt(highlight.color.slice(1, 3), 16);
       const green = Number.parseInt(highlight.color.slice(3, 5), 16);
       const blue = Number.parseInt(highlight.color.slice(5, 7), 16);
@@ -1462,7 +1522,7 @@ function HighlightCanvas({ highlights, renderVersion }: { highlights: HighlightE
     });
     overlayContext.lineWidth = Math.max(2, source.width / 700);
     overlayContext.lineCap = 'round';
-    highlights.filter((highlight) => Boolean(highlight.note_text)).forEach((highlight) => highlight.rects.forEach((rect) => {
+    highlights.filter((highlight) => Boolean(highlight.note_text) || Boolean(highlight.ai_links?.length)).forEach((highlight) => highlight.rects.forEach((rect) => {
       overlayContext.strokeStyle = highlight.color;
       const left = Math.max(0, rect.left * source.width);
       const right = Math.min(source.width, (rect.left + rect.width) * source.width);

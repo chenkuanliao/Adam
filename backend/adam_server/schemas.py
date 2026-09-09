@@ -59,6 +59,7 @@ class AnnotationIn(BaseModel):
 
 class AnnotationOut(AnnotationIn):
     created_at: datetime
+    ai_links: list["AiNoteLinkOut"] = Field(default_factory=list)
 
 
 class AnnotationUpdate(BaseModel):
@@ -66,9 +67,32 @@ class AnnotationUpdate(BaseModel):
     color: str | None = Field(default=None, pattern=r"^#[0-9a-fA-F]{6}$")
 
 
+class AiNoteLinkIn(BaseModel):
+    conversation_id: str = Field(min_length=1, max_length=36)
+    question: str = Field(min_length=1, max_length=8000)
+
+
+class AiNoteLinkOut(AiNoteLinkIn):
+    title: str = Field(max_length=200)
+    created_at: datetime
+
+
+class AiNoteCreate(BaseModel):
+    page: int = Field(ge=1)
+    text: str = Field(min_length=1, max_length=30000)
+    rects: list[HighlightRect] = Field(min_length=1, max_length=500)
+    link: AiNoteLinkIn
+
+
 class ContextImageIn(BaseModel):
     data_url: str = Field(min_length=32, max_length=12_000_000, pattern=r"^data:image/(png|jpeg|webp);base64,")
     page: int | None = Field(default=None, ge=1)
+
+
+class ContextAnchorIn(BaseModel):
+    text: str = Field(min_length=1, max_length=30000)
+    page: int = Field(ge=1)
+    rects: list[HighlightRect] = Field(min_length=1, max_length=500)
 
 
 class ChatTurnIn(BaseModel):
@@ -84,6 +108,7 @@ class ChatRequest(BaseModel):
     selected_text: str = Field(default="", max_length=30000)
     page: int | None = Field(default=None, ge=1)
     images: list[ContextImageIn] = Field(default_factory=list, max_length=6)
+    anchors: list[ContextAnchorIn] = Field(default_factory=list, max_length=20)
 
 
 class QuickAskRequest(ChatRequest):
@@ -95,6 +120,12 @@ class QuickAskImportRequest(BaseModel):
     page: int | None = Field(default=None, ge=1)
     images: list[ContextImageIn] = Field(default_factory=list, max_length=6)
     turns: list[ChatTurnIn] = Field(min_length=1, max_length=30)
+    anchors: list[ContextAnchorIn] = Field(default_factory=list, max_length=20)
+
+
+class AiNoteUnlink(BaseModel):
+    conversation_id: str = Field(min_length=1, max_length=36)
+    question: str = Field(min_length=1, max_length=8000)
 
 
 class ConversationCreate(BaseModel):

@@ -14,7 +14,7 @@ import httpx
 from .config import Settings, get_settings
 from .database import SessionLocal, get_db, run_migrations
 from .models import Annotation, Conversation, Document, Message, ModelFavorite, Page, PaperNote
-from .schemas import AnnotationIn, AnnotationOut, AnnotationUpdate, AppSettingsOut, AppSettingsUpdate, ChatRequest, ConversationCreate, ConversationDetail, ConversationOut, ConversationUpdate, DocumentOut, DocumentUpdate, ModelFavoriteUpdate, PageTextOut, PaperNoteOut, PaperNoteUpdate, ProviderKeyUpdate, ProviderModelsOut, QuickAskImportRequest, QuickAskRequest
+from .schemas import AiNoteCreate, AiNoteUnlink, AnnotationIn, AnnotationOut, AnnotationUpdate, AppSettingsOut, AppSettingsUpdate, ChatRequest, ConversationCreate, ConversationDetail, ConversationOut, ConversationUpdate, DocumentOut, DocumentUpdate, ModelFavoriteUpdate, PageTextOut, PaperNoteOut, PaperNoteUpdate, ProviderKeyUpdate, ProviderModelsOut, QuickAskImportRequest, QuickAskRequest
 from .services.context import build_paper_context
 from .services.documents import ingest_pdf
 from .services.llm import AnthropicProvider, GoogleProvider, OpenAICompatibleProvider, OpenAIResponsesProvider, generate_zen_title, sse
@@ -261,7 +261,84 @@ def list_annotations(document_id: str, db: Session = Depends(get_db)) -> list[An
     if not db.get(Document, document_id):
         raise HTTPException(404, "Document not found.")
     annotations = db.scalars(select(Annotation).where(Annotation.document_id == document_id).order_by(Annotation.created_at)).all()
-    return [AnnotationOut(id=item.id, page=item.page_number, text=item.selected_text, color=item.color, rects=json.loads(item.geometry_json), note_text=item.note_text, created_at=item.created_at) for item in annotations]
+    return [annotation_out(item) for item in annotations]
+
+
+def annotation_out(item: Annotation) -> AnnotationOut:
+    return AnnotationOut(id=item.id, page=item.page_number, text=item.selected_text, color=item.color,
+                         rects=json.loads(item.geometry_json), note_text=item.note_text,
+                         ai_links=json.loads(item.ai_links_json or "[]"), created_at=item.created_at)
+
+
+def rects_overlap(left: list[dict], right: list[dict]) -> bool:
+    # A tiny tolerance makes separately captured versions of the same PDF text
+    # resolve to one anchor despite browser rounding.
+    tolerance = .002
+    return any(
+        a["left"] < b["left"] + b["width"] + tolerance
+        and a["left"] + a["width"] + tolerance > b["left"]
+        and a["top"] < b["top"] + b["height"] + tolerance
+        and a["top"] + a["height"] + tolerance > b["top"]
+        for a in left for b in right
+    )
+
+
+@app.post("/api/documents/{document_id}/ai-notes", response_model=AnnotationOut)
+def link_ai_note(document_id: str, request: AiNoteCreate, db: Session = Depends(get_db)) -> AnnotationOut:
+    document = db.get(Document, document_id)
+    conversation = db.get(Conversation, request.link.conversation_id)
+    if not document:
+        raise HTTPException(404, "Document not found.")
+    if not conversation or conversation.document_id != document_id:
+        raise HTTPException(422, "The linked chat does not belong to this paper.")
+    incoming_rects = [rect.model_dump() for rect in request.rects]
+    candidates = db.scalars(select(Annotation).where(
+        Annotation.document_id == document_id,
+        Annotation.page_number == request.page,
+        Annotation.ai_links_json.is_not(None),
+    )).all()
+    annotation = next((item for item in candidates if rects_overlap(json.loads(item.geometry_json), incoming_rects)), None)
+    now = datetime.now(timezone.utc)
+    link = {"conversation_id": conversation.id, "title": conversation.title, "question": request.link.question.strip(), "created_at": now.isoformat()}
+    if annotation:
+        links = json.loads(annotation.ai_links_json or "[]")
+        duplicate = next((item for item in links if item["conversation_id"] == link["conversation_id"] and item["question"] == link["question"]), None)
+        if not duplicate:
+            links.append(link)
+        existing_rects = json.loads(annotation.geometry_json)
+        for rect in incoming_rects:
+            if not any(all(abs(rect[key] - old[key]) < .002 for key in ("left", "top", "width", "height")) for old in existing_rects):
+                existing_rects.append(rect)
+        annotation.geometry_json = json.dumps(existing_rects)
+        annotation.ai_links_json = json.dumps(links)
+    else:
+        annotation = Annotation(document_id=document_id, page_number=request.page, kind="ai_note",
+                                selected_text=request.text, color="#7b61a8", geometry_json=json.dumps(incoming_rects),
+                                ai_links_json=json.dumps([link]))
+        db.add(annotation)
+    document.updated_at = now
+    db.commit()
+    db.refresh(annotation)
+    return annotation_out(annotation)
+
+
+@app.post("/api/documents/{document_id}/ai-notes/unlink", status_code=204)
+def unlink_ai_note(document_id: str, request: AiNoteUnlink, db: Session = Depends(get_db)) -> Response:
+    if not db.get(Document, document_id):
+        raise HTTPException(404, "Document not found.")
+    for annotation in db.scalars(select(Annotation).where(Annotation.document_id == document_id, Annotation.ai_links_json.is_not(None))).all():
+        links = json.loads(annotation.ai_links_json or "[]")
+        remaining = [link for link in links if not (link.get("conversation_id") == request.conversation_id and link.get("question") == request.question)]
+        if len(remaining) == len(links):
+            continue
+        if remaining:
+            annotation.ai_links_json = json.dumps(remaining)
+        elif annotation.kind == "ai_note":
+            db.delete(annotation)
+        else:
+            annotation.ai_links_json = None
+    db.commit()
+    return Response(status_code=204)
 
 
 @app.post("/api/documents/{document_id}/annotations", response_model=AnnotationOut, status_code=201)
@@ -273,13 +350,13 @@ def create_annotation(document_id: str, request: AnnotationIn, db: Session = Dep
     if existing:
         if existing.document_id != document_id:
             raise HTTPException(409, "Annotation id already exists.")
-        return AnnotationOut(id=existing.id, page=existing.page_number, text=existing.selected_text, color=existing.color, rects=json.loads(existing.geometry_json), note_text=existing.note_text, created_at=existing.created_at)
+        return annotation_out(existing)
     annotation = Annotation(id=request.id, document_id=document_id, page_number=request.page, kind="note" if request.note_text is not None else "highlight", selected_text=request.text, color=request.color, geometry_json=json.dumps([rect.model_dump() for rect in request.rects]), note_text=request.note_text)
     db.add(annotation)
     document.updated_at = datetime.now(timezone.utc)
     db.commit()
     db.refresh(annotation)
-    return AnnotationOut(id=annotation.id, page=annotation.page_number, text=annotation.selected_text, color=annotation.color, rects=request.rects, note_text=annotation.note_text, created_at=annotation.created_at)
+    return annotation_out(annotation)
 
 
 @app.patch("/api/documents/{document_id}/annotations/{annotation_id}", response_model=AnnotationOut)
@@ -295,7 +372,7 @@ def update_annotation(document_id: str, annotation_id: str, request: AnnotationU
     if document: document.updated_at = datetime.now(timezone.utc)
     db.commit()
     db.refresh(annotation)
-    return AnnotationOut(id=annotation.id, page=annotation.page_number, text=annotation.selected_text, color=annotation.color, rects=json.loads(annotation.geometry_json), note_text=annotation.note_text, created_at=annotation.created_at)
+    return annotation_out(annotation)
 
 
 @app.delete("/api/documents/{document_id}/annotations/{annotation_id}", status_code=204)
@@ -400,6 +477,14 @@ def delete_conversation(conversation_id: str, db: Session = Depends(get_db)) -> 
     conversation = db.get(Conversation, conversation_id)
     if not conversation:
         raise HTTPException(404, "Conversation not found.")
+    for annotation in db.scalars(select(Annotation).where(Annotation.document_id == conversation.document_id, Annotation.ai_links_json.is_not(None))).all():
+        links = [link for link in json.loads(annotation.ai_links_json or "[]") if link.get("conversation_id") != conversation_id]
+        if links:
+            annotation.ai_links_json = json.dumps(links)
+        elif annotation.kind == "ai_note":
+            db.delete(annotation)
+        else:
+            annotation.ai_links_json = None
     db.delete(conversation)
     db.commit()
     return Response(status_code=204)
@@ -420,7 +505,7 @@ async def chat_stream(conversation_id: str, request: ChatRequest, db: Session = 
     else:
         paper_context, context_mode = build_paper_context(db, conversation, request.question, request.selected_text)
     scope = "quick_ask_followup" if conversation.context_builder_version == "quick-ask-v1" else ("selection" if request.selected_text or request.images else "paper")
-    context = {"scope": scope, "page": request.page, "selected_text": request.selected_text, "images": [image.model_dump() for image in request.images], "context_mode": context_mode}
+    context = {"scope": scope, "page": request.page, "selected_text": request.selected_text, "images": [image.model_dump() for image in request.images], "anchors": [anchor.model_dump() for anchor in request.anchors], "context_mode": context_mode}
     user_message = Message(document_id=conversation.document_id, conversation_id=conversation.id, role="user", content=request.question, context_json=json.dumps(context))
     db.add(user_message)
     should_generate_title = conversation.title == "New chat" and provider_name == "zen"
@@ -506,7 +591,7 @@ def import_quick_ask(conversation_id: str, request: QuickAskImportRequest, db: S
     db.add(conversation)
     db.flush()
     for index, turn in enumerate(request.turns):
-        context = json.dumps({"scope": "quick_ask_saved" if index == 0 else "quick_ask_followup", "page": request.page, "selected_text": request.selected_text if index == 0 else "", "images": [image.model_dump() for image in request.images] if index == 0 else [], "label": "Saved Quick Ask · selection only" if index == 0 else "Quick Ask follow-up"})
+        context = json.dumps({"scope": "quick_ask_saved" if index == 0 else "quick_ask_followup", "page": request.page, "selected_text": request.selected_text if index == 0 else "", "images": [image.model_dump() for image in request.images] if index == 0 else [], "anchors": [anchor.model_dump() for anchor in request.anchors] if index == 0 else [], "label": "Saved Quick Ask · selection only" if index == 0 else "Quick Ask follow-up"})
         db.add(Message(document_id=conversation.document_id, conversation_id=conversation.id, role="user", content=turn.question, context_json=context))
         db.add(Message(document_id=conversation.document_id, conversation_id=conversation.id, role="assistant", content=turn.answer, context_json=None))
     conversation.updated_at = datetime.now(timezone.utc)

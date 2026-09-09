@@ -86,6 +86,7 @@ class Annotation(Base):
     color: Mapped[str] = mapped_column(String(16))
     geometry_json: Mapped[str] = mapped_column(Text)
     note_text: Mapped[str | None] = mapped_column(Text, nullable=True)
+    ai_links_json: Mapped[str | None] = mapped_column(Text, nullable=True)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
 
 

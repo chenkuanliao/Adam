@@ -186,6 +186,7 @@ def test_paper_context_and_history_are_owned_by_the_backend(monkeypatch) -> None
     saved_quick_chat = imported.json()
     assert saved_quick_chat["id"] != conversation["id"]
     assert saved_quick_chat["context_builder_version"] == "quick-ask-v1"
+    assert client.get(f"/api/documents/{uploaded['id']}/annotations").json() == []
     saved_after_import = client.get(f"/api/conversations/{saved_quick_chat['id']}").json()
     assert len(saved_after_import["messages"]) == 4
     assert "quick_ask_saved" in saved_after_import["messages"][0]["context_json"]
@@ -218,6 +219,34 @@ def test_delete_paper_removes_file_and_related_records() -> None:
     assert client.get(f"/api/documents/{uploaded['id']}/file").status_code == 404
     assert client.get(f"/api/conversations/{conversation['id']}").status_code == 404
     assert all(item["id"] != uploaded["id"] for item in client.get("/api/documents").json())
+
+
+def test_ai_notes_merge_overlapping_context_and_follow_chat_lifecycle() -> None:
+    uploaded = client.post("/api/documents", files={"file": ("linked.pdf", BytesIO(sample_pdf("Linked AI note test.")), "application/pdf")}).json()
+    first_chat = client.post(f"/api/documents/{uploaded['id']}/conversations", json={}).json()
+    second_chat = client.post(f"/api/documents/{uploaded['id']}/conversations", json={}).json()
+    note_id = "33333333-3333-4333-8333-333333333333"
+    note = client.post(f"/api/documents/{uploaded['id']}/annotations", json={"id": note_id, "page": 1, "text": "Linked AI note", "color": "#d6a629", "rects": [{"left": .1, "top": .1, "width": .3, "height": .03}], "note_text": "Keep this regular note."})
+    assert note.status_code == 201
+    first = client.post(f"/api/documents/{uploaded['id']}/ai-notes", json={"page": 1, "text": "Linked AI", "rects": [{"left": .1, "top": .1, "width": .2, "height": .03}], "link": {"conversation_id": first_chat["id"], "question": "What is this?"}})
+    assert first.status_code == 200
+    overlapping = client.post(f"/api/documents/{uploaded['id']}/ai-notes", json={"page": 1, "text": "AI note", "rects": [{"left": .25, "top": .1, "width": .2, "height": .03}], "link": {"conversation_id": second_chat["id"], "question": "Why does it matter?"}})
+    assert overlapping.status_code == 200
+    assert overlapping.json()["id"] == first.json()["id"]
+    assert len(overlapping.json()["ai_links"]) == 2
+    annotations = client.get(f"/api/documents/{uploaded['id']}/annotations").json()
+    assert len(annotations) == 2
+    assert next(item for item in annotations if item["id"] == note_id)["note_text"] == "Keep this regular note."
+    unlinked = client.post(f"/api/documents/{uploaded['id']}/ai-notes/unlink", json={"conversation_id": first_chat["id"], "question": "What is this?"})
+    assert unlinked.status_code == 204
+    assert len(next(item for item in client.get(f"/api/documents/{uploaded['id']}/annotations").json() if item["ai_links"])["ai_links"]) == 1
+    assert client.delete(f"/api/conversations/{first_chat['id']}").status_code == 204
+    assert len(next(item for item in client.get(f"/api/documents/{uploaded['id']}/annotations").json() if item["ai_links"])["ai_links"]) == 1
+    assert client.delete(f"/api/conversations/{second_chat['id']}").status_code == 204
+    remaining = client.get(f"/api/documents/{uploaded['id']}/annotations").json()
+    assert len(remaining) == 1
+    assert remaining[0]["id"] == note_id
+    assert remaining[0]["note_text"] == "Keep this regular note."
 
 
 def test_zen_auto_title_manual_rename_and_regeneration(monkeypatch) -> None:
