@@ -20,6 +20,7 @@ type Paper = { id: string; original_name: string; byte_size: number; page_count:
 type ContextSelection = { id: string; text: string; page: number | null; pageEnd?: number | null; imageDataUrl?: string };
 type PendingSelection = ContextSelection & { x: number; y: number; range: Range };
 type QuickAskTarget = ContextSelection & { x: number; y: number };
+type ScreenshotSelection = ContextSelection & { left: number; right: number; top: number; bottom: number; x: number; y: number };
 type ScreenshotDrag = { startContentX: number; startContentY: number; currentContentX: number; currentContentY: number; overlayLeft: number; overlayTop: number; overlayWidth: number; overlayHeight: number };
 type HighlightRect = { left: number; top: number; width: number; height: number };
 type HighlightEntry = ContextSelection & { color: string; range: Range | null; rects: HighlightRect[]; note_text?: string | null };
@@ -72,6 +73,7 @@ export default function Home() {
   const [pages, setPages] = useState(0);
   const [contextSelections, setContextSelections] = useState<ContextSelection[]>([]);
   const [pendingSelection, setPendingSelection] = useState<PendingSelection | null>(null);
+  const [screenshotSelection, setScreenshotSelection] = useState<ScreenshotSelection | null>(null);
   const [quickAskTarget, setQuickAskTarget] = useState<QuickAskTarget | null>(null);
   const [quickQuestion, setQuickQuestion] = useState('');
   const [quickActiveQuestion, setQuickActiveQuestion] = useState('');
@@ -705,12 +707,53 @@ export default function Home() {
     clearBrowserSelection();
   }
 
+  function placePopoverBeside(target: Pick<DOMRect, 'left' | 'right' | 'top' | 'bottom'>, preferredWidth: number, preferredHeight: number) {
+    const editorWidth = Math.min(preferredWidth, window.innerWidth - 24);
+    const editorHeight = Math.min(preferredHeight, window.innerHeight - 24);
+    const gap = 18;
+    let x = target.right + gap + editorWidth / 2;
+    let y = Math.max(8, Math.min(window.innerHeight - editorHeight - 8, target.top));
+    if (x + editorWidth / 2 > window.innerWidth - 8) x = target.left - gap - editorWidth / 2;
+    if (x - editorWidth / 2 < 8) {
+      x = Math.max(editorWidth / 2 + 8, Math.min(window.innerWidth - editorWidth / 2 - 8, (target.left + target.right) / 2));
+      y = target.bottom + gap;
+      if (y + editorHeight > window.innerHeight - 8) y = target.top - editorHeight - gap;
+      y = Math.max(8, Math.min(window.innerHeight - editorHeight - 8, y));
+    }
+    return { x, y };
+  }
+
+  function placeNoteBeside(target: Pick<DOMRect, 'left' | 'right' | 'top' | 'bottom'>) {
+    return placePopoverBeside(target, 340, 330);
+  }
+
+  function placeQuickAskBeside(target: Pick<DOMRect, 'left' | 'right' | 'top' | 'bottom'>) {
+    return placePopoverBeside(target, 430, 620);
+  }
+
   function openQuickAskFromSelection() {
     if (!pendingSelection) return;
     const { id, text, page, range } = pendingSelection;
     setQuickAskTarget({ id, text, page, ...placeQuickAskBeside(range.getBoundingClientRect()) });
     setQuickQuestion(''); setQuickActiveQuestion(''); setQuickAnswer(''); setQuickTurns([]); setQuickError('');
     clearBrowserSelection();
+    window.requestAnimationFrame(() => quickAskInputRef.current?.focus());
+  }
+
+  function addScreenshotToContext() {
+    if (!screenshotSelection) return;
+    const { id, text, page, pageEnd, imageDataUrl } = screenshotSelection;
+    setContextSelections((current) => current.some((item) => item.id === id) ? current : [...current, { id, text, page, pageEnd, imageDataUrl }]);
+    revealNewContext();
+    setScreenshotSelection(null);
+  }
+
+  function openQuickAskFromScreenshot() {
+    if (!screenshotSelection) return;
+    const { id, text, page, pageEnd, imageDataUrl, left, right, top, bottom } = screenshotSelection;
+    setQuickAskTarget({ id, text, page, pageEnd, imageDataUrl, ...placeQuickAskBeside({ left, right, top, bottom }) });
+    setQuickQuestion(''); setQuickActiveQuestion(''); setQuickAnswer(''); setQuickTurns([]); setQuickError('');
+    setScreenshotSelection(null);
     window.requestAnimationFrame(() => quickAskInputRef.current?.focus());
   }
 
@@ -797,6 +840,7 @@ export default function Home() {
       if (event.key.toLowerCase() === 'r') {
         event.preventDefault();
         clearBrowserSelection();
+        setScreenshotSelection(null);
         setScreenshotDrag(null);
         screenshotPointerRef.current = null;
         setScreenshotMode(true);
@@ -893,10 +937,37 @@ export default function Home() {
       top: viewerRect.top + selectionTop - viewer.scrollTop,
       bottom: viewerRect.top + selectionBottom - viewer.scrollTop,
     };
-    setQuickAskTarget({ id: crypto.randomUUID(), text: 'Selected PDF area', page, pageEnd, imageDataUrl: output.toDataURL('image/jpeg', .92), ...placeQuickAskBeside(target) });
-    setQuickQuestion(''); setQuickActiveQuestion(''); setQuickAnswer(''); setQuickTurns([]); setQuickError('');
-    window.requestAnimationFrame(() => quickAskInputRef.current?.focus());
+    setScreenshotSelection({
+      id: crypto.randomUUID(),
+      text: 'Selected PDF area',
+      page,
+      pageEnd,
+      imageDataUrl: output.toDataURL('image/jpeg', .92),
+      ...target,
+      x: Math.min(window.innerWidth - 24, Math.max(24, (target.left + target.right) / 2)),
+      y: Math.max(48, target.top - 12),
+    });
   }
+
+  useEffect(() => {
+    if (!screenshotSelection) return;
+    const handleScreenshotSelectionHotkey = (event: KeyboardEvent) => {
+      const target = event.target as HTMLElement | null;
+      if (event.repeat || event.metaKey || event.ctrlKey || event.altKey || target?.isContentEditable || target?.matches('input, textarea, select')) return;
+      if (event.key.toLowerCase() === 'c') {
+        event.preventDefault();
+        addScreenshotToContext();
+      } else if (event.key.toLowerCase() === 'a') {
+        event.preventDefault();
+        openQuickAskFromScreenshot();
+      } else if (event.key === 'Escape') {
+        event.preventDefault();
+        setScreenshotSelection(null);
+      }
+    };
+    window.addEventListener('keydown', handleScreenshotSelectionHotkey);
+    return () => window.removeEventListener('keydown', handleScreenshotSelectionHotkey);
+  });
 
   function applyHighlight(color: string) {
     if (!pendingSelection) return;
@@ -916,30 +987,6 @@ export default function Home() {
     const entry: HighlightEntry = { id, text, page, range, color: NOTE_COLORS[0].color, rects: getHighlightRects(range, pageElement), note_text: '' };
     setNoteEditor({ entry, text: '', ...placeNoteBeside(range.getBoundingClientRect()) });
     clearBrowserSelection();
-  }
-
-  function placeNoteBeside(target: Pick<DOMRect, 'left' | 'right' | 'top' | 'bottom'>) {
-    return placePopoverBeside(target, 340, 330);
-  }
-
-  function placeQuickAskBeside(target: Pick<DOMRect, 'left' | 'right' | 'top' | 'bottom'>) {
-    return placePopoverBeside(target, 430, 620);
-  }
-
-  function placePopoverBeside(target: Pick<DOMRect, 'left' | 'right' | 'top' | 'bottom'>, preferredWidth: number, preferredHeight: number) {
-    const editorWidth = Math.min(preferredWidth, window.innerWidth - 24);
-    const editorHeight = Math.min(preferredHeight, window.innerHeight - 24);
-    const gap = 18;
-    let x = target.right + gap + editorWidth / 2;
-    let y = Math.max(8, Math.min(window.innerHeight - editorHeight - 8, target.top));
-    if (x + editorWidth / 2 > window.innerWidth - 8) x = target.left - gap - editorWidth / 2;
-    if (x - editorWidth / 2 < 8) {
-      x = Math.max(editorWidth / 2 + 8, Math.min(window.innerWidth - editorWidth / 2 - 8, (target.left + target.right) / 2));
-      y = target.bottom + gap;
-      if (y + editorHeight > window.innerHeight - 8) y = target.top - editorHeight - gap;
-      y = Math.max(8, Math.min(window.innerHeight - editorHeight - 8, y));
-    }
-    return { x, y };
   }
 
   function openSavedNote(entry: HighlightEntry) {
@@ -1273,6 +1320,7 @@ export default function Home() {
         </aside>
       </div>
       {pendingSelection && <div className="selection-toolbar" style={{ left: pendingSelection.x, top: pendingSelection.y }} onMouseDown={(event) => event.preventDefault()} role="toolbar" aria-label="Text selection actions"><div className="highlight-colors" aria-label="Highlight color">{HIGHLIGHT_COLORS.map(({ color, label, key }) => <button type="button" className="color-swatch" style={{ backgroundColor: color }} aria-label={`Highlight ${label.toLowerCase()} (${key})`} aria-keyshortcuts={key} title={`${label} highlight · ${key}`} onClick={() => applyHighlight(color)} key={color}><kbd>{key}</kbd></button>)}</div><span className="toolbar-divider" /><button type="button" className="toolbar-action primary" aria-keyshortcuts="C" onClick={addSelectionToContext}><span>＋</span>Add to context <kbd>C</kbd></button><button type="button" className="toolbar-action quote-note-action" aria-keyshortcuts="Q" onClick={addSelectionToPaperNote}><span>❝</span>Quote in note <kbd>Q</kbd></button><button type="button" className="toolbar-action" aria-keyshortcuts="A" onClick={openQuickAskFromSelection}><span>✦</span>Ask AI <kbd>A</kbd></button><button type="button" className="toolbar-action" aria-keyshortcuts="N" onClick={openNoteFromSelection}><span>▱</span>Note <kbd>N</kbd></button></div>}
+      {screenshotSelection && <div className="selection-toolbar screenshot-actions" style={{ left: screenshotSelection.x, top: screenshotSelection.y }} role="toolbar" aria-label="Screenshot actions"><span className="screenshot-action-label">▧ Screenshot</span><span className="toolbar-divider" /><button type="button" className="toolbar-action primary" aria-keyshortcuts="C" onClick={addScreenshotToContext}><span>＋</span>Add to context <kbd>C</kbd></button><button type="button" className="toolbar-action" aria-keyshortcuts="A" onClick={openQuickAskFromScreenshot}><span>✦</span>Ask AI <kbd>A</kbd></button></div>}
       {noteEditor && <form className="note-editor" style={{ left: noteEditor.x, top: noteEditor.y, '--note-color': noteEditor.entry.color } as CSSProperties} onSubmit={saveNote}><header onPointerDown={beginNoteDrag} onPointerMove={moveNoteDrag} onPointerUp={endNoteDrag} onPointerCancel={endNoteDrag}><span>⠿ &nbsp;▰ Note</span><button type="button" aria-label="Close note" onClick={() => setNoteEditor(null)}>×</button></header><blockquote>{noteEditor.entry.text}</blockquote><div className="note-colors" aria-label="Note color">{NOTE_COLORS.map(({ color, label }) => <button type="button" className={noteEditor.entry.color === color ? 'selected' : ''} style={{ backgroundColor: color, color }} aria-label={`${label} note`} title={label} onClick={() => setNoteEditor((current) => current && ({ ...current, entry: { ...current.entry, color } }))} key={color} />)}</div><textarea autoFocus value={noteEditor.text} onChange={(event) => setNoteEditor((current) => current && ({ ...current, text: event.target.value }))} placeholder="Write a note about this passage…" rows={7} /><footer><button type="button" className="delete-note" onClick={() => void deleteNote()} disabled={noteSaving}>{highlightEntries.some((item) => item.id === noteEditor.entry.id) ? 'Delete note' : 'Discard'}</button><button type="submit" disabled={!noteEditor.text.trim() || noteSaving}>{noteSaving ? 'Saving…' : 'Save note'}</button></footer></form>}
       {quickAskTarget && <form className="quick-ask-popover" style={{ left: quickAskTarget.x, top: quickAskTarget.y }} onSubmit={submitQuickAsk}><div className="quick-ask-head" onPointerDown={beginQuickDrag} onPointerMove={moveQuickDrag} onPointerUp={endQuickDrag} onPointerCancel={endQuickDrag}><span>⠿</span><span>✦ Quick Ask</span><small>{activeConversation?.model_id}</small><button type="button" aria-label="Close Quick Ask" onClick={closeQuickAsk}>×</button></div><div className={`quick-ask-context${quickAskTarget.imageDataUrl ? ' image' : ''}`}>{quickAskTarget.imageDataUrl ? <img src={quickAskTarget.imageDataUrl} alt="Selected PDF area" /> : <blockquote>{quickAskTarget.text}</blockquote>}</div><div className="quick-thread" ref={quickThreadRef} onWheelCapture={(event) => { if (event.deltaY < 0) quickFollowRef.current = false; }} onTouchMove={() => { quickFollowRef.current = false; }} onScroll={(event) => { const element = event.currentTarget; quickFollowRef.current = element.scrollHeight - element.scrollTop - element.clientHeight < 24; }}>{quickTurns.map((turn, index) => <div className="quick-turn" key={index}><div className="quick-user">{turn.question}</div><MarkdownAnswer>{turn.answer}</MarkdownAnswer></div>)}{(quickActiveQuestion && (quickAnswer || quickAsking)) && <div className="quick-turn"><div className="quick-user">{quickActiveQuestion}</div>{quickAnswer ? <MarkdownAnswer streaming={quickAsking}>{quickAnswer}</MarkdownAnswer> : <div className="answer-skeleton"><i /><i /><i /></div>}</div>}</div><div className="quick-ask-entry"><input ref={quickAskInputRef} value={quickQuestion} onChange={(event) => setQuickQuestion(event.target.value)} placeholder={quickTurns.length || quickAnswer ? 'Ask a follow-up…' : 'What would you like clarified?'} disabled={quickAsking} /><button type="submit" disabled={!quickQuestion.trim() || quickAsking}>{quickAsking ? '…' : '↑'}</button></div>{quickError && <p className="quick-ask-error">{quickError}</p>}<div className="quick-ask-footer"><span>Only this selection + this thread</span><div><button type="button" className="move-to-chat" onClick={() => void importQuickAsk()} disabled={quickAsking || quickImporting || (!quickTurns.length && !quickAnswer)}>{quickImporting ? 'Saving…' : 'Save as new chat →'}</button></div></div></form>}
       {settingsOpen && <SettingsDialog onClose={closeSettings} />}

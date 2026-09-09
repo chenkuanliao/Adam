@@ -80,3 +80,4 @@
 .quick-ask-error{font-size:13px}
 .quick-ask-footer{font-size:11px}
 .quick-ask-footer button{font-size:12px}
+.screenshot-actions{z-index:31}.screenshot-action-label{padding:0 4px;color:var(--accent);font-size:10px;font-weight:800;letter-spacing:.04em;text-transform:uppercase}
