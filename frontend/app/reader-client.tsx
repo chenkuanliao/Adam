@@ -148,6 +148,7 @@ export default function Home() {
   const activePaperIdRef = useRef<string | null>(null);
   const paperLoadRef = useRef(0);
   const conversationLoadRef = useRef(0);
+  const annotationLoadRef = useRef(0);
   const quickAskRequestRef = useRef(0);
   const zoomRef = useRef(DEFAULT_ZOOM);
   const notesVisibleRef = useRef(false);
@@ -624,6 +625,8 @@ export default function Home() {
     if (!window.confirm(`Delete “${conversation.title}”?`)) return;
     const response = await fetch(`${API_BASE}/api/conversations/${conversation.id}`, { method: 'DELETE' });
     if (!response.ok) { setError('Could not delete this chat.'); return; }
+    setSelectedAiNote(null);
+    await loadAnnotations(conversation.document_id);
     const remaining = conversations.filter((item) => item.id !== conversation.id);
     setConversations(remaining);
     if (activeConversation?.id === conversation.id) {
@@ -677,18 +680,19 @@ export default function Home() {
   }, [papers]);
 
   async function loadAnnotations(documentId: string) {
+    const loadId = ++annotationLoadRef.current;
     try {
       const response = await fetch(`${API_BASE}/api/documents/${documentId}/annotations`);
       if (!response.ok) throw new Error('Could not load saved highlights.');
       const annotations = await response.json() as Array<{ id: string; page: number; text: string; color: string; rects: HighlightRect[]; note_text?: string | null; ai_links?: AiNoteLink[] }>;
-      if (activePaperIdRef.current !== documentId) return;
+      if (activePaperIdRef.current !== documentId || annotationLoadRef.current !== loadId) return;
       const entries = annotations.map((item) => ({ ...item, range: null }));
       highlightEntriesRef.current = entries;
       highlightUndoRef.current = [];
       highlightRedoRef.current = [];
       paintHighlights(entries);
     } catch (reason) {
-      if (activePaperIdRef.current === documentId) setError(reason instanceof Error ? reason.message : 'Could not load saved highlights.');
+      if (activePaperIdRef.current === documentId && annotationLoadRef.current === loadId) setError(reason instanceof Error ? reason.message : 'Could not load saved highlights.');
     }
   }
 
