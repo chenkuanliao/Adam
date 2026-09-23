@@ -95,12 +95,27 @@ class ContextAnchorIn(BaseModel):
     rects: list[HighlightRect] = Field(min_length=1, max_length=500)
 
 
+class WebSourceIn(BaseModel):
+    title: str = Field(max_length=200)
+    url: str = Field(max_length=2000, pattern=r"^https?://")
+    snippet: str = Field(max_length=7500)
+    retrieved_at: str = Field(max_length=64)
+
+
+class WebInfoIn(BaseModel):
+    searched: bool = False
+    query: str | None = Field(default=None, max_length=180)
+    reused: bool = False
+    sources: list[WebSourceIn] = Field(default_factory=list, max_length=6)
+
+
 class ChatTurnIn(BaseModel):
     question: str = Field(min_length=1, max_length=8000)
     answer: str = Field(min_length=1, max_length=30000)
     selected_text: str = Field(default="", max_length=30000)
     page: int | None = Field(default=None, ge=1)
     images: list[ContextImageIn] = Field(default_factory=list, max_length=6)
+    web: WebInfoIn | None = None
 
 
 class ChatRequest(BaseModel):

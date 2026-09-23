@@ -618,14 +618,51 @@ async def quick_ask_stream(conversation_id: str, request: QuickAskRequest, db: S
     api_key = settings.provider_api_key(conversation.provider)
     if not api_key:
         raise HTTPException(503, f"No API key is configured for {conversation.provider}. Open Settings to enable Quick Ask.")
-    provider = make_provider(conversation.provider, api_key, conversation.model_id, settings.quick_ask_prompt)
+    paper_title = Path(db.get(Document, conversation.document_id).original_name).stem
 
     async def events() -> AsyncIterator[str]:
         try:
             yield sse({"type": "started", "provider": conversation.provider, "model": conversation.model_id})
+            prior_sources = []
+            seen_urls = set()
+            for turn in reversed(request.history):
+                for source in turn.web.sources if turn.web else []:
+                    if source.url not in seen_urls:
+                        prior_sources.append(source.model_dump())
+                        seen_urls.add(source.url)
+                    if len(prior_sources) >= 4:
+                        break
+                if len(prior_sources) >= 4:
+                    break
+            fresh_sources = []
+            search_query = None
+            search_performed = False
+            if request.allow_web_search:
+                yield sse({"type": "searching"})
+                try:
+                    planner = make_provider(conversation.provider, api_key, conversation.model_id, "")
+                    search_selection = request.selected_text or (request.history[0].selected_text if request.history else "")
+                    search_query = await plan_search(planner, request.question, search_selection, paper_title)
+                except Exception:
+                    search_query = f'"{paper_title}" {request.question}'[:180]
+                try:
+                    if asks_for_citing_papers(request.question):
+                        try:
+                            fresh_sources = await search_citing_papers(paper_title)
+                        except (httpx.HTTPError, ValueError, KeyError):
+                            fresh_sources = []
+                    if not fresh_sources:
+                        fresh_sources = await search_web(settings.search_base_url, search_query)
+                    search_performed = True
+                except Exception:
+                    yield sse({"type": "search_error", "message": "Web search is unavailable; answering with the selection and earlier sources."})
+            sources = (fresh_sources + [item for item in prior_sources if item["url"] not in {source["url"] for source in fresh_sources}])[:6]
+            web = {"searched": search_performed, "query": search_query if search_performed else None, "reused": bool(prior_sources), "sources": sources}
+            yield sse({"type": "web_sources", "web": web})
+            provider = make_provider(conversation.provider, api_key, conversation.model_id, settings.quick_ask_prompt + web_context(sources))
             async for delta in provider.stream_answer(request.question, request.selected_text, request.images, request.page, request.history):
                 yield sse({"type": "delta", "text": delta})
-            yield sse({"type": "completed"})
+            yield sse({"type": "completed", "web": web})
         except Exception as exc:
             yield sse({"type": "error", "message": str(exc)})
 
@@ -643,7 +680,7 @@ def import_quick_ask(conversation_id: str, request: QuickAskImportRequest, db: S
     for index, turn in enumerate(request.turns):
         context = json.dumps({"scope": "quick_ask_saved" if index == 0 else "quick_ask_followup", "page": request.page, "selected_text": request.selected_text if index == 0 else "", "images": [image.model_dump() for image in request.images] if index == 0 else [], "anchors": [anchor.model_dump() for anchor in request.anchors] if index == 0 else [], "label": "Saved Quick Ask · selection only" if index == 0 else "Quick Ask follow-up"})
         db.add(Message(document_id=conversation.document_id, conversation_id=conversation.id, role="user", content=turn.question, context_json=context))
-        db.add(Message(document_id=conversation.document_id, conversation_id=conversation.id, role="assistant", content=turn.answer, context_json=None))
+        db.add(Message(document_id=conversation.document_id, conversation_id=conversation.id, role="assistant", content=turn.answer, context_json=json.dumps({"web": turn.web.model_dump()}) if turn.web else None))
     conversation.updated_at = datetime.now(timezone.utc)
     db.commit()
     db.refresh(conversation)

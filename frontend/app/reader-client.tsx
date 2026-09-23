@@ -31,7 +31,7 @@ type WebSource = { title: string; url: string; snippet: string; retrieved_at: st
 type WebInfo = { searched: boolean; query: string | null; reused: boolean; sources: WebSource[] };
 type ChatTurn = { id: string; question: string; answer: string; context: ContextSelection[]; importedQuickAsk?: boolean; web?: WebInfo | null };
 type PendingAnswer = { question: string; context: ContextSelection[]; answer: string; status: StreamStatus; error: string; web: WebInfo | null; searchNotice: string };
-type QuickTurn = { question: string; answer: string };
+type QuickTurn = { question: string; answer: string; web?: WebInfo | null };
 type Conversation = { id: string; document_id: string; title: string; provider: string; model_id: string; context_builder_version: string; updated_at: string; message_count: number };
 type SavedMessage = { id: string; role: string; content: string; context_json: string | null };
 type ProviderId = 'zen' | 'openrouter' | 'openai' | 'anthropic' | 'google';
@@ -82,6 +82,9 @@ export default function Home() {
   const [quickQuestion, setQuickQuestion] = useState('');
   const [quickActiveQuestion, setQuickActiveQuestion] = useState('');
   const [quickAnswer, setQuickAnswer] = useState('');
+  const [quickAnswerWeb, setQuickAnswerWeb] = useState<WebInfo | null>(null);
+  const [quickSearchEnabled, setQuickSearchEnabled] = useState(false);
+  const [quickSearchNotice, setQuickSearchNotice] = useState('');
   const [quickTurns, setQuickTurns] = useState<QuickTurn[]>([]);
   const [quickAsking, setQuickAsking] = useState(false);
   const [quickImporting, setQuickImporting] = useState(false);
@@ -769,7 +772,7 @@ export default function Home() {
     const { id, text, page, range } = pendingSelection;
     const pageElement = (range.startContainer.nodeType === Node.ELEMENT_NODE ? range.startContainer as Element : range.startContainer.parentElement)?.closest<HTMLElement>('.react-pdf__Page');
     setQuickAskTarget({ id, text, page, rects: pageElement ? getHighlightRects(range, pageElement) : undefined, ...placeQuickAskBeside(range.getBoundingClientRect()) });
-    setQuickQuestion(''); setQuickActiveQuestion(''); setQuickAnswer(''); setQuickTurns([]); setQuickError('');
+    setQuickQuestion(''); setQuickActiveQuestion(''); setQuickAnswer(''); setQuickAnswerWeb(null); setQuickSearchEnabled(false); setQuickSearchNotice(''); setQuickTurns([]); setQuickError('');
     clearBrowserSelection();
     window.requestAnimationFrame(() => quickAskInputRef.current?.focus());
   }
@@ -787,14 +790,14 @@ export default function Home() {
     if (!screenshotSelection) return;
     const { id, text, page, pageEnd, imageDataUrl, rects, left, right, top, bottom } = screenshotSelection;
     setQuickAskTarget({ id, text, page, pageEnd, imageDataUrl, rects, ...placeQuickAskBeside({ left, right, top, bottom }) });
-    setQuickQuestion(''); setQuickActiveQuestion(''); setQuickAnswer(''); setQuickTurns([]); setQuickError('');
+    setQuickQuestion(''); setQuickActiveQuestion(''); setQuickAnswer(''); setQuickAnswerWeb(null); setQuickSearchEnabled(false); setQuickSearchNotice(''); setQuickTurns([]); setQuickError('');
     setScreenshotSelection(null);
     window.requestAnimationFrame(() => quickAskInputRef.current?.focus());
   }
 
   function closeQuickAsk() {
     if (quickAsking) return;
-    setQuickAskTarget(null); setQuickQuestion(''); setQuickActiveQuestion(''); setQuickAnswer(''); setQuickTurns([]); setQuickError('');
+    setQuickAskTarget(null); setQuickQuestion(''); setQuickActiveQuestion(''); setQuickAnswer(''); setQuickAnswerWeb(null); setQuickSearchEnabled(false); setQuickSearchNotice(''); setQuickTurns([]); setQuickError('');
   }
 
   useEffect(() => {
@@ -807,21 +810,22 @@ export default function Home() {
     const originPaperId = activePaperIdRef.current;
     const requestId = ++quickAskRequestRef.current;
     const isVisible = () => quickAskRequestRef.current === requestId && activePaperIdRef.current === originPaperId;
-    const priorTurns = quickAnswer ? [...quickTurns, { question: quickActiveQuestion, answer: quickAnswer }] : quickTurns;
+    const priorTurns = quickAnswer ? [...quickTurns, { question: quickActiveQuestion, answer: quickAnswer, web: quickAnswerWeb }] : quickTurns;
     const sentQuestion = quickQuestion.trim();
+    const allowWebSearch = quickSearchEnabled;
     if (quickAnswer) setQuickTurns(priorTurns);
     quickFollowRef.current = true;
-    setQuickAsking(true); setQuickActiveQuestion(sentQuestion); setQuickQuestion(''); setQuickAnswer(''); setQuickError('');
+    setQuickAsking(true); setQuickActiveQuestion(sentQuestion); setQuickQuestion(''); setQuickAnswer(''); setQuickAnswerWeb(null); setQuickSearchEnabled(false); setQuickSearchNotice(''); setQuickError('');
     try {
       const selectionText = quickAskTarget.imageDataUrl ? '' : quickAskTarget.text;
       const selectionImages = quickAskTarget.imageDataUrl ? [{ data_url: quickAskTarget.imageDataUrl, page: quickAskTarget.page }] : [];
-      const response = await fetch(`${API_BASE}/api/conversations/${activeConversation.id}/quick-ask/stream`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ question: sentQuestion, selected_text: priorTurns.length ? '' : selectionText, images: priorTurns.length ? [] : selectionImages, page: quickAskTarget.page, history: priorTurns.map((turn, index) => ({ ...turn, selected_text: index === 0 ? selectionText : '', images: index === 0 ? selectionImages : [], page: quickAskTarget.page })) }) });
+      const response = await fetch(`${API_BASE}/api/conversations/${activeConversation.id}/quick-ask/stream`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ question: sentQuestion, allow_web_search: allowWebSearch, selected_text: priorTurns.length ? '' : selectionText, images: priorTurns.length ? [] : selectionImages, page: quickAskTarget.page, history: priorTurns.map((turn, index) => ({ ...turn, selected_text: index === 0 ? selectionText : '', images: index === 0 ? selectionImages : [], page: quickAskTarget.page })) }) });
       if (!response.ok || !response.body) { const payload = await response.json().catch(() => ({})); throw new Error(payload.detail ?? 'Quick Ask failed.'); }
       const reader = response.body.getReader(); const decoder = new TextDecoder(); let buffer = '';
       while (true) {
         const { value, done } = await reader.read(); if (done) break;
         buffer += decoder.decode(value, { stream: true }); const events = buffer.split('\n\n'); buffer = events.pop() ?? '';
-        for (const block of events) { const line = block.split('\n').find((item) => item.startsWith('data: ')); if (!line) continue; const data = JSON.parse(line.slice(6)); if (data.type === 'delta' && isVisible()) setQuickAnswer((current) => current + data.text); if (data.type === 'error') throw new Error(data.message); }
+        for (const block of events) { const line = block.split('\n').find((item) => item.startsWith('data: ')); if (!line) continue; const data = JSON.parse(line.slice(6)); if (!isVisible()) continue; if (data.type === 'searching') setQuickSearchNotice('Planning web search…'); if (data.type === 'search_error') setQuickSearchNotice(data.message); if (data.type === 'web_sources') { setQuickAnswerWeb(data.web as WebInfo); setQuickSearchNotice((current) => current.startsWith('Web search is unavailable') ? current : ''); } if (data.type === 'delta') setQuickAnswer((current) => current + data.text); if (data.type === 'completed') setQuickAnswerWeb(data.web as WebInfo); if (data.type === 'error') throw new Error(data.message); }
       }
     } catch (reason) { if (isVisible()) setQuickError(reason instanceof Error ? reason.message : 'Quick Ask failed.'); }
     finally { if (isVisible()) setQuickAsking(false); }
@@ -831,7 +835,7 @@ export default function Home() {
     const thread = quickThreadRef.current;
     if (!thread || !quickFollowRef.current) return;
     thread.scrollTop = thread.scrollHeight;
-  }, [quickAnswer, quickTurns, quickAsking]);
+  }, [quickAnswer, quickAnswerWeb, quickTurns, quickAsking, quickSearchNotice]);
 
   function beginQuickDrag(event: React.PointerEvent<HTMLDivElement>) {
     if (!quickAskTarget || (event.target as HTMLElement).closest('button')) return;
@@ -850,14 +854,14 @@ export default function Home() {
 
   async function importQuickAsk() {
     if (!quickAskTarget || !activeConversation || quickAsking || quickImporting) return;
-    const turns = quickAnswer ? [...quickTurns, { question: quickActiveQuestion, answer: quickAnswer }] : quickTurns;
+    const turns = quickAnswer ? [...quickTurns, { question: quickActiveQuestion, answer: quickAnswer, web: quickAnswerWeb }] : quickTurns;
     if (!turns.length) return;
     setQuickImporting(true); setQuickError('');
     try {
       const response = await fetch(`${API_BASE}/api/conversations/${activeConversation.id}/quick-ask/import`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ selected_text: quickAskTarget.imageDataUrl ? '' : quickAskTarget.text, images: quickAskTarget.imageDataUrl ? [{ data_url: quickAskTarget.imageDataUrl, page: quickAskTarget.page }] : [], anchors: quickAskTarget.page && quickAskTarget.rects?.length ? [{ text: quickAskTarget.text, page: quickAskTarget.page, rects: quickAskTarget.rects }] : [], page: quickAskTarget.page, turns: turns.map((turn) => ({ ...turn, selected_text: '', images: [], page: quickAskTarget.page })) }) });
       const updated = await response.json() as Conversation; if (!response.ok) throw new Error((updated as unknown as { detail?: string }).detail ?? 'Could not move Quick Ask to chat.');
       setActiveConversation(updated); setConversations((current) => [updated, ...current]);
-      await openConversation(updated); setQuickAskTarget(null); setQuickQuestion(''); setQuickActiveQuestion(''); setQuickAnswer(''); setQuickTurns([]);
+      await openConversation(updated); setQuickAskTarget(null); setQuickQuestion(''); setQuickActiveQuestion(''); setQuickAnswer(''); setQuickAnswerWeb(null); setQuickSearchEnabled(false); setQuickSearchNotice(''); setQuickTurns([]);
     } catch (reason) { setQuickError(reason instanceof Error ? reason.message : 'Could not move Quick Ask to chat.'); }
     finally { setQuickImporting(false); }
   }
@@ -1428,7 +1432,18 @@ export default function Home() {
       {screenshotSelection && <div className="selection-toolbar screenshot-actions" style={{ left: screenshotSelection.x, top: screenshotSelection.y }} role="toolbar" aria-label="Screenshot actions"><span className="screenshot-action-label">▧ Screenshot</span><span className="toolbar-divider" /><button type="button" className="toolbar-action primary" aria-keyshortcuts="C" onClick={addScreenshotToContext}><span>＋</span>Add to context <kbd>C</kbd></button><button type="button" className="toolbar-action" aria-keyshortcuts="A" onClick={openQuickAskFromScreenshot}><span>✦</span>Ask AI <kbd>A</kbd></button></div>}
       {noteEditor && <form className="note-editor" style={{ left: noteEditor.x, top: noteEditor.y, '--note-color': noteEditor.entry.color } as CSSProperties} onSubmit={saveNote}><header onPointerDown={beginNoteDrag} onPointerMove={moveNoteDrag} onPointerUp={endNoteDrag} onPointerCancel={endNoteDrag}><span>⠿ &nbsp;▰ Note</span><button type="button" aria-label="Close note" onClick={() => setNoteEditor(null)}>×</button></header><blockquote>{noteEditor.entry.text}</blockquote><div className="note-colors" aria-label="Note color">{NOTE_COLORS.map(({ color, label }) => <button type="button" className={noteEditor.entry.color === color ? 'selected' : ''} style={{ backgroundColor: color, color }} aria-label={`${label} note`} title={label} onClick={() => setNoteEditor((current) => current && ({ ...current, entry: { ...current.entry, color } }))} key={color} />)}</div><textarea autoFocus value={noteEditor.text} onChange={(event) => setNoteEditor((current) => current && ({ ...current, text: event.target.value }))} placeholder="Write a note about this passage…" rows={7} /><footer><button type="button" className="delete-note" onClick={() => void deleteNote()} disabled={noteSaving}>{highlightEntries.some((item) => item.id === noteEditor.entry.id) ? 'Delete note' : 'Discard'}</button><button type="submit" disabled={!noteEditor.text.trim() || noteSaving}>{noteSaving ? 'Saving…' : 'Save note'}</button></footer></form>}
       {selectedAiNote && <div className="ai-note-backdrop" onMouseDown={() => setSelectedAiNote(null)}><section className="ai-note-dialog" onMouseDown={(event) => event.stopPropagation()}><header><span>✦ Linked AI notes</span><button type="button" onClick={() => setSelectedAiNote(null)}>×</button></header><blockquote>{selectedAiNote.text}</blockquote><div>{selectedAiNote.ai_links?.map((link, index) => <button type="button" className="ai-note-link" onClick={() => void openAiConversation(link)} key={`${link.conversation_id}-${index}`}><small>{link.title}</small><strong>{link.question}</strong><span>Open chat →</span></button>)}</div></section></div>}
-      {quickAskTarget && <form className="quick-ask-popover" style={{ left: quickAskTarget.x, top: quickAskTarget.y }} onSubmit={submitQuickAsk}><div className="quick-ask-head" onPointerDown={beginQuickDrag} onPointerMove={moveQuickDrag} onPointerUp={endQuickDrag} onPointerCancel={endQuickDrag}><span>⠿</span><span>✦ Quick Ask</span><small>{activeConversation?.model_id}</small><button type="button" aria-label="Close Quick Ask" onClick={closeQuickAsk}>×</button></div><div className={`quick-ask-context${quickAskTarget.imageDataUrl ? ' image' : ''}`}>{quickAskTarget.imageDataUrl ? <img src={quickAskTarget.imageDataUrl} alt="Selected PDF area" /> : <blockquote>{quickAskTarget.text}</blockquote>}</div><div className="quick-thread" ref={quickThreadRef} onWheelCapture={(event) => { if (event.deltaY < 0) quickFollowRef.current = false; }} onTouchMove={() => { quickFollowRef.current = false; }} onScroll={(event) => { const element = event.currentTarget; quickFollowRef.current = element.scrollHeight - element.scrollTop - element.clientHeight < 24; }}>{quickTurns.map((turn, index) => <div className="quick-turn" key={index}><div className="quick-user">{turn.question}</div><MarkdownAnswer>{turn.answer}</MarkdownAnswer></div>)}{(quickActiveQuestion && (quickAnswer || quickAsking)) && <div className="quick-turn"><div className="quick-user">{quickActiveQuestion}</div>{quickAnswer ? <MarkdownAnswer streaming={quickAsking}>{quickAnswer}</MarkdownAnswer> : <div className="answer-skeleton"><i /><i /><i /></div>}</div>}</div><div className="quick-ask-entry"><input ref={quickAskInputRef} value={quickQuestion} onChange={(event) => setQuickQuestion(event.target.value)} placeholder={quickTurns.length || quickAnswer ? 'Ask a follow-up…' : 'What would you like clarified?'} disabled={quickAsking} /><button type="submit" disabled={!quickQuestion.trim() || quickAsking}>{quickAsking ? '…' : '↑'}</button></div>{quickError && <p className="quick-ask-error">{quickError}</p>}<div className="quick-ask-footer"><span>Save this thread before linking it to the PDF</span><div><button type="button" className="move-to-chat" onClick={() => void importQuickAsk()} disabled={quickAsking || quickImporting || (!quickTurns.length && !quickAnswer)}>{quickImporting ? 'Saving…' : 'Save as new chat →'}</button></div></div></form>}
+      {quickAskTarget && <form className="quick-ask-popover" style={{ left: quickAskTarget.x, top: quickAskTarget.y }} onSubmit={submitQuickAsk}>
+        <div className="quick-ask-head" onPointerDown={beginQuickDrag} onPointerMove={moveQuickDrag} onPointerUp={endQuickDrag} onPointerCancel={endQuickDrag}><span>⠿</span><span>✦ Quick Ask</span><small>{activeConversation?.model_id}</small><button type="button" aria-label="Close Quick Ask" onClick={closeQuickAsk}>×</button></div>
+        <div className={`quick-ask-context${quickAskTarget.imageDataUrl ? ' image' : ''}`}>{quickAskTarget.imageDataUrl ? <img src={quickAskTarget.imageDataUrl} alt="Selected PDF area" /> : <blockquote>{quickAskTarget.text}</blockquote>}</div>
+        <div className="quick-thread" ref={quickThreadRef} onWheelCapture={(event) => { if (event.deltaY < 0) quickFollowRef.current = false; }} onTouchMove={() => { quickFollowRef.current = false; }} onScroll={(event) => { const element = event.currentTarget; quickFollowRef.current = element.scrollHeight - element.scrollTop - element.clientHeight < 24; }}>
+          {quickTurns.map((turn, index) => <div className="quick-turn" key={index}><div className="quick-user">{turn.question}</div><MarkdownAnswer web={turn.web}>{turn.answer}</MarkdownAnswer><WebEvidence web={turn.web} /></div>)}
+          {(quickActiveQuestion && (quickAnswer || quickAsking)) && <div className="quick-turn"><div className="quick-user">{quickActiveQuestion}</div>{quickSearchNotice && <p className="search-notice">{quickSearchNotice}</p>}{quickAnswer ? <MarkdownAnswer streaming={quickAsking} web={quickAnswerWeb}>{quickAnswer}</MarkdownAnswer> : <div className="answer-skeleton"><i /><i /><i /></div>}<WebEvidence web={quickAnswerWeb} /></div>}
+        </div>
+        <div className="quick-ask-entry"><input ref={quickAskInputRef} value={quickQuestion} onChange={(event) => setQuickQuestion(event.target.value)} placeholder={quickTurns.length || quickAnswer ? 'Ask a follow-up…' : 'What would you like clarified?'} disabled={quickAsking} /><button type="submit" disabled={!quickQuestion.trim() || quickAsking}>{quickAsking ? '…' : '↑'}</button></div>
+        <div className="quick-ask-search-row"><button type="button" className={`composer-search-toggle${quickSearchEnabled ? ' active' : ''}`} aria-pressed={quickSearchEnabled} onClick={() => setQuickSearchEnabled((enabled) => !enabled)} title="Allow a web search for this question">⌕ Search web</button></div>
+        {quickError && <p className="quick-ask-error">{quickError}</p>}
+        <div className="quick-ask-footer"><span>Save this thread before linking it to the PDF</span><div><button type="button" className="move-to-chat" onClick={() => void importQuickAsk()} disabled={quickAsking || quickImporting || (!quickTurns.length && !quickAnswer)}>{quickImporting ? 'Saving…' : 'Save as new chat →'}</button></div></div>
+      </form>}
       {settingsOpen && <SettingsDialog onClose={closeSettings} />}
       {paperSearchOpen && <PaperSpotlight papers={papers} onClose={() => setPaperSearchOpen(false)} onOpen={(paper) => { setPaperSearchOpen(false); openPaper(paper); }} />}
     </main>
@@ -1763,7 +1778,7 @@ function SettingsDialog({ onClose }: { onClose: () => void }) {
           {!settings?.providers[titleProvider] && <p className="title-key-notice">Add an API key for {PROVIDERS.find((item) => item.id === titleProvider)?.name} in its Providers settings to use it for titles.</p>}
           <div className="selected-model-summary"><span>Current title model</span><strong>{settings?.title_model ?? 'gpt-6-luna'}</strong><small>{PROVIDERS.find((item) => item.id === settings?.title_provider)?.name ?? 'OpenCode Zen'}</small></div>
           <div className="model-picker"><div className="model-picker-head"><label htmlFor="title-model-search">Browse title models</label><div className="title-model-tools"><input id="title-model-search" type="search" value={titleQuery} onChange={(event) => setTitleQuery(event.target.value)} placeholder="Search models…" /><button type="button" className="secondary-button" disabled={!settings?.providers[titleProvider] || loadingTitleModels} onClick={() => void loadTitleModels(titleProvider)}>{loadingTitleModels ? 'Loading…' : 'Refresh models'}</button></div></div>{titleModels.length ? <div className="model-list">{titleModels.filter((id) => id.toLowerCase().includes(titleQuery.toLowerCase())).map((id) => <button type="button" className={titleModel === id ? 'selected' : ''} onClick={() => { setTitleModel(id); setStatus(''); }} key={id}><span>{id}{settings?.title_provider === titleProvider && settings.title_model === id && <small className="active-model-label">Active</small>}</span></button>)}</div> : <div className="model-empty">{loadingTitleModels ? 'Loading models…' : settings?.providers[titleProvider] ? 'Refresh to load models from this provider.' : 'Connect an API key to browse models.'}</div>}</div>
-        </div> : <div className="system-prompt-page"><span className="settings-kicker">Assistant behavior</span><h3>System prompts</h3><div className="prompt-kind-tabs"><button type="button" className={promptKind === 'chat' ? 'active' : ''} onClick={() => setPromptKind('chat')}>Chat</button><button type="button" className={promptKind === 'quick' ? 'active' : ''} onClick={() => setPromptKind('quick')}>Quick Ask</button></div><p>{promptKind === 'chat' ? 'Sent with every full chat. Controls how Adam reads paper context and writes answers.' : 'Sent only for inline questions. Quick Ask receives the selected excerpt or screenshot and nothing else.'}</p><label htmlFor="system-prompt-editor">{promptKind === 'chat' ? 'Chat prompt' : 'Quick Ask prompt'}</label><textarea id="system-prompt-editor" value={promptKind === 'chat' ? systemPrompt : quickAskPrompt} onChange={(event) => promptKind === 'chat' ? setSystemPrompt(event.target.value) : setQuickAskPrompt(event.target.value)} spellCheck rows={16} /></div>}
+        </div> : <div className="system-prompt-page"><span className="settings-kicker">Assistant behavior</span><h3>System prompts</h3><div className="prompt-kind-tabs"><button type="button" className={promptKind === 'chat' ? 'active' : ''} onClick={() => setPromptKind('chat')}>Chat</button><button type="button" className={promptKind === 'quick' ? 'active' : ''} onClick={() => setPromptKind('quick')}>Quick Ask</button></div><p>{promptKind === 'chat' ? 'Sent with every full chat. Controls how Adam reads paper context and writes answers.' : 'Sent only for inline questions. Quick Ask receives the selected excerpt or screenshot, plus web references when search is enabled or earlier sources are available.'}</p><label htmlFor="system-prompt-editor">{promptKind === 'chat' ? 'Chat prompt' : 'Quick Ask prompt'}</label><textarea id="system-prompt-editor" value={promptKind === 'chat' ? systemPrompt : quickAskPrompt} onChange={(event) => promptKind === 'chat' ? setSystemPrompt(event.target.value) : setQuickAskPrompt(event.target.value)} spellCheck rows={16} /></div>}
       </div>
       <div className="settings-footer"><span role="status" className={status.includes('active') || status.includes('saved') ? 'save-success' : ''}>{status}</span><div><kbd>Esc</kbd><button type="button" className="secondary-button" onClick={onClose}>Close</button>{settingsTab === 'providers' ? <button type="button" className="primary-button" disabled={!settings || !hasPendingModel || saving || !settings.providers[provider]} onClick={() => void persist()}>{saving ? 'Applying…' : 'Apply model'}</button> : settingsTab === 'titles' ? <button type="button" className="primary-button" disabled={!settings || !titleModel.trim() || !settings.providers[titleProvider] || (titleProvider === settings.title_provider && titleModel === settings.title_model) || saving} onClick={() => void saveTitleModel()}>{saving ? 'Saving…' : 'Save title model'}</button> : <button type="button" className="primary-button" disabled={!settings || !systemPrompt.trim() || !quickAskPrompt.trim() || (systemPrompt.trim() === settings.system_prompt && quickAskPrompt.trim() === settings.quick_ask_prompt) || saving} onClick={() => void saveSystemPrompt()}>{saving ? 'Saving…' : 'Save prompt'}</button>}</div></div>
     </div>

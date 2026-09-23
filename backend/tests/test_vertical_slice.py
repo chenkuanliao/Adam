@@ -268,6 +268,62 @@ def test_web_search_is_opt_in_saved_and_reused_only_in_its_chat(monkeypatch) -> 
     assert "# Web reference" not in prompts[-1]
 
 
+def test_quick_ask_search_sources_survive_followup_and_import(monkeypatch) -> None:
+    paper = client.post("/api/documents", files={"file": ("quick-search.pdf", BytesIO(sample_pdf()), "application/pdf")}).json()
+    client.put("/api/settings", json={"provider": "google", "model": "gemini-test", "api_keys": {}})
+    conversation = client.post(f"/api/documents/{paper['id']}/conversations", json={}).json()
+    monkeypatch.setattr(type(main_module.settings), "provider_api_key", lambda _self, _provider: "test-key")
+    prompts = []
+    searches = []
+    source = {"title": "Related work", "url": "https://example.org/related", "snippet": "External evidence.", "retrieved_at": "2026-09-23T00:00:00+00:00"}
+
+    async def fake_stream(self, question, selected_text, images, page, history):
+        prompts.append(self.system_prompt)
+        yield "Answer [W1]." if "# Web reference" in self.system_prompt else "Selection answer."
+
+    async def fake_plan(_provider, _question, _selection, _paper_title):
+        return "related work"
+
+    async def fake_search(_base_url, query):
+        searches.append(query)
+        return [source]
+
+    monkeypatch.setattr(main_module.GoogleProvider, "stream_answer", fake_stream)
+    monkeypatch.setattr(main_module, "plan_search", fake_plan)
+    monkeypatch.setattr(main_module, "search_web", fake_search)
+
+    url = f"/api/conversations/{conversation['id']}/quick-ask/stream"
+    first = client.post(url, json={"question": "Explain this", "selected_text": "Selected excerpt"})
+    assert first.status_code == 200
+    assert not searches
+    assert "# Web reference" not in prompts[-1]
+
+    searched = client.post(url, json={"question": "Find related work", "selected_text": "Selected excerpt", "allow_web_search": True})
+    assert searched.status_code == 200
+    assert searches == ["related work"]
+    events = [json.loads(line[6:]) for line in searched.text.splitlines() if line.startswith("data: ")]
+    web = next(event["web"] for event in events if event["type"] == "completed")
+    assert web["searched"] is True
+    assert web["sources"] == [source]
+
+    turns = [{"question": "Find related work", "answer": "Answer [W1].", "selected_text": "Selected excerpt", "web": web}]
+    followup = client.post(url, json={"question": "Explain its connection", "history": turns})
+    assert followup.status_code == 200
+    assert searches == ["related work"]
+    assert source["url"] in prompts[-1]
+    followup_events = [json.loads(line[6:]) for line in followup.text.splitlines() if line.startswith("data: ")]
+    reused = next(event["web"] for event in followup_events if event["type"] == "completed")
+    assert reused["reused"] is True
+    assert reused["searched"] is False
+
+    imported = client.post(f"/api/conversations/{conversation['id']}/quick-ask/import", json={
+        "selected_text": "Selected excerpt", "turns": turns,
+    })
+    assert imported.status_code == 201
+    saved_messages = client.get(f"/api/conversations/{imported.json()['id']}").json()["messages"]
+    assert json.loads(saved_messages[-1]["context_json"])["web"]["sources"] == [source]
+
+
 def test_search_planner_uses_paper_title_even_if_model_says_skip() -> None:
     class FakeProvider:
         def __init__(self, api_key="key", model="test", base_url="https://example.org", system_prompt=""):
