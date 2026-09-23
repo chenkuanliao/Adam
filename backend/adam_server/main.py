@@ -14,10 +14,10 @@ import httpx
 from .config import Settings, get_settings
 from .database import SessionLocal, get_db, run_migrations
 from .models import Annotation, Conversation, Document, Message, ModelFavorite, Page, PaperNote
-from .schemas import AiNoteCreate, AiNoteUnlink, AnnotationIn, AnnotationOut, AnnotationUpdate, AppSettingsOut, AppSettingsUpdate, ChatRequest, ConversationCreate, ConversationDetail, ConversationOut, ConversationUpdate, DocumentOut, DocumentUpdate, ModelFavoriteUpdate, PageTextOut, PaperNoteOut, PaperNoteUpdate, ProviderKeyUpdate, ProviderModelsOut, QuickAskImportRequest, QuickAskRequest
+from .schemas import AiNoteCreate, AiNoteUnlink, AnnotationIn, AnnotationOut, AnnotationUpdate, AppSettingsOut, AppSettingsUpdate, ChatRequest, ConversationCreate, ConversationDetail, ConversationOut, ConversationUpdate, DocumentOut, DocumentUpdate, ModelFavoriteUpdate, PageTextOut, PaperNoteOut, PaperNoteUpdate, ProviderKeyUpdate, ProviderModelsOut, QuickAskImportRequest, QuickAskRequest, TitleModelUpdate
 from .services.context import build_paper_context
 from .services.documents import document_file_path, ingest_pdf
-from .services.llm import AnthropicProvider, GoogleProvider, OpenAICompatibleProvider, OpenAIResponsesProvider, generate_zen_title, sse
+from .services.llm import AnthropicProvider, GoogleProvider, OpenAICompatibleProvider, OpenAIResponsesProvider, TITLE_SYSTEM_PROMPT, clean_title, generate_zen_title, sse
 from .services.web_search import asks_for_citing_papers, plan_search, previous_sources, search_citing_papers, search_web, web_context
 
 settings = get_settings()
@@ -44,6 +44,22 @@ def make_provider(provider_name: str, api_key: str, model: str, system_prompt: s
     return OpenAICompatibleProvider(api_key, model, {"openrouter": "https://openrouter.ai/api/v1"}[provider_name], system_prompt)
 
 
+async def generate_configured_title(transcript: str, fallback: str) -> str:
+    provider_name, model = settings.title_provider, settings.title_model
+    api_key = settings.provider_api_key(provider_name)
+    if not api_key:
+        raise ValueError(f"No {provider_name} API key is configured for title generation.")
+    if provider_name == "zen" and model.startswith(("gpt-", "grok-", "muse-")):
+        return await generate_zen_title(api_key, transcript, fallback, model)
+    provider = make_provider(provider_name, api_key, model, TITLE_SYSTEM_PROMPT)
+    parts = []
+    async for part in provider.stream_answer(transcript[:30000], "", [], None, []):
+        parts.append(part)
+        if sum(map(len, parts)) > 1000:
+            break
+    return clean_title("".join(parts), fallback)
+
+
 @app.get("/health")
 def health() -> dict[str, str]:
     return {"status": "ok"}
@@ -59,7 +75,7 @@ def settings_response(app_settings: Settings, db: Session) -> AppSettingsOut:
     favorites: dict[str, list[str]] = {}
     for item in db.scalars(select(ModelFavorite).order_by(ModelFavorite.created_at)).all():
         favorites.setdefault(item.provider, []).append(item.model_id)
-    return AppSettingsOut(provider=active_provider, model=app_settings.resolved_opencode_model, selected_models=selected_models, providers=providers, favorites=favorites, system_prompt=app_settings.system_prompt, quick_ask_prompt=app_settings.quick_ask_prompt)
+    return AppSettingsOut(provider=active_provider, model=app_settings.resolved_opencode_model, title_provider=app_settings.title_provider, title_model=app_settings.title_model, selected_models=selected_models, providers=providers, favorites=favorites, system_prompt=app_settings.system_prompt, quick_ask_prompt=app_settings.quick_ask_prompt)
 
 
 @app.get("/api/settings", response_model=AppSettingsOut)
@@ -76,6 +92,14 @@ def update_app_settings(request: AppSettingsUpdate, app_settings: Settings = Dep
         for model_id in desired - existing.keys(): db.add(ModelFavorite(provider=provider, model_id=model_id))
         for model_id in existing.keys() - desired: db.delete(existing[model_id])
     db.commit()
+    return settings_response(app_settings, db)
+
+
+@app.put("/api/settings/title", response_model=AppSettingsOut)
+def update_title_model(request: TitleModelUpdate, app_settings: Settings = Depends(get_settings), db: Session = Depends(get_db)) -> AppSettingsOut:
+    if not app_settings.provider_api_key(request.provider):
+        raise HTTPException(503, f"Add a {request.provider} API key before selecting it for chat titles.")
+    app_settings.save_title_settings(request.provider, request.model)
     return settings_response(app_settings, db)
 
 
@@ -440,20 +464,17 @@ async def regenerate_conversation_title(conversation_id: str, db: Session = Depe
     conversation = db.get(Conversation, conversation_id)
     if not conversation:
         raise HTTPException(404, "Conversation not found.")
-    if conversation.provider != "zen":
-        raise HTTPException(409, "AI title generation is available for OpenCode Zen chats.")
-    api_key = settings.provider_api_key("zen")
-    if not api_key:
-        raise HTTPException(503, "No OpenCode Zen API key is configured.")
+    if not settings.provider_api_key(settings.title_provider):
+        raise HTTPException(503, f"No {settings.title_provider} API key is configured for chat titles.")
     messages = list(db.scalars(select(Message).where(Message.conversation_id == conversation.id).order_by(Message.created_at)))
     if not messages:
         raise HTTPException(409, "Send a message before generating a title.")
     transcript = "\n\n".join(f"{message.role.title()}: {message.content}" for message in messages)
     fallback = next((message.content for message in messages if message.role == "user"), conversation.title)[:80]
     try:
-        conversation.title = await generate_zen_title(api_key, transcript, fallback)
+        conversation.title = await generate_configured_title(transcript, fallback)
     except (httpx.HTTPError, ValueError, KeyError) as exc:
-        raise HTTPException(502, "OpenCode Zen could not generate a title.") from exc
+        raise HTTPException(502, "The title model could not generate a title.") from exc
     db.commit()
     db.refresh(conversation)
     return conversation
@@ -513,14 +534,14 @@ async def chat_stream(conversation_id: str, request: ChatRequest, db: Session = 
     context = {"scope": scope, "page": request.page, "selected_text": request.selected_text, "images": [image.model_dump() for image in request.images], "anchors": [anchor.model_dump() for anchor in request.anchors], "context_mode": context_mode, "search_requested": request.allow_web_search}
     user_message = Message(document_id=conversation.document_id, conversation_id=conversation.id, role="user", content=request.question, context_json=json.dumps(context))
     db.add(user_message)
-    should_generate_title = conversation.title == "New chat" and provider_name == "zen"
+    should_generate_title = conversation.title == "New chat" and bool(settings.provider_api_key(settings.title_provider))
     if conversation.title == "New chat":
         conversation.title = request.question.strip()[:80]
     db.commit()
 
     if should_generate_title:
         try:
-            conversation.title = await generate_zen_title(api_key, f"User: {request.question.strip()}", conversation.title)
+            conversation.title = await generate_configured_title(f"User: {request.question.strip()}", conversation.title)
             db.commit()
         except (httpx.HTTPError, ValueError, KeyError):
             # A title must never prevent the actual chat request from succeeding.

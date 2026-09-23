@@ -401,7 +401,8 @@ def test_zen_auto_title_manual_rename_and_regeneration(monkeypatch) -> None:
     monkeypatch.setattr(type(main_module.settings), "provider_api_key", lambda _self, _provider: "test-key")
 
     generated_from: list[str] = []
-    async def fake_title(_key, transcript, _fallback):
+    async def fake_title(_key, transcript, _fallback, model):
+        assert model == "gpt-6-luna"
         generated_from.append(transcript)
         return "Attention Mechanisms Explained" if len(generated_from) == 1 else "Attention Follow-up Analysis"
 
@@ -425,3 +426,38 @@ def test_zen_auto_title_manual_rename_and_regeneration(monkeypatch) -> None:
     assert regenerated.json()["title"] == "Attention Follow-up Analysis"
     assert "User: How does attention work?" in generated_from[-1]
     assert "Assistant: A useful answer." in generated_from[-1]
+
+
+def test_title_model_settings_are_independent_of_chat_provider(monkeypatch) -> None:
+    uploaded = client.post("/api/documents", files={"file": ("title-provider.pdf", BytesIO(sample_pdf()), "application/pdf")}).json()
+    client.put("/api/settings", json={"provider": "zen", "model": "gpt-5.6-terra", "api_keys": {}})
+    monkeypatch.setattr(type(main_module.settings), "provider_api_key", lambda _self, _provider: "test-key")
+    saved = client.put("/api/settings/title", json={"provider": "google", "model": "gemini-test"})
+    assert saved.status_code == 200
+    assert saved.json()["title_provider"] == "google"
+    assert saved.json()["title_model"] == "gemini-test"
+    assert saved.json()["provider"] == "zen"
+    assert saved.json()["model"] == "gpt-5.6-terra"
+
+    titles = []
+
+    async def fake_google_stream(self, question, selected_text, images, page, history):
+        titles.append((self.model, question))
+        yield "Attention Research Chat" if len(titles) == 1 else "Updated Attention Chat"
+
+    async def fake_zen_stream(self, question, selected_text, images, page, history):
+        yield "The answer."
+
+    monkeypatch.setattr(main_module.GoogleProvider, "stream_answer", fake_google_stream)
+    monkeypatch.setattr(main_module.OpenAIResponsesProvider, "stream_answer", fake_zen_stream)
+    conversation = client.post(f"/api/documents/{uploaded['id']}/conversations", json={}).json()
+    assert conversation["provider"] == "zen"
+    response = client.post(f"/api/conversations/{conversation['id']}/messages/stream", json={"question": "How does attention work?"})
+    assert response.status_code == 200
+    assert '"title": "Attention Research Chat"' in response.text
+    regenerated = client.post(f"/api/conversations/{conversation['id']}/regenerate-title")
+    assert regenerated.status_code == 200
+    assert regenerated.json()["title"] == "Updated Attention Chat"
+    assert len(titles) == 2
+    assert all(model == "gemini-test" for model, _ in titles)
+    client.put("/api/settings/title", json={"provider": "zen", "model": "gpt-6-luna"})

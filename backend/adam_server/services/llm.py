@@ -6,7 +6,6 @@ import httpx
 
 from ..schemas import ChatTurnIn, ContextImageIn
 
-TITLE_MODEL = "gpt-5.6-luna"
 TITLE_SYSTEM_PROMPT = (
     "Write a short, specific title for this research-paper chat. Return only the title, "
     "with no quotation marks, markdown, or ending punctuation. Use at most 8 words."
@@ -35,10 +34,10 @@ def clean_title(value: str, fallback: str) -> str:
     return (title or fallback.strip() or "New chat")[:200]
 
 
-async def generate_zen_title(api_key: str, transcript: str, fallback: str) -> str:
-    """Generate a title through OpenCode Zen's Responses-compatible Luna model."""
+async def generate_zen_title(api_key: str, transcript: str, fallback: str, model: str = "gpt-6-luna") -> str:
+    """Generate a title through an OpenCode Zen Responses-compatible model."""
     payload = {
-        "model": TITLE_MODEL,
+        "model": model,
         "instructions": TITLE_SYSTEM_PROMPT,
         "input": transcript[:30000],
     }

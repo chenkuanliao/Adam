@@ -82,6 +82,14 @@ class Settings(BaseSettings):
         return runtime.get("selected_models", {}).get(provider, runtime.get("model", self.opencode_model))
 
     @property
+    def title_provider(self) -> str:
+        return self.runtime_settings.get("title_provider", "zen")
+
+    @property
+    def title_model(self) -> str:
+        return self.runtime_settings.get("title_model", "gpt-6-luna")
+
+    @property
     def system_prompt(self) -> str:
         prompt = self.runtime_settings.get("system_prompt")
         if prompt == LEGACY_SYSTEM_PROMPT.strip():
@@ -131,6 +139,15 @@ class Settings(BaseSettings):
             stored_keys[provider] = api_key.strip()
         else:
             stored_keys.pop(provider, None)
+        temporary = self.runtime_settings_path.with_suffix(".tmp")
+        temporary.write_text(json.dumps(values, indent=2) + "\n", encoding="utf-8")
+        os.chmod(temporary, 0o600)
+        temporary.replace(self.runtime_settings_path)
+
+    def save_title_settings(self, provider: str, model: str) -> None:
+        values = self.runtime_settings
+        values["title_provider"] = provider
+        values["title_model"] = model
         temporary = self.runtime_settings_path.with_suffix(".tmp")
         temporary.write_text(json.dumps(values, indent=2) + "\n", encoding="utf-8")
         os.chmod(temporary, 0o600)

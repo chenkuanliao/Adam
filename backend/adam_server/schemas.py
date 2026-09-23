@@ -166,6 +166,8 @@ class ConversationDetail(ConversationOut):
 class AppSettingsOut(BaseModel):
     provider: str
     model: str
+    title_provider: str
+    title_model: str
     selected_models: dict[str, str]
     providers: dict[str, bool]
     favorites: dict[str, list[str]]
@@ -180,6 +182,11 @@ class AppSettingsUpdate(BaseModel):
     favorites: dict[str, list[str]] = Field(default_factory=dict)
     system_prompt: str | None = Field(default=None, min_length=1, max_length=20000)
     quick_ask_prompt: str | None = Field(default=None, min_length=1, max_length=20000)
+
+
+class TitleModelUpdate(BaseModel):
+    provider: str = Field(pattern=r"^(zen|openrouter|openai|anthropic|google)$")
+    model: str = Field(min_length=1, max_length=200, pattern=r"^[A-Za-z0-9._:/-]+$")
 
 
 class ProviderModelsOut(BaseModel):
