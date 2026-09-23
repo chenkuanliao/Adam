@@ -27,8 +27,10 @@ type AiNoteLink = { conversation_id: string; title: string; question: string; cr
 type HighlightEntry = ContextSelection & { color: string; range: Range | null; rects: HighlightRect[]; note_text?: string | null; ai_links?: AiNoteLink[] };
 type NoteEditor = { entry: HighlightEntry; text: string; x: number; y: number };
 type StreamStatus = 'idle' | 'connecting' | 'streaming' | 'complete' | 'error';
-type ChatTurn = { id: string; question: string; answer: string; context: ContextSelection[]; importedQuickAsk?: boolean };
-type PendingAnswer = { question: string; context: ContextSelection[]; answer: string; status: StreamStatus; error: string };
+type WebSource = { title: string; url: string; snippet: string; retrieved_at: string };
+type WebInfo = { searched: boolean; query: string | null; reused: boolean; sources: WebSource[] };
+type ChatTurn = { id: string; question: string; answer: string; context: ContextSelection[]; importedQuickAsk?: boolean; web?: WebInfo | null };
+type PendingAnswer = { question: string; context: ContextSelection[]; answer: string; status: StreamStatus; error: string; web: WebInfo | null; searchNotice: string };
 type QuickTurn = { question: string; answer: string };
 type Conversation = { id: string; document_id: string; title: string; provider: string; model_id: string; context_builder_version: string; updated_at: string; message_count: number };
 type SavedMessage = { id: string; role: string; content: string; context_json: string | null };
@@ -100,6 +102,9 @@ export default function Home() {
   const [activeConversation, setActiveConversation] = useState<Conversation | null>(null);
   const [historyOpen, setHistoryOpen] = useState(false);
   const [streamStatus, setStreamStatus] = useState<StreamStatus>('idle');
+  const [searchEnabled, setSearchEnabled] = useState(false);
+  const [answerWeb, setAnswerWeb] = useState<WebInfo | null>(null);
+  const [searchNotice, setSearchNotice] = useState('');
   const [zoom, setZoom] = useState(DEFAULT_ZOOM);
   const [chatScale, setChatScale] = useState(DEFAULT_CHAT_SCALE);
   const [paperPercent, setPaperPercent] = useState(DEFAULT_PAPER_PERCENT);
@@ -527,6 +532,9 @@ export default function Home() {
     setSubmittedQuestion('');
     setSubmittedContext([]);
     setAnswer('');
+    setAnswerWeb(null);
+    setSearchEnabled(false);
+    setSearchNotice('');
     setAsking(false);
     setQuickAskTarget(null);
     setQuickAsking(false);
@@ -588,7 +596,7 @@ export default function Home() {
       const user = detail.messages[index];
       const assistant = detail.messages[index + 1];
       if (user.role !== 'user' || assistant?.role !== 'assistant') continue;
-      turns.push({ id: user.id, question: user.content, answer: assistant.content, context: contextFromJson(user.context_json), importedQuickAsk: contextScope(user.context_json) === 'quick_ask_saved' });
+      turns.push({ id: user.id, question: user.content, answer: assistant.content, context: contextFromJson(user.context_json), importedQuickAsk: contextScope(user.context_json) === 'quick_ask_saved', web: webFromJson(assistant.context_json) });
       index += 1;
     }
     setChatHistory(turns);
@@ -596,7 +604,7 @@ export default function Home() {
     const alreadySaved = pending?.status === 'complete' && turns.some((turn) => turn.question === pending.question && turn.answer === pending.answer);
     if (alreadySaved) pendingAnswersRef.current.delete(conversation.id);
     const visible = alreadySaved ? null : pending;
-    setSubmittedQuestion(visible?.question ?? ''); setSubmittedContext(visible?.context ?? []); setAnswer(visible?.answer ?? ''); setStreamStatus(visible?.status ?? 'idle'); setAsking(visible?.status === 'connecting' || visible?.status === 'streaming'); setContextSelections([]); setError(visible?.error ?? '');
+    setSubmittedQuestion(visible?.question ?? ''); setSubmittedContext(visible?.context ?? []); setAnswer(visible?.answer ?? ''); setAnswerWeb(visible?.web ?? null); setSearchNotice(visible?.searchNotice ?? ''); setStreamStatus(visible?.status ?? 'idle'); setAsking(visible?.status === 'connecting' || visible?.status === 'streaming'); setContextSelections([]); setError(visible?.error ?? '');
   }
 
   async function createNewConversation() {
@@ -1270,11 +1278,11 @@ export default function Home() {
     if (activePaperIdRef.current !== originPaperId || activeConversationIdRef.current !== originConversationId) return;
     const sentQuestion = question.trim();
     const sentContext = contextSelections.map((selection) => ({ ...selection }));
-    const pending: PendingAnswer = { question: sentQuestion, context: sentContext, answer: '', status: 'connecting', error: '' };
+    const pending: PendingAnswer = { question: sentQuestion, context: sentContext, answer: '', status: 'connecting', error: '', web: null, searchNotice: '' };
     pendingAnswersRef.current.set(originConversationId, pending);
     const isVisible = () => activePaperIdRef.current === originPaperId && activeConversationIdRef.current === originConversationId && pendingAnswersRef.current.get(originConversationId) === pending;
     if (submittedQuestion && answer) {
-      setChatHistory((current) => [...current, { id: crypto.randomUUID(), question: submittedQuestion, answer, context: submittedContext }]);
+      setChatHistory((current) => [...current, { id: crypto.randomUUID(), question: submittedQuestion, answer, context: submittedContext, web: answerWeb }]);
     }
     followOutputRef.current = true;
     setAsking(true);
@@ -1283,12 +1291,16 @@ export default function Home() {
     setSubmittedContext(sentContext);
     setContextSelections([]);
     setAnswer('');
+    setAnswerWeb(null);
+    setSearchNotice('');
+    const allowWebSearch = searchEnabled;
+    setSearchEnabled(false);
     setError('');
     setStreamStatus('connecting');
     try {
       const response = await fetch(`${API_BASE}/api/conversations/${sendingConversation.id}/messages/stream`, {
         method: 'POST', headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ question: sentQuestion, selected_text: formatContext(sentContext), images: formatImages(sentContext), anchors: sentContext.filter((item) => item.page && item.rects?.length).map((item) => ({ text: item.text, page: item.page, rects: item.rects })), page: sentContext.length === 1 ? sentContext[0].page : null }),
+        body: JSON.stringify({ question: sentQuestion, allow_web_search: allowWebSearch, selected_text: formatContext(sentContext), images: formatImages(sentContext), anchors: sentContext.filter((item) => item.page && item.rects?.length).map((item) => ({ text: item.text, page: item.page, rects: item.rects })), page: sentContext.length === 1 ? sentContext[0].page : null }),
       });
       if (!response.ok || !response.body) {
         const payload = await response.json().catch(() => ({}));
@@ -1314,12 +1326,25 @@ export default function Home() {
               setConversations((current) => current.map((item) => item.id === sendingConversation.id ? { ...item, title: data.title } : item));
             }
           }
+          if (data.type === 'searching' && isVisible()) setSearchNotice('Planning web search…');
+          if (data.type === 'search_error') {
+            pending.searchNotice = data.message;
+            if (isVisible()) setSearchNotice(data.message);
+          }
+          if (data.type === 'web_sources') {
+            pending.web = data.web as WebInfo;
+            if (isVisible()) { setAnswerWeb(pending.web); setSearchNotice(pending.searchNotice); }
+          }
           if (data.type === 'delta') {
             pending.answer += data.text;
             pending.status = 'streaming';
             if (isVisible()) { setAnswer(pending.answer); setStreamStatus('streaming'); }
           }
           if (data.type === 'error') throw new Error(data.message);
+          if (data.type === 'completed') {
+            pending.web = data.web as WebInfo;
+            if (isVisible()) { setAnswerWeb(pending.web); if (!pending.searchNotice) setSearchNotice(''); }
+          }
         }
       }
       const savedConversation = await fetch(`${API_BASE}/api/conversations/${sendingConversation.id}`).then((result) => result.ok ? result.json() as Promise<Conversation> : null).catch(() => null);
@@ -1390,12 +1415,12 @@ export default function Home() {
           </section> : <>
             <div className="conversation-header"><div>{activeConversation && renamingChatId === activeConversation.id ? <form className="chat-title-form" onSubmit={(event) => void renameConversation(event, activeConversation)}><input autoFocus value={chatTitleValue} maxLength={200} aria-label="Chat title" onChange={(event) => setChatTitleValue(event.target.value)} onKeyDown={(event) => { if (event.key === 'Escape') setRenamingChatId(null); }} /><button type="submit" disabled={!chatTitleValue.trim() || titleSaving}>Save</button></form> : <button type="button" className="chat-title-button" title="Rename chat" onClick={() => activeConversation && beginChatRename(activeConversation)}><strong>{activeConversation?.title ?? 'Loading chat…'}</strong><span>✎</span></button>}<small>{activeConversation ? `${activeConversation.provider} · ${activeConversation.model_id}` : 'Preparing paper context'}</small></div><div className="conversation-actions">{activeConversation?.provider === 'zen' && activeConversation.message_count > 0 && <button type="button" disabled={titleSaving} onClick={() => void regenerateConversationTitle(activeConversation)} title="Regenerate title with GPT-5.6 Luna"><span>↻</span> Title</button>}<button type="button" onClick={() => void createNewConversation()} title="Start a new chat"><span>＋</span> New</button><button type="button" onClick={() => setHistoryOpen(true)}><span>☰</span> History</button></div></div>
             <div className="chat-body" ref={chatBodyRef} onWheelCapture={(event) => { if (event.deltaY < 0) pauseChatFollow(); }} onTouchMove={pauseChatFollow} onPointerDown={(event) => { if (event.target === event.currentTarget) pauseChatFollow(); }} onScroll={(event) => { const element = event.currentTarget; followOutputRef.current = element.scrollHeight - element.scrollTop - element.clientHeight < 40; }}><div className="chat-heading"><span className="spark">✦</span><div><strong>{activeConversation?.context_builder_version === 'quick-ask-v1' ? 'Saved Quick Ask' : 'Ask about this paper'}</strong><p>{activeConversation?.context_builder_version === 'quick-ask-v1' ? 'This saved thread uses only its original selection and Quick Ask prompt.' : 'The full paper is available automatically. Select text only when you want to focus the answer.'}</p></div></div>{chatConfigured === false && <button type="button" className="no-key-notice" onClick={() => setSettingsOpen(true)}><strong>No API key configured</strong><span>Choose a provider and add a key in Settings to enable chat.</span></button>}
-              {chatHistory.map((turn) => <div className="chat-turn" key={turn.id}>{turn.importedQuickAsk && <div className="quick-import-badge">✦ Saved Quick Ask · selection only</div>}<ContextList selections={turn.context} />{activeConversation && turn.context.some((item) => item.rects?.length) && <button type="button" className={`turn-link-button${isAiLinked(activeConversation.id, turn.question) ? ' linked' : ''}`} onClick={() => void toggleAiLink(activeConversation, turn.question, turn.context)}>{isAiLinked(activeConversation.id, turn.question) ? '✦ Linked to PDF · click to unlink' : '✦ Link reference to PDF'}</button>}<div className="user-message"><span>You</span><p>{turn.question}</p></div><div className="answer-card complete"><div className="answer-meta"><span>Adam</span><span className="stream-state">Done</span></div><MarkdownAnswer>{turn.answer}</MarkdownAnswer></div></div>)}
+              {chatHistory.map((turn) => <div className="chat-turn" key={turn.id}>{turn.importedQuickAsk && <div className="quick-import-badge">✦ Saved Quick Ask · selection only</div>}<ContextList selections={turn.context} />{activeConversation && turn.context.some((item) => item.rects?.length) && <button type="button" className={`turn-link-button${isAiLinked(activeConversation.id, turn.question) ? ' linked' : ''}`} onClick={() => void toggleAiLink(activeConversation, turn.question, turn.context)}>{isAiLinked(activeConversation.id, turn.question) ? '✦ Linked to PDF · click to unlink' : '✦ Link reference to PDF'}</button>}<div className="user-message"><span>You</span><p>{turn.question}</p></div><div className="answer-card complete"><div className="answer-meta"><span>Adam</span><span className="stream-state">Done</span></div><MarkdownAnswer web={turn.web}>{turn.answer}</MarkdownAnswer><WebEvidence web={turn.web} /></div></div>)}
               {submittedQuestion && <><ContextList selections={submittedContext} />{activeConversation && streamStatus === 'complete' && submittedContext.some((item) => item.rects?.length) && <button type="button" className={`turn-link-button${isAiLinked(activeConversation.id, submittedQuestion) ? ' linked' : ''}`} onClick={() => void toggleAiLink(activeConversation, submittedQuestion, submittedContext)}>{isAiLinked(activeConversation.id, submittedQuestion) ? '✦ Linked to PDF · click to unlink' : '✦ Link reference to PDF'}</button>}<div className="user-message"><span>You</span><p>{submittedQuestion}</p></div></>}
-              {streamStatus !== 'idle' && streamStatus !== 'error' && <div className={`answer-card ${streamStatus}`} aria-live="polite"><div className="answer-meta"><span>Adam</span><span className="stream-state">{streamStatus === 'connecting' ? <>Thinking<span className="thinking-dots"><i /><i /><i /></span></> : streamStatus === 'streaming' ? 'Responding…' : 'Done'}</span></div>{answer ? <MarkdownAnswer streaming={streamStatus === 'streaming'}>{answer}</MarkdownAnswer> : <div className="answer-skeleton"><i /><i /><i /></div>}</div>}{error && <p className="error-banner compact">{error}</p>}
+              {streamStatus !== 'idle' && streamStatus !== 'error' && <div className={`answer-card ${streamStatus}`} aria-live="polite"><div className="answer-meta"><span>Adam</span><span className="stream-state">{streamStatus === 'connecting' ? <>Thinking<span className="thinking-dots"><i /><i /><i /></span></> : streamStatus === 'streaming' ? 'Responding…' : 'Done'}</span></div>{searchNotice && <p className="search-notice" role="status">{searchNotice}</p>}{answer ? <MarkdownAnswer web={answerWeb} streaming={streamStatus === 'streaming'}>{answer}</MarkdownAnswer> : <div className="answer-skeleton"><i /><i /><i /></div>}<WebEvidence web={answerWeb} /></div>}{error && <p className="error-banner compact">{error}</p>}
               {contextSelections.length > 0 ? <ContextList selections={contextSelections} onRemove={(id) => setContextSelections((current) => current.filter((item) => item.id !== id))} /> : !submittedQuestion && chatHistory.length === 0 && <div className="empty-context"><span>✦</span><p>Ask anything about the paper, or select a passage for precise focus.</p></div>}
             </div>
-            <form className="composer" onSubmit={ask}><textarea ref={composerRef} value={question} onChange={(event) => setQuestion(event.target.value)} onKeyDown={(event) => { if (event.key === 'Enter' && !event.shiftKey && !event.nativeEvent.isComposing) { event.preventDefault(); event.currentTarget.form?.requestSubmit(); } }} placeholder={chatConfigured === false ? 'Add an API key in Settings to chat…' : activeConversation?.context_builder_version === 'quick-ask-v1' ? 'Continue this saved Quick Ask…' : contextSelections.length ? 'Ask about your context…' : 'Ask anything about this paper…'} disabled={!canAsk || asking} rows={3} /><div><span>{chatConfigured === false ? 'Chat unavailable' : activeConversation?.context_builder_version === 'quick-ask-v1' ? 'Selection-only context' : contextSelections.length ? `${contextSelections.length} context ${contextSelections.length === 1 ? 'item' : 'items'}` : 'Full paper context'}</span><button type="submit" disabled={!canAsk || !question.trim() || asking}>{asking ? '…' : '↑'}</button></div></form>
+            <form className="composer" onSubmit={ask}><textarea ref={composerRef} value={question} onChange={(event) => setQuestion(event.target.value)} onKeyDown={(event) => { if (event.key === 'Enter' && !event.shiftKey && !event.nativeEvent.isComposing) { event.preventDefault(); event.currentTarget.form?.requestSubmit(); } }} placeholder={chatConfigured === false ? 'Add an API key in Settings to chat…' : activeConversation?.context_builder_version === 'quick-ask-v1' ? 'Continue this saved Quick Ask…' : contextSelections.length ? 'Ask about your context…' : 'Ask anything about this paper…'} disabled={!canAsk || asking} rows={3} /><div><button type="button" className={`composer-search-toggle${searchEnabled ? ' active' : ''}`} aria-pressed={searchEnabled} onClick={() => setSearchEnabled((enabled) => !enabled)} title="Allow a web search for this question">⌕ Search web</button><span>{chatConfigured === false ? 'Chat unavailable' : activeConversation?.context_builder_version === 'quick-ask-v1' ? 'Selection-only context' : contextSelections.length ? `${contextSelections.length} context ${contextSelections.length === 1 ? 'item' : 'items'}` : 'Full paper context'}</span><button type="submit" disabled={!canAsk || !question.trim() || asking}>{asking ? '…' : '↑'}</button></div></form>
           </>}
         </aside>
       </div>
@@ -1450,6 +1475,15 @@ function contextFromJson(value: string | null): ContextSelection[] {
 
 function contextScope(value: string | null): string | null {
   try { return value ? (JSON.parse(value) as { scope?: string }).scope ?? null : null; } catch { return null; }
+}
+
+function webFromJson(value: string | null): WebInfo | null {
+  if (!value) return null;
+  try {
+    const web = (JSON.parse(value) as { web?: WebInfo }).web;
+    if (!web || !Array.isArray(web.sources)) return null;
+    return { searched: Boolean(web.searched), query: web.query ?? null, reused: Boolean(web.reused), sources: web.sources.filter((source) => typeof source.url === 'string' && /^https?:\/\//.test(source.url)).slice(0, 6) };
+  } catch { return null; }
 }
 
 function formatConversationDate(value: string) {
@@ -1896,8 +1930,49 @@ function PaperNoteEditor({ documentId, paperName, pendingQuote, onQuoteConsumed 
   </section>;
 }
 
-function MarkdownAnswer({ children, streaming = false }: { children: string; streaming?: boolean }) {
-  return <div className="markdown-answer"><ReactMarkdown remarkPlugins={[remarkGfm, remarkMath]} rehypePlugins={[rehypeKatex]} components={{ a: ({ children: linkText, ...props }) => <a {...props} target="_blank" rel="noreferrer">{linkText}</a> }}>{children}</ReactMarkdown>{streaming && <i className="stream-cursor" />}</div>;
+function normalizeMathDelimiters(markdown: string): string {
+  const lines = markdown.split('\n');
+  let fence: { marker: string; length: number } | null = null;
+  let prose = '';
+  let result = '';
+  const flushProse = () => {
+    result += prose.replace(/(`+)[\s\S]*?\1|\\\[([\s\S]*?)\\\]|\\\(([^\n]*?)\\\)/g, (match, _ticks: string, display: string | undefined, inline: string | undefined) => {
+      if (display !== undefined) return `\n$$\n${display.trim()}\n$$\n`;
+      if (inline !== undefined) return `$${inline}$`;
+      return match;
+    });
+    prose = '';
+  };
+
+  for (const [index, line] of lines.entries()) {
+    const suffix = index < lines.length - 1 ? '\n' : '';
+    const opening = /^ {0,3}(`{3,}|~{3,})/.exec(line);
+    if (fence) {
+      result += line + suffix;
+      if (new RegExp(`^ {0,3}${fence.marker}{${fence.length},}[ \\t]*$`).test(line)) fence = null;
+    } else if (opening) {
+      flushProse();
+      fence = { marker: opening[1][0], length: opening[1].length };
+      result += line + suffix;
+    } else {
+      prose += line + suffix;
+    }
+  }
+  flushProse();
+  return result;
+}
+
+function MarkdownAnswer({ children, streaming = false, web }: { children: string; streaming?: boolean; web?: WebInfo | null }) {
+  const linked = web ? children.replace(/\[W(\d+)\]/g, (marker, number: string) => {
+    const url = web.sources[Number(number) - 1]?.url;
+    return url ? `[${marker}](<${url.replaceAll('>', '%3E')}>)` : marker;
+  }) : children;
+  return <div className="markdown-answer"><ReactMarkdown remarkPlugins={[remarkGfm, remarkMath]} rehypePlugins={[rehypeKatex]} components={{ a: ({ children: linkText, ...props }) => <a {...props} target="_blank" rel="noreferrer">{linkText}</a> }}>{normalizeMathDelimiters(linked)}</ReactMarkdown>{streaming && <i className="stream-cursor" />}</div>;
+}
+
+function WebEvidence({ web }: { web?: WebInfo | null }) {
+  if (!web?.searched && !web?.reused) return null;
+  return <div className="web-evidence"><span className="web-badge">{web.searched ? '⌕ Searched web' : '⌕ Earlier web context'}</span>{web.sources.length > 0 && <div className="web-sources"><strong>Sources</strong>{web.sources.map((source, index) => <a key={`${source.url}-${index}`} href={source.url} target="_blank" rel="noreferrer">[W{index + 1}] {source.title}</a>)}</div>}</div>;
 }
 function UploadButton({ uploading, upload }: { uploading: boolean; upload: (file: File) => Promise<void> }) { return <label className="primary-button">{uploading ? 'Opening…' : 'Open PDF'}<input type="file" accept="application/pdf" hidden disabled={uploading} onChange={(event) => event.target.files?.[0] && void upload(event.target.files[0])} /></label>; }
 

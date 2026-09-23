@@ -1,3 +1,5 @@
+import asyncio
+import json
 import os
 import tempfile
 from io import BytesIO
@@ -11,6 +13,8 @@ from fastapi.testclient import TestClient  # noqa: E402
 
 from adam_server.main import app  # noqa: E402
 from adam_server import main as main_module  # noqa: E402
+from adam_server.services import web_search as web_search_module  # noqa: E402
+from adam_server.services.web_search import plan_search  # noqa: E402
 
 
 client = TestClient(app)
@@ -210,6 +214,141 @@ def test_paper_context_and_history_are_owned_by_the_backend(monkeypatch) -> None
     pinned = client.post(f"/api/conversations/{conversation['id']}/sync-defaults").json()
     assert pinned["provider"] == "google"
     assert pinned["model_id"] == "gemini-test"
+
+
+def test_web_search_is_opt_in_saved_and_reused_only_in_its_chat(monkeypatch) -> None:
+    first_paper = client.post("/api/documents", files={"file": ("web-one.pdf", BytesIO(sample_pdf("First paper on transformers.")), "application/pdf")}).json()
+    second_paper = client.post("/api/documents", files={"file": ("web-two.pdf", BytesIO(sample_pdf("Second paper on kernels.")), "application/pdf")}).json()
+    client.put("/api/settings", json={"provider": "google", "model": "gemini-test", "api_keys": {}})
+    first_chat = client.post(f"/api/documents/{first_paper['id']}/conversations", json={}).json()
+    second_chat = client.post(f"/api/documents/{second_paper['id']}/conversations", json={}).json()
+    monkeypatch.setattr(type(main_module.settings), "provider_api_key", lambda _self, _provider: "test-key")
+    prompts = []
+    searches = []
+
+    async def fake_stream(self, question, selected_text, images, page, history):
+        prompts.append(self.system_prompt)
+        yield "An external comparison [W1]." if "# Web reference" in self.system_prompt else "Only the paper is available."
+
+    async def fake_plan(_provider, question, _selection, paper_title):
+        assert paper_title == "web-one"
+        return "transformer research comparison"
+
+    async def fake_search(_base_url, query):
+        searches.append(query)
+        return [{"title": "Research source", "url": "https://example.org/research", "snippet": "External comparison evidence.", "retrieved_at": "2026-09-23T00:00:00+00:00"}]
+
+    monkeypatch.setattr(main_module.GoogleProvider, "stream_answer", fake_stream)
+    monkeypatch.setattr(main_module, "plan_search", fake_plan)
+    monkeypatch.setattr(main_module, "search_web", fake_search)
+
+    plain = client.post(f"/api/conversations/{first_chat['id']}/messages/stream", json={"question": "What does this paper say?"})
+    assert plain.status_code == 200
+    assert not searches
+    assert "# Web reference" not in prompts[-1]
+
+    searched = client.post(f"/api/conversations/{first_chat['id']}/messages/stream", json={"question": "How does it compare externally?", "allow_web_search": True})
+    assert searched.status_code == 200
+    assert '"type": "web_sources"' in searched.text
+    assert searches == ["transformer research comparison"]
+    saved = client.get(f"/api/conversations/{first_chat['id']}").json()["messages"][-1]
+    assert json.loads(saved["context_json"])["web"]["searched"] is True
+    assert "[W1]" in saved["content"]
+
+    follow_up = client.post(f"/api/conversations/{first_chat['id']}/messages/stream", json={"question": "What else follows from that?"})
+    assert follow_up.status_code == 200
+    assert len(searches) == 1
+    assert "https://example.org/research" in prompts[-1]
+    reused = client.get(f"/api/conversations/{first_chat['id']}").json()["messages"][-1]
+    assert json.loads(reused["context_json"])["web"]["reused"] is True
+    assert json.loads(reused["context_json"])["web"]["searched"] is False
+
+    other = client.post(f"/api/conversations/{second_chat['id']}/messages/stream", json={"question": "What is in this paper?"})
+    assert other.status_code == 200
+    assert "# Web reference" not in prompts[-1]
+
+
+def test_search_planner_uses_paper_title_even_if_model_says_skip() -> None:
+    class FakeProvider:
+        def __init__(self, api_key="key", model="test", base_url="https://example.org", system_prompt=""):
+            self.api_key = api_key
+            self.model = model
+            self.base_url = base_url
+            self.system_prompt = system_prompt
+
+        async def stream_answer(self, question, selected_text, images, page, history):
+            assert "Paper title: Attention Is All You Need" in question
+            yield '{"search": false, "query": "important papers citing the Transformer paper"}'
+
+    query = asyncio.run(plan_search(FakeProvider(), "What important papers cited this paper?", "", "Attention Is All You Need"))
+    assert query.startswith('"Attention Is All You Need"')
+    assert "important papers citing" in query
+
+
+def test_web_search_reads_all_five_results_with_larger_excerpts(monkeypatch) -> None:
+    class FakeResponse:
+        def raise_for_status(self):
+            pass
+
+        def json(self):
+            return {"results": [{"title": f"Source {index}", "url": f"https://example.org/{index}", "content": "s" * 1000} for index in range(5)]}
+
+    class FakeClient:
+        def __init__(self, **_kwargs):
+            pass
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *_args):
+            pass
+
+        async def get(self, *_args, **_kwargs):
+            return FakeResponse()
+
+    fetched = []
+
+    async def fake_read_page(_client, url):
+        fetched.append(url)
+        return "p" * web_search_module.MAX_PAGE_TEXT_CHARS
+
+    monkeypatch.setattr(web_search_module.httpx, "AsyncClient", FakeClient)
+    monkeypatch.setattr(web_search_module, "read_page", fake_read_page)
+    sources = asyncio.run(web_search_module.search_web("http://search:8080", "example"))
+    assert len(fetched) == len(sources) == 5
+    assert all(len(source["snippet"]) > 3000 for source in sources)
+    assert all(len(source["snippet"]) <= web_search_module.MAX_SOURCE_TEXT_CHARS for source in sources)
+
+
+def test_citing_papers_question_uses_citation_index(monkeypatch) -> None:
+    uploaded = client.post("/api/documents", files={"file": ("Attention is all you need.pdf", BytesIO(sample_pdf()), "application/pdf")}).json()
+    client.put("/api/settings", json={"provider": "google", "model": "gemini-test", "api_keys": {}})
+    conversation = client.post(f"/api/documents/{uploaded['id']}/conversations", json={}).json()
+    monkeypatch.setattr(type(main_module.settings), "provider_api_key", lambda _self, _provider: "test-key")
+    lookups = []
+
+    async def fake_stream(self, question, selected_text, images, page, history):
+        yield "A cited paper [W1]."
+
+    async def fake_plan(_provider, _question, _selection, _title):
+        return "papers citing Attention Is All You Need"
+
+    async def fake_citations(title):
+        lookups.append(title)
+        return [{"title": "Later paper", "url": "https://openalex.org/W123", "snippet": "OpenAlex records the citation.", "retrieved_at": "2026-09-23T00:00:00+00:00"}]
+
+    async def unexpected_web_search(_base_url, _query):
+        raise AssertionError("Generic web search should be the fallback only")
+
+    monkeypatch.setattr(main_module.GoogleProvider, "stream_answer", fake_stream)
+    monkeypatch.setattr(main_module, "plan_search", fake_plan)
+    monkeypatch.setattr(main_module, "search_citing_papers", fake_citations)
+    monkeypatch.setattr(main_module, "search_web", unexpected_web_search)
+    response = client.post(f"/api/conversations/{conversation['id']}/messages/stream", json={"question": "What important papers cited this paper?", "allow_web_search": True})
+    assert response.status_code == 200
+    assert lookups == ["Attention is all you need"]
+    assert '"searched": true' in response.text
+    assert "https://openalex.org/W123" in response.text
 
 
 def test_delete_paper_removes_file_and_related_records() -> None:

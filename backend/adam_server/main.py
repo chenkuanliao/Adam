@@ -18,6 +18,7 @@ from .schemas import AiNoteCreate, AiNoteUnlink, AnnotationIn, AnnotationOut, An
 from .services.context import build_paper_context
 from .services.documents import document_file_path, ingest_pdf
 from .services.llm import AnthropicProvider, GoogleProvider, OpenAICompatibleProvider, OpenAIResponsesProvider, generate_zen_title, sse
+from .services.web_search import asks_for_citing_papers, plan_search, previous_sources, search_citing_papers, search_web, web_context
 
 settings = get_settings()
 run_migrations()
@@ -498,6 +499,7 @@ async def chat_stream(conversation_id: str, request: ChatRequest, db: Session = 
     conversation = db.get(Conversation, conversation_id)
     if not conversation:
         raise HTTPException(404, "Conversation not found.")
+    paper_title = Path(db.get(Document, conversation.document_id).original_name).stem
     provider_name = conversation.provider
     api_key = settings.provider_api_key(provider_name)
     if not api_key:
@@ -508,7 +510,7 @@ async def chat_stream(conversation_id: str, request: ChatRequest, db: Session = 
     else:
         paper_context, context_mode = build_paper_context(db, conversation, request.question, request.selected_text)
     scope = "quick_ask_followup" if conversation.context_builder_version == "quick-ask-v1" else ("selection" if request.selected_text or request.images else "paper")
-    context = {"scope": scope, "page": request.page, "selected_text": request.selected_text, "images": [image.model_dump() for image in request.images], "anchors": [anchor.model_dump() for anchor in request.anchors], "context_mode": context_mode}
+    context = {"scope": scope, "page": request.page, "selected_text": request.selected_text, "images": [image.model_dump() for image in request.images], "anchors": [anchor.model_dump() for anchor in request.anchors], "context_mode": context_mode, "search_requested": request.allow_web_search}
     user_message = Message(document_id=conversation.document_id, conversation_id=conversation.id, role="user", content=request.question, context_json=json.dumps(context))
     db.add(user_message)
     should_generate_title = conversation.title == "New chat" and provider_name == "zen"
@@ -526,9 +528,6 @@ async def chat_stream(conversation_id: str, request: ChatRequest, db: Session = 
             conversation = db.get(Conversation, conversation_id)
 
     model = conversation.model_id
-    system_prompt = conversation.system_prompt + paper_context
-    provider = make_provider(provider_name, api_key, model, system_prompt)
-
     async def events() -> AsyncIterator[str]:
         complete = ""
         try:
@@ -545,15 +544,42 @@ async def chat_stream(conversation_id: str, request: ChatRequest, db: Session = 
                     history.append(ChatTurnIn(question=prior.content, answer=message.content, selected_text=saved.get("selected_text", ""), page=saved.get("page"), images=[ContextImageIn(**item) for item in saved.get("images", [])]))
                     pending = None
             yield sse({"type": "started", "provider": provider_name, "model": model, "context_mode": context_mode, "conversation_id": conversation.id, "title": conversation.title})
+            prior_sources = previous_sources(db, conversation.id)
+            fresh_sources = []
+            search_query = None
+            search_performed = False
+            if request.allow_web_search:
+                yield sse({"type": "searching"})
+                try:
+                    planner = make_provider(provider_name, api_key, model, "")
+                    search_query = await plan_search(planner, request.question, request.selected_text, paper_title)
+                except Exception:
+                    search_query = f'"{paper_title}" {request.question}'[:180]
+                try:
+                    if asks_for_citing_papers(request.question):
+                        try:
+                            fresh_sources = await search_citing_papers(paper_title)
+                        except (httpx.HTTPError, ValueError, KeyError):
+                            fresh_sources = []
+                    if not fresh_sources:
+                        fresh_sources = await search_web(settings.search_base_url, search_query)
+                    search_performed = True
+                except Exception:
+                    yield sse({"type": "search_error", "message": "Web search is unavailable; answering with the paper and saved sources."})
+            sources = (fresh_sources + [item for item in prior_sources if item["url"] not in {source["url"] for source in fresh_sources}])[:6]
+            web = {"searched": search_performed, "query": search_query if search_performed else None, "reused": bool(prior_sources), "sources": sources}
+            yield sse({"type": "web_sources", "web": web})
+            system_prompt = conversation.system_prompt + paper_context + web_context(sources)
+            provider = make_provider(provider_name, api_key, model, system_prompt)
             async for delta in provider.stream_answer(request.question, request.selected_text, request.images, request.page, history[-20:]):
                 complete += delta
                 yield sse({"type": "delta", "text": delta})
             with SessionLocal() as stream_db:
-                stream_db.add(Message(document_id=conversation.document_id, conversation_id=conversation.id, role="assistant", content=complete, context_json=None))
+                stream_db.add(Message(document_id=conversation.document_id, conversation_id=conversation.id, role="assistant", content=complete, context_json=json.dumps({"web": web}) if search_performed or sources else None))
                 stored = stream_db.get(Conversation, conversation.id)
                 if stored: stored.updated_at = datetime.now(timezone.utc)
                 stream_db.commit()
-            yield sse({"type": "completed"})
+            yield sse({"type": "completed", "web": web})
         except Exception as exc:
             yield sse({"type": "error", "message": str(exc)})
 

@@ -6,16 +6,29 @@ services:
       ADAM_DATA_DIR: /data
       ADAM_OPENCODE_API_KEY_FILE: /run/secrets/opencode_api_key
       ADAM_OPENCODE_MODEL: ${ADAM_OPENCODE_MODEL:-gpt-5.6-terra}
+      ADAM_SEARCH_BASE_URL: http://search:8080
       ADAM_CORS_ORIGINS: http://localhost:${ADAM_WEB_PORT:-3000},http://127.0.0.1:${ADAM_WEB_PORT:-3000}
     volumes:
       - ./data:/data
     secrets:
       - opencode_api_key
+    depends_on:
+      - search
     healthcheck:
       test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8000/health')"]
       interval: 10s
       timeout: 3s
       retries: 5
+    restart: unless-stopped
+
+  search:
+    image: docker.io/searxng/searxng:latest
+    environment:
+      SEARXNG_SECRET: ${ADAM_SEARXNG_SECRET:-adam-internal-search}
+    volumes:
+      - ./search/settings.yml:/etc/searxng/settings.yml:ro
+    ports:
+      - "127.0.0.1:8888:8080"
     restart: unless-stopped
 
   web:

@@ -105,6 +105,7 @@ class ChatTurnIn(BaseModel):
 
 class ChatRequest(BaseModel):
     question: str = Field(min_length=1, max_length=8000)
+    allow_web_search: bool = False
     selected_text: str = Field(default="", max_length=30000)
     page: int | None = Field(default=None, ge=1)
     images: list[ContextImageIn] = Field(default_factory=list, max_length=6)
