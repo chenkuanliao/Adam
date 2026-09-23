@@ -16,7 +16,7 @@ from .database import SessionLocal, get_db, run_migrations
 from .models import Annotation, Conversation, Document, Message, ModelFavorite, Page, PaperNote
 from .schemas import AiNoteCreate, AiNoteUnlink, AnnotationIn, AnnotationOut, AnnotationUpdate, AppSettingsOut, AppSettingsUpdate, ChatRequest, ConversationCreate, ConversationDetail, ConversationOut, ConversationUpdate, DocumentOut, DocumentUpdate, ModelFavoriteUpdate, PageTextOut, PaperNoteOut, PaperNoteUpdate, ProviderKeyUpdate, ProviderModelsOut, QuickAskImportRequest, QuickAskRequest
 from .services.context import build_paper_context
-from .services.documents import ingest_pdf
+from .services.documents import document_file_path, ingest_pdf
 from .services.llm import AnthropicProvider, GoogleProvider, OpenAICompatibleProvider, OpenAIResponsesProvider, generate_zen_title, sse
 
 settings = get_settings()
@@ -156,7 +156,7 @@ def update_document(document_id: str, request: DocumentUpdate, db: Session = Dep
         name += ".pdf"
     if not name[:-4].strip() or Path(name).name != name or "/" in name or "\\" in name or any(ord(char) < 32 for char in name):
         raise HTTPException(422, "Enter a valid PDF filename without folders.")
-    source = Path(document.storage_path).resolve()
+    source = document_file_path(document.storage_path, app_settings)
     document_root = (app_settings.data_dir / "documents").resolve()
     if not source.is_file() or not source.is_relative_to(document_root):
         raise HTTPException(409, "The document file is outside managed storage and was not renamed.")
@@ -167,7 +167,7 @@ def update_document(document_id: str, request: DocumentUpdate, db: Session = Dep
         os.replace(source, destination)
     try:
         document.original_name = name
-        document.storage_path = str(destination)
+        document.storage_path = str(destination.relative_to(app_settings.data_dir.resolve()))
         document.updated_at = datetime.now(timezone.utc)
         db.commit()
         db.refresh(document)
@@ -184,7 +184,7 @@ def delete_document(document_id: str, db: Session = Depends(get_db), app_setting
     document = db.get(Document, document_id)
     if not document:
         raise HTTPException(404, "Document not found.")
-    source = Path(document.storage_path).resolve()
+    source = document_file_path(document.storage_path, app_settings)
     document_root = (app_settings.data_dir / "documents").resolve()
     staged: Path | None = None
     if source.exists():
@@ -210,11 +210,14 @@ def delete_document(document_id: str, db: Session = Depends(get_db), app_setting
 
 
 @app.get("/api/documents/{document_id}/file")
-def get_document_file(document_id: str, db: Session = Depends(get_db)) -> FileResponse:
+def get_document_file(document_id: str, db: Session = Depends(get_db), app_settings: Settings = Depends(get_settings)) -> FileResponse:
     document = db.get(Document, document_id)
-    if not document or not Path(document.storage_path).is_file():
+    if not document:
         raise HTTPException(404, "Document file not found.")
-    return FileResponse(document.storage_path, media_type="application/pdf", filename=document.original_name, content_disposition_type="inline")
+    source = document_file_path(document.storage_path, app_settings)
+    if not source.is_relative_to((app_settings.data_dir / "documents").resolve()) or not source.is_file():
+        raise HTTPException(404, "Document file not found.")
+    return FileResponse(source, media_type="application/pdf", filename=document.original_name, content_disposition_type="inline")
 
 
 @app.get("/api/documents/{document_id}/pages/{page_number}/text", response_model=PageTextOut)

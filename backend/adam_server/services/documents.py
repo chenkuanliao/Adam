@@ -11,6 +11,17 @@ from ..config import Settings
 from ..models import Document, Page
 
 
+def document_file_path(storage_path: str, settings: Settings) -> Path:
+    """Resolve stored PDFs after switching between Docker and local development."""
+    path = Path(storage_path)
+    docker_documents = Path("/data/documents")
+    if path.is_relative_to(docker_documents):
+        path = settings.data_dir / "documents" / path.relative_to(docker_documents)
+    elif not path.is_absolute():
+        path = settings.data_dir / path
+    return path.resolve()
+
+
 async def ingest_pdf(upload: UploadFile, db: Session, settings: Settings) -> Document:
     safe_name = Path(upload.filename or "paper.pdf").name
     temp_path = settings.data_dir / "tmp" / f"upload-{os.urandom(12).hex()}.pdf"
@@ -61,7 +72,7 @@ async def ingest_pdf(upload: UploadFile, db: Session, settings: Settings) -> Doc
             sha256=sha256,
             original_name=safe_name,
             byte_size=byte_size,
-            storage_path=str(final_path),
+            storage_path=str(final_path.relative_to(settings.data_dir)),
             page_count=len(extracted),
             status="ready",
         )

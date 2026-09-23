@@ -46,6 +46,13 @@ def test_upload_extract_reopen_and_missing_key() -> None:
     assert pdf.status_code == 200
     assert pdf.headers["content-type"] == "application/pdf"
 
+    # A library created in Docker keeps /data paths when opened locally.
+    with main_module.SessionLocal() as db:
+        document = db.get(main_module.Document, uploaded["id"])
+        document.storage_path = f"/data/{document.storage_path}"
+        db.commit()
+    assert client.get(f"/api/documents/{uploaded['id']}/file").status_code == 200
+
     renamed_document = client.patch(f"/api/documents/{uploaded['id']}", json={"name": "Attention notes"})
     assert renamed_document.status_code == 200
     assert renamed_document.json()["original_name"] == "Attention notes.pdf"
