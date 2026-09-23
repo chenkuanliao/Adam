@@ -28,6 +28,7 @@ type HighlightEntry = ContextSelection & { color: string; range: Range | null; r
 type NoteEditor = { entry: HighlightEntry; text: string; x: number; y: number };
 type StreamStatus = 'idle' | 'connecting' | 'streaming' | 'complete' | 'error';
 type ChatTurn = { id: string; question: string; answer: string; context: ContextSelection[]; importedQuickAsk?: boolean };
+type PendingAnswer = { question: string; context: ContextSelection[]; answer: string; status: StreamStatus; error: string };
 type QuickTurn = { question: string; answer: string };
 type Conversation = { id: string; document_id: string; title: string; provider: string; model_id: string; context_builder_version: string; updated_at: string; message_count: number };
 type SavedMessage = { id: string; role: string; content: string; context_json: string | null };
@@ -134,9 +135,12 @@ export default function Home() {
   const screenshotScrollFrameRef = useRef<number | null>(null);
   const screenshotPointerRef = useRef<{ x: number; y: number } | null>(null);
   const pendingZoomRef = useRef<{ page: number; y: number } | null>(null);
-  const answerQueueRef = useRef('');
-  const revealTimerRef = useRef<number | null>(null);
-  const streamFinishedRef = useRef(false);
+  const pendingAnswersRef = useRef(new Map<string, PendingAnswer>());
+  const activeConversationIdRef = useRef<string | null>(null);
+  const activePaperIdRef = useRef<string | null>(null);
+  const paperLoadRef = useRef(0);
+  const conversationLoadRef = useRef(0);
+  const quickAskRequestRef = useRef(0);
   const zoomRef = useRef(DEFAULT_ZOOM);
   const notesVisibleRef = useRef(false);
   const zoomBeforeNotesRef = useRef<number | null>(null);
@@ -329,7 +333,6 @@ export default function Home() {
   }, [active, changeZoom]);
 
   useEffect(() => () => {
-    if (revealTimerRef.current !== null) window.clearInterval(revealTimerRef.current);
     if (autoScrollFrameRef.current !== null) window.cancelAnimationFrame(autoScrollFrameRef.current);
     if (screenshotScrollFrameRef.current !== null) window.cancelAnimationFrame(screenshotScrollFrameRef.current);
     const highlights = (CSS as typeof CSS & { highlights?: Map<string, Highlight> }).highlights;
@@ -432,26 +435,6 @@ export default function Home() {
     window.localStorage.setItem('adam.paperPercent', String(DEFAULT_PAPER_PERCENT));
   }
 
-  function startAnswerReveal() {
-    if (revealTimerRef.current !== null) return;
-    revealTimerRef.current = window.setInterval(() => {
-      const queued = answerQueueRef.current;
-      if (queued) {
-        // Provider events can contain a full sentence. Reveal a small adaptive
-        // slice so the UI still reads as a live stream without falling behind.
-        const amount = Math.min(10, Math.max(1, Math.ceil(queued.length / 30)));
-        setAnswer((current) => current + queued.slice(0, amount));
-        answerQueueRef.current = queued.slice(amount);
-        setStreamStatus('streaming');
-      } else if (streamFinishedRef.current) {
-        if (revealTimerRef.current !== null) window.clearInterval(revealTimerRef.current);
-        revealTimerRef.current = null;
-        setStreamStatus('complete');
-        setAsking(false);
-      }
-    }, 40);
-  }
-
   async function upload(file: File) {
     if (file.type !== 'application/pdf' && !file.name.toLowerCase().endsWith('.pdf')) {
       setError('Choose a PDF file.');
@@ -486,6 +469,10 @@ export default function Home() {
       setPapers((current) => current.filter((item) => item.id !== paper.id));
       window.localStorage.removeItem(`adam.conversation.${paper.id}`);
       if (active?.id === paper.id) {
+        activePaperIdRef.current = null;
+        activeConversationIdRef.current = null;
+        paperLoadRef.current += 1;
+        conversationLoadRef.current += 1;
         window.localStorage.removeItem('adam.activePaper');
         setActive(null);
         setActiveConversation(null);
@@ -521,6 +508,11 @@ export default function Home() {
   }
 
   function openPaper(paper: Paper) {
+    activePaperIdRef.current = paper.id;
+    activeConversationIdRef.current = null;
+    const loadId = ++paperLoadRef.current;
+    conversationLoadRef.current += 1;
+    quickAskRequestRef.current += 1;
     window.localStorage.setItem('adam.activePaper', paper.id);
     setActive(paper);
     setPages(0);
@@ -535,6 +527,10 @@ export default function Home() {
     setSubmittedQuestion('');
     setSubmittedContext([]);
     setAnswer('');
+    setAsking(false);
+    setQuickAskTarget(null);
+    setQuickAsking(false);
+    setQuickAnswer('');
     setChatHistory([]);
     setConversations([]);
     setActiveConversation(null);
@@ -544,10 +540,20 @@ export default function Home() {
     setZoom(DEFAULT_ZOOM);
     setError('');
     void loadAnnotations(paper.id);
-    void loadConversations(paper.id);
+    void loadConversations(paper.id, loadId);
   }
 
-  async function loadConversations(documentId: string) {
+  function returnToLibrary() {
+    activePaperIdRef.current = null;
+    activeConversationIdRef.current = null;
+    paperLoadRef.current += 1;
+    conversationLoadRef.current += 1;
+    quickAskRequestRef.current += 1;
+    window.localStorage.removeItem('adam.activePaper');
+    setActive(null);
+  }
+
+  async function loadConversations(documentId: string, loadId: number) {
     try {
       let response = await fetch(`${API_BASE}/api/documents/${documentId}/conversations`);
       if (!response.ok) throw new Error('Could not load saved chats.');
@@ -557,20 +563,25 @@ export default function Home() {
         if (!response.ok) throw new Error('Could not create a chat.');
         items = [await response.json() as Conversation];
       }
+      if (paperLoadRef.current !== loadId || activePaperIdRef.current !== documentId) return;
       setConversations(items);
       const preferred = window.localStorage.getItem(`adam.conversation.${documentId}`);
       await openConversation(items.find((item) => item.id === preferred) ?? items[0]);
     } catch (reason) {
-      setError(reason instanceof Error ? reason.message : 'Could not load saved chats.');
+      if (paperLoadRef.current === loadId) setError(reason instanceof Error ? reason.message : 'Could not load saved chats.');
     }
   }
 
   async function openConversation(conversation: Conversation) {
+    if (activePaperIdRef.current !== conversation.document_id) return;
+    activeConversationIdRef.current = conversation.id;
+    const loadId = ++conversationLoadRef.current;
     const response = await fetch(`${API_BASE}/api/conversations/${conversation.id}`);
     if (!response.ok) throw new Error('Could not open this chat.');
     const detail = await response.json() as Conversation & { messages: SavedMessage[] };
+    if (conversationLoadRef.current !== loadId || activeConversationIdRef.current !== conversation.id) return;
     window.localStorage.setItem(`adam.conversation.${conversation.document_id}`, conversation.id);
-    setActiveConversation(conversation);
+    setActiveConversation(detail);
     setHistoryOpen(false);
     const turns: ChatTurn[] = [];
     for (let index = 0; index < detail.messages.length; index += 1) {
@@ -581,7 +592,11 @@ export default function Home() {
       index += 1;
     }
     setChatHistory(turns);
-    setSubmittedQuestion(''); setSubmittedContext([]); setAnswer(''); setStreamStatus('idle'); setContextSelections([]); setError('');
+    const pending = pendingAnswersRef.current.get(conversation.id);
+    const alreadySaved = pending?.status === 'complete' && turns.some((turn) => turn.question === pending.question && turn.answer === pending.answer);
+    if (alreadySaved) pendingAnswersRef.current.delete(conversation.id);
+    const visible = alreadySaved ? null : pending;
+    setSubmittedQuestion(visible?.question ?? ''); setSubmittedContext(visible?.context ?? []); setAnswer(visible?.answer ?? ''); setStreamStatus(visible?.status ?? 'idle'); setAsking(visible?.status === 'connecting' || visible?.status === 'streaming'); setContextSelections([]); setError(visible?.error ?? '');
   }
 
   async function createNewConversation() {
@@ -655,13 +670,14 @@ export default function Home() {
       const response = await fetch(`${API_BASE}/api/documents/${documentId}/annotations`);
       if (!response.ok) throw new Error('Could not load saved highlights.');
       const annotations = await response.json() as Array<{ id: string; page: number; text: string; color: string; rects: HighlightRect[]; note_text?: string | null; ai_links?: AiNoteLink[] }>;
+      if (activePaperIdRef.current !== documentId) return;
       const entries = annotations.map((item) => ({ ...item, range: null }));
       highlightEntriesRef.current = entries;
       highlightUndoRef.current = [];
       highlightRedoRef.current = [];
       paintHighlights(entries);
     } catch (reason) {
-      setError(reason instanceof Error ? reason.message : 'Could not load saved highlights.');
+      if (activePaperIdRef.current === documentId) setError(reason instanceof Error ? reason.message : 'Could not load saved highlights.');
     }
   }
 
@@ -780,6 +796,9 @@ export default function Home() {
   async function submitQuickAsk(event: FormEvent) {
     event.preventDefault();
     if (!quickAskTarget || !activeConversation || !quickQuestion.trim() || quickAsking) return;
+    const originPaperId = activePaperIdRef.current;
+    const requestId = ++quickAskRequestRef.current;
+    const isVisible = () => quickAskRequestRef.current === requestId && activePaperIdRef.current === originPaperId;
     const priorTurns = quickAnswer ? [...quickTurns, { question: quickActiveQuestion, answer: quickAnswer }] : quickTurns;
     const sentQuestion = quickQuestion.trim();
     if (quickAnswer) setQuickTurns(priorTurns);
@@ -794,10 +813,10 @@ export default function Home() {
       while (true) {
         const { value, done } = await reader.read(); if (done) break;
         buffer += decoder.decode(value, { stream: true }); const events = buffer.split('\n\n'); buffer = events.pop() ?? '';
-        for (const block of events) { const line = block.split('\n').find((item) => item.startsWith('data: ')); if (!line) continue; const data = JSON.parse(line.slice(6)); if (data.type === 'delta') setQuickAnswer((current) => current + data.text); if (data.type === 'error') throw new Error(data.message); }
+        for (const block of events) { const line = block.split('\n').find((item) => item.startsWith('data: ')); if (!line) continue; const data = JSON.parse(line.slice(6)); if (data.type === 'delta' && isVisible()) setQuickAnswer((current) => current + data.text); if (data.type === 'error') throw new Error(data.message); }
       }
-    } catch (reason) { setQuickError(reason instanceof Error ? reason.message : 'Quick Ask failed.'); }
-    finally { setQuickAsking(false); }
+    } catch (reason) { if (isVisible()) setQuickError(reason instanceof Error ? reason.message : 'Quick Ask failed.'); }
+    finally { if (isVisible()) setQuickAsking(false); }
   }
 
   useLayoutEffect(() => {
@@ -1243,9 +1262,17 @@ export default function Home() {
   async function ask(event: FormEvent) {
     event.preventDefault();
     if (!active || !activeConversation || !question.trim() || asking) return;
+    const originPaperId = active.id;
+    const originConversationId = activeConversation.id;
+    const existing = pendingAnswersRef.current.get(originConversationId);
+    if (existing?.status === 'connecting' || existing?.status === 'streaming') return;
     const sendingConversation = activeConversation.message_count === 0 ? await syncConversationDefaults(activeConversation) : activeConversation;
+    if (activePaperIdRef.current !== originPaperId || activeConversationIdRef.current !== originConversationId) return;
     const sentQuestion = question.trim();
     const sentContext = contextSelections.map((selection) => ({ ...selection }));
+    const pending: PendingAnswer = { question: sentQuestion, context: sentContext, answer: '', status: 'connecting', error: '' };
+    pendingAnswersRef.current.set(originConversationId, pending);
+    const isVisible = () => activePaperIdRef.current === originPaperId && activeConversationIdRef.current === originConversationId && pendingAnswersRef.current.get(originConversationId) === pending;
     if (submittedQuestion && answer) {
       setChatHistory((current) => [...current, { id: crypto.randomUUID(), question: submittedQuestion, answer, context: submittedContext }]);
     }
@@ -1258,11 +1285,6 @@ export default function Home() {
     setAnswer('');
     setError('');
     setStreamStatus('connecting');
-    answerQueueRef.current = '';
-    streamFinishedRef.current = false;
-    if (revealTimerRef.current !== null) window.clearInterval(revealTimerRef.current);
-    revealTimerRef.current = null;
-    startAnswerReveal();
     try {
       const response = await fetch(`${API_BASE}/api/conversations/${sendingConversation.id}/messages/stream`, {
         method: 'POST', headers: { 'Content-Type': 'application/json' },
@@ -1286,29 +1308,29 @@ export default function Home() {
           if (!line) continue;
           const data = JSON.parse(line.slice(6));
           if (data.type === 'started') {
-            setStreamStatus('connecting');
+            if (isVisible()) setStreamStatus('connecting');
             if (data.title) {
-              setActiveConversation((current) => current?.id === sendingConversation.id ? { ...current, title: data.title } : current);
+              if (isVisible()) setActiveConversation((current) => current?.id === sendingConversation.id ? { ...current, title: data.title } : current);
               setConversations((current) => current.map((item) => item.id === sendingConversation.id ? { ...item, title: data.title } : item));
             }
           }
-          if (data.type === 'delta') answerQueueRef.current += data.text;
-          if (data.type === 'completed') streamFinishedRef.current = true;
+          if (data.type === 'delta') {
+            pending.answer += data.text;
+            pending.status = 'streaming';
+            if (isVisible()) { setAnswer(pending.answer); setStreamStatus('streaming'); }
+          }
           if (data.type === 'error') throw new Error(data.message);
         }
       }
-      streamFinishedRef.current = true;
       const savedConversation = await fetch(`${API_BASE}/api/conversations/${sendingConversation.id}`).then((result) => result.ok ? result.json() as Promise<Conversation> : null).catch(() => null);
-      const updatedConversation = { ...sendingConversation, ...(savedConversation ?? {}), message_count: sendingConversation.message_count + 2, updated_at: new Date().toISOString() };
-      setActiveConversation(updatedConversation);
+      const updatedConversation = { ...sendingConversation, ...(savedConversation ?? {}), message_count: savedConversation?.message_count ?? sendingConversation.message_count + 2, updated_at: savedConversation?.updated_at ?? new Date().toISOString() };
+      pending.status = 'complete';
+      if (isVisible()) { setAnswer(pending.answer); setStreamStatus('complete'); setAsking(false); setActiveConversation((current) => current?.id === updatedConversation.id ? updatedConversation : current); }
       setConversations((current) => current.map((item) => item.id === updatedConversation.id ? updatedConversation : item));
     } catch (reason) {
-      setError(reason instanceof Error ? reason.message : 'The model request failed.');
-      streamFinishedRef.current = false;
-      setStreamStatus('error');
-      setAsking(false);
-      if (revealTimerRef.current !== null) window.clearInterval(revealTimerRef.current);
-      revealTimerRef.current = null;
+      pending.error = reason instanceof Error ? reason.message : 'The model request failed.';
+      pending.status = 'error';
+      if (isVisible()) { setError(pending.error); setStreamStatus('error'); setAsking(false); }
     }
   }
 
@@ -1349,7 +1371,7 @@ export default function Home() {
 
   return (
     <main className="reader-shell">
-      <header className="reader-header"><button className="brand-button" onClick={() => { window.localStorage.removeItem('adam.activePaper'); setActive(null); }} aria-label="Back to library"><Brand /></button><div className="document-title">{renaming ? <form onSubmit={(event) => void renamePaper(event)}><input autoFocus aria-label="PDF filename" value={renameValue} maxLength={512} onChange={(event) => setRenameValue(event.target.value)} onKeyDown={(event) => { if (event.key === 'Escape') setRenaming(false); }} disabled={renameSaving} /><button type="submit" disabled={!renameValue.trim() || renameSaving}>{renameSaving ? 'Saving…' : 'Save'}</button></form> : <button type="button" className="document-title-button" title="Rename PDF" onClick={() => { setRenameValue(active.original_name.replace(/\.pdf$/i, '')); setRenaming(true); }}><strong>{active.original_name.replace(/\.pdf$/i, '')}</strong><span aria-hidden="true">✎</span></button>}<span>{pages || active.page_count} pages · local</span></div><div className="reader-header-tools"><button type="button" className={`note-view-button${notesVisible ? ' active' : ''}`} onClick={toggleNotes} title={notesVisible ? 'Hide anchored notes' : 'View anchored notes'}><span>▰</span>{notesVisible ? 'Hide notes' : 'View notes'}<strong>{highlightEntries.filter((entry) => entry.note_text).length}</strong></button><div className="paper-zoom"><span className="control-label">Paper</span><div className="header-actions" role="group" aria-label="Paper zoom"><button title="Zoom paper out" aria-label="Zoom paper out" disabled={zoom <= MIN_ZOOM} onClick={() => changeZoom(-.1)}>−</button><span>{Math.round(zoom * 100)}%</span><button title="Zoom paper in" aria-label="Zoom paper in" disabled={zoom >= MAX_ZOOM} onClick={() => changeZoom(.1)}>+</button></div></div><button type="button" className="reader-delete-button" aria-label="Delete paper" title="Delete paper" onClick={() => void deletePaper(active)}><TrashIcon /></button><SettingsButton compact onClick={() => setSettingsOpen(true)} /></div></header>
+      <header className="reader-header"><button className="brand-button" onClick={returnToLibrary} aria-label="Back to library"><Brand /></button><div className="document-title">{renaming ? <form onSubmit={(event) => void renamePaper(event)}><input autoFocus aria-label="PDF filename" value={renameValue} maxLength={512} onChange={(event) => setRenameValue(event.target.value)} onKeyDown={(event) => { if (event.key === 'Escape') setRenaming(false); }} disabled={renameSaving} /><button type="submit" disabled={!renameValue.trim() || renameSaving}>{renameSaving ? 'Saving…' : 'Save'}</button></form> : <button type="button" className="document-title-button" title="Rename PDF" onClick={() => { setRenameValue(active.original_name.replace(/\.pdf$/i, '')); setRenaming(true); }}><strong>{active.original_name.replace(/\.pdf$/i, '')}</strong><span aria-hidden="true">✎</span></button>}<span>{pages || active.page_count} pages · local</span></div><div className="reader-header-tools"><button type="button" className={`note-view-button${notesVisible ? ' active' : ''}`} onClick={toggleNotes} title={notesVisible ? 'Hide anchored notes' : 'View anchored notes'}><span>▰</span>{notesVisible ? 'Hide notes' : 'View notes'}<strong>{highlightEntries.filter((entry) => entry.note_text).length}</strong></button><div className="paper-zoom"><span className="control-label">Paper</span><div className="header-actions" role="group" aria-label="Paper zoom"><button title="Zoom paper out" aria-label="Zoom paper out" disabled={zoom <= MIN_ZOOM} onClick={() => changeZoom(-.1)}>−</button><span>{Math.round(zoom * 100)}%</span><button title="Zoom paper in" aria-label="Zoom paper in" disabled={zoom >= MAX_ZOOM} onClick={() => changeZoom(.1)}>+</button></div></div><button type="button" className="reader-delete-button" aria-label="Delete paper" title="Delete paper" onClick={() => void deletePaper(active)}><TrashIcon /></button><SettingsButton compact onClick={() => setSettingsOpen(true)} /></div></header>
       <div className={`reader-workspace${notesVisible ? ' notes-mode' : ''}`} ref={workspaceRef} style={{ gridTemplateColumns: `minmax(0, ${paperPercent}fr) minmax(340px, ${100 - paperPercent}fr)` }}>
         <section className={`pdf-pane${screenshotMode ? ' screenshot-mode' : ''}`} ref={viewerRef} onMouseUp={(event) => { if (!screenshotMode) captureSelection(event); }} onPointerDown={beginScreenshot} onPointerMove={moveScreenshot} onPointerUp={finishScreenshot} onPointerCancel={() => { screenshotPointerRef.current = null; setScreenshotDrag(null); setScreenshotMode(false); }}>
           <PdfDocument file={`${API_BASE}/api/documents/${active.id}/file`} onLoadSuccess={({ numPages }) => setPages(numPages)} loading={<div className="viewer-message">Rendering paper…</div>} error={<div className="viewer-message error-banner">Could not render this PDF.</div>}>
