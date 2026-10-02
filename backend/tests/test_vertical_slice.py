@@ -470,7 +470,9 @@ def test_zen_auto_title_manual_rename_and_regeneration(monkeypatch) -> None:
     conversation = client.post(f"/api/documents/{uploaded['id']}/conversations", json={}).json()
     response = client.post(f"/api/conversations/{conversation['id']}/messages/stream", json={"question": "How does attention work?"})
     assert response.status_code == 200
-    assert '"title": "Attention Mechanisms Explained"' in response.text
+    assert '"type": "completed"' in response.text
+    assert "User: How does attention work?" in generated_from[0]
+    assert "Assistant: A useful answer." in generated_from[0]
     assert client.get(f"/api/conversations/{conversation['id']}").json()["title"] == "Attention Mechanisms Explained"
 
     renamed = client.patch(f"/api/conversations/{conversation['id']}", json={"title": "My own title"})
@@ -597,3 +599,38 @@ def test_folder_colors_are_validated_and_persist_across_rename() -> None:
     assert custom.status_code == 201
     assert custom.json()['color'] == '#123456'
     client.delete(f"/api/folders/{custom.json()['id']}")
+
+
+def test_auto_title_uses_answer_and_preserves_chat_on_title_failure(monkeypatch) -> None:
+    uploaded = client.post("/api/documents", files={"file": ("specific-titles.pdf", BytesIO(sample_pdf("Residual connections preserve information.")), "application/pdf")}).json()
+    monkeypatch.setattr(type(main_module.settings), "provider_api_key", lambda _self, _provider: "test-key")
+
+    async def fake_stream(self, question, selected_text, images, page, history):
+        yield "Residual connections preserve information through Transformer blocks."
+
+    monkeypatch.setattr(main_module.OpenAIResponsesProvider, "stream_answer", fake_stream)
+    for mode in ("failure", "rename"):
+        conversation = client.post(f"/api/documents/{uploaded['id']}/conversations", json={}).json()
+
+        async def fake_title(transcript, fallback):
+            assert "User: What does this do?" in transcript
+            assert "Selected passage: x + F(x)" in transcript
+            assert "Assistant: Residual connections" in transcript
+            # The answer must be durable before requesting its title.
+            with main_module.SessionLocal() as db:
+                saved = db.get(main_module.Conversation, conversation["id"])
+                assert saved.messages[-1].role == "assistant"
+                if mode == "rename":
+                    saved.title = "My residual connection notes"
+                    db.commit()
+            if mode == "failure":
+                raise ValueError("Title service unavailable")
+            return "Residual Connections in Transformer Blocks"
+
+        monkeypatch.setattr(main_module, "generate_configured_title", fake_title)
+        response = client.post(f"/api/conversations/{conversation['id']}/messages/stream", json={"question": "What does this do?", "selected_text": "x + F(x)"})
+        assert '\"type\": \"completed\"' in response.text
+        assert '\"type\": \"error\"' not in response.text
+        detail = client.get(f"/api/conversations/{conversation['id']}").json()
+        assert detail["messages"][-1]["content"].startswith("Residual connections")
+        assert detail["title"] == ("What does this do?" if mode == "failure" else "My residual connection notes")
