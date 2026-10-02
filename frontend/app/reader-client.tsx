@@ -39,7 +39,7 @@ type Conversation = { id: string; document_id: string; title: string; provider: 
 type SavedMessage = { id: string; role: string; content: string; context_json: string | null };
 type ProviderId = 'zen' | 'openrouter' | 'openai' | 'anthropic' | 'google';
 type AppSettings = { provider: ProviderId; model: string; title_provider: ProviderId; title_model: string; selected_models: Partial<Record<ProviderId, string>>; providers: Record<ProviderId, boolean>; favorites: Partial<Record<ProviderId, string[]>>; system_prompt: string; quick_ask_prompt: string };
-type PaneMode = 'chat' | 'notes';
+type PaneMode = 'chat' | 'notes' | 'links';
 type PaperNote = { document_id: string; content_html: string; plain_text: string; revision: number; updated_at: string | null };
 const PROVIDERS: Array<{ id: ProviderId; name: string; keyLabel: string }> = [
   { id: 'zen', name: 'OpenCode Zen', keyLabel: 'OpenCode Zen key' },
@@ -94,6 +94,9 @@ export default function Home() {
   const [quickAsking, setQuickAsking] = useState(false);
   const [quickImporting, setQuickImporting] = useState(false);
   const [quickError, setQuickError] = useState('');
+  const [revealedLinkId, setRevealedLinkId] = useState<string | null>(null);
+  const [linkRevealVersion, setLinkRevealVersion] = useState(0);
+  const [linkedTurn, setLinkedTurn] = useState<{ conversationId: string; question: string } | null>(null);
   const [selectedAiNote, setSelectedAiNote] = useState<HighlightEntry | null>(null);
   const [screenshotMode, setScreenshotMode] = useState(false);
   const [screenshotDrag, setScreenshotDrag] = useState<ScreenshotDrag | null>(null);
@@ -579,6 +582,9 @@ export default function Home() {
     quickAskRequestRef.current += 1;
     window.localStorage.setItem('adam.activePaper', paper.id);
     setActive(paper);
+    setLinkedTurn(null);
+    setRevealedLinkId(null);
+    setSelectedAiNote(null);
     setPages(0);
     setContextSelections([]);
     setPendingSelection(null);
@@ -921,13 +927,59 @@ export default function Home() {
     paintHighlights(next);
   }
 
-  async function openAiConversation(link: AiNoteLink) {
-    const conversation = conversations.find((item) => item.id === link.conversation_id) ?? await fetch(`${API_BASE}/api/conversations/${link.conversation_id}`).then((response) => response.json() as Promise<Conversation>);
-    setSelectedAiNote(null);
-    setPaneMode('chat');
-    setHistoryOpen(false);
-    await openConversation(conversation);
+  function showLinkInPdf(entry: HighlightEntry) {
+    const viewer = viewerRef.current;
+    const page = viewer?.querySelector<HTMLElement>(`[data-page-number="${entry.page}"] .react-pdf__Page`);
+    if (!viewer || !page) {
+      setError('The linked PDF page is still loading. Please try again in a moment.');
+      return;
+    }
+    const pageRect = page.getBoundingClientRect();
+    const viewerRect = viewer.getBoundingClientRect();
+    const first = entry.rects[0];
+    const x = first ? first.left + first.width / 2 : .5;
+    const y = first ? first.top + first.height / 2 : 0;
+    setRevealedLinkId(entry.id);
+    setLinkRevealVersion((version) => version + 1);
+    setError('');
+    viewer.scrollTo({
+      top: viewer.scrollTop + pageRect.top + y * pageRect.height - viewerRect.top - viewer.clientHeight / 2,
+      left: viewer.scrollLeft + pageRect.left + x * pageRect.width - viewerRect.left - viewer.clientWidth / 2,
+      behavior: window.matchMedia('(prefers-reduced-motion: reduce)').matches ? 'instant' : 'smooth',
+    });
   }
+
+  async function openAiConversation(link: AiNoteLink) {
+    const paperId = activePaperIdRef.current;
+    try {
+      let conversation = conversations.find((item) => item.id === link.conversation_id);
+      if (!conversation) {
+        const response = await fetch(`${API_BASE}/api/conversations/${link.conversation_id}`);
+        if (!response.ok) throw new Error('This linked chat could not be opened.');
+        conversation = await response.json() as Conversation;
+      }
+      if (activePaperIdRef.current !== paperId) return;
+      pauseChatFollow();
+      await openConversation(conversation);
+      if (activePaperIdRef.current !== paperId || activeConversationIdRef.current !== conversation.id) return;
+      setSelectedAiNote(null);
+      setPaneMode('chat');
+      setHistoryOpen(false);
+      setLinkedTurn({ conversationId: conversation.id, question: link.question });
+    } catch (reason) {
+      setError(reason instanceof Error ? reason.message : 'This linked chat could not be opened.');
+    }
+  }
+
+  useLayoutEffect(() => {
+    if (paneMode !== 'chat' || historyOpen || activeConversation?.id !== linkedTurn?.conversationId) return;
+    const body = chatBodyRef.current;
+    const turn = Array.from(body?.querySelectorAll<HTMLElement>('.chat-turn') ?? []).find((element) => element.dataset.question === linkedTurn?.question);
+    if (!body || !turn) return;
+    followOutputRef.current = false;
+    body.scrollTop += turn.getBoundingClientRect().top - body.getBoundingClientRect().top - 16;
+    turn.focus({ preventScroll: true });
+  }, [linkedTurn, activeConversation?.id, paneMode, historyOpen, chatHistory]);
 
   function isAiLinked(conversationId: string, linkedQuestion: string) {
     return highlightEntries.some((entry) => entry.ai_links?.some((link) => link.conversation_id === conversationId && link.question === linkedQuestion));
@@ -1402,22 +1454,22 @@ export default function Home() {
       <div className={`reader-workspace${notesVisible ? ' notes-mode' : ''}`} ref={workspaceRef} style={{ gridTemplateColumns: `minmax(0, ${paperPercent}fr) minmax(340px, ${100 - paperPercent}fr)` }}>
         <section className={`pdf-pane${screenshotMode ? ' screenshot-mode' : ''}`} ref={viewerRef} onMouseUp={(event) => { if (!screenshotMode) captureSelection(event); }} onPointerDown={beginScreenshot} onPointerMove={moveScreenshot} onPointerUp={finishScreenshot} onPointerCancel={() => { screenshotPointerRef.current = null; setScreenshotDrag(null); setScreenshotMode(false); }}>
           <PdfDocument file={`${API_BASE}/api/documents/${active.id}/file`} onLoadSuccess={({ numPages }) => setPages(numPages)} loading={<div className="viewer-message">Rendering paper…</div>} error={<div className="viewer-message error-banner">Could not render this PDF.</div>}>
-            {Array.from({ length: pages }, (_, index) => { const pageEntries = highlightEntries.filter((entry) => entry.page === index + 1); const pageNotes = pageEntries.filter((entry) => entry.note_text).sort(compareNotePosition); const aiNotes = pageEntries.filter((entry) => entry.ai_links?.length).sort(compareNotePosition); const markers = pageEntries.filter((entry) => entry.note_text || entry.ai_links?.length).sort(compareNotePosition); const pageScale = zoom / BASE_RENDER_SCALE; return <div className="pdf-page-stage" data-page-number={index + 1} key={index + 1}><div className="pdf-page-wrap" style={{ zoom: pageScale, '--page-scale': pageScale } as CSSProperties}><PdfPageWithHighlights pageNumber={index + 1} highlights={pageEntries} zoom={zoom} />{aiNotes.map((note) => <button type="button" className="ai-note-anchor" style={{ top: `${noteMarkerTop(markers, markers.indexOf(note)) * 100}%` }} title={`${note.ai_links!.length} linked AI ${note.ai_links!.length === 1 ? 'note' : 'notes'}`} aria-label="Open linked AI notes" onClick={() => setSelectedAiNote(note)} key={`ai-${note.id}`}>✦<small>{note.ai_links!.length}</small></button>)}{!notesVisible && pageNotes.map((note) => <button type="button" className="note-anchor" style={{ top: `${noteMarkerTop(markers, markers.indexOf(note)) * 100}%`, '--note-color': note.color } as CSSProperties} title="Open note" aria-label="Open note" onClick={() => openSavedNote(note)} key={note.id}>▰</button>)}{notesVisible && <aside className="page-notes" aria-label={`Notes for page ${index + 1}`}>{pageNotes.map((note, noteIndex) => <button type="button" className="page-note-card" style={{ top: `${noteCardTop(pageNotes, noteIndex) * 100}%`, '--note-color': note.color } as CSSProperties} onClick={() => openSavedNote(note)} key={note.id}><span>Page {index + 1}</span><p>{note.note_text}</p><small>{note.text}</small></button>)}</aside>}<span className="page-label">{index + 1}</span></div></div>; })}
+            {Array.from({ length: pages }, (_, index) => { const pageEntries = highlightEntries.filter((entry) => entry.page === index + 1); const pageNotes = pageEntries.filter((entry) => entry.note_text).sort(compareNotePosition); const aiNotes = pageEntries.filter((entry) => entry.ai_links?.length).sort(compareNotePosition); const markers = pageEntries.filter((entry) => entry.note_text || entry.ai_links?.length).sort(compareNotePosition); const pageScale = zoom / BASE_RENDER_SCALE; return <div className="pdf-page-stage" data-page-number={index + 1} key={index + 1}><div className="pdf-page-wrap" style={{ zoom: pageScale, '--page-scale': pageScale } as CSSProperties}><PdfPageWithHighlights pageNumber={index + 1} highlights={pageEntries} zoom={zoom} />{pageEntries.filter((entry) => entry.id === revealedLinkId).map((entry) => <LinkedPassageReveal key={`${entry.id}-${linkRevealVersion}`} entry={entry} viewerRef={viewerRef} />)}{aiNotes.map((note) => <button type="button" className="ai-note-anchor" style={{ top: `${noteMarkerTop(markers, markers.indexOf(note)) * 100}%` }} title={`${note.ai_links!.length} linked AI ${note.ai_links!.length === 1 ? 'note' : 'notes'}`} aria-label="Open linked AI notes" onClick={() => setSelectedAiNote(note)} key={`ai-${note.id}`}>✦<small>{note.ai_links!.length}</small></button>)}{!notesVisible && pageNotes.map((note) => <button type="button" className="note-anchor" style={{ top: `${noteMarkerTop(markers, markers.indexOf(note)) * 100}%`, '--note-color': note.color } as CSSProperties} title="Open note" aria-label="Open note" onClick={() => openSavedNote(note)} key={note.id}>▰</button>)}{notesVisible && <aside className="page-notes" aria-label={`Notes for page ${index + 1}`}>{pageNotes.map((note, noteIndex) => <button type="button" className="page-note-card" style={{ top: `${noteCardTop(pageNotes, noteIndex) * 100}%`, '--note-color': note.color } as CSSProperties} onClick={() => openSavedNote(note)} key={note.id}><span>Page {index + 1}</span><p>{note.note_text}</p><small>{note.text}</small></button>)}</aside>}<span className="page-label">{index + 1}</span></div></div>; })}
           </PdfDocument>
           {screenshotMode && !screenshotDrag && <div className="screenshot-hint">Drag over the PDF to ask about it · Esc to cancel</div>}
           {screenshotDrag && <div className="screenshot-region" style={{ left: screenshotDrag.overlayLeft, top: screenshotDrag.overlayTop, width: screenshotDrag.overlayWidth, height: screenshotDrag.overlayHeight }} />}
         </section>
         <div className="pane-resizer" style={{ left: `${paperPercent}%` }} role="separator" aria-label="Resize paper and chat panes" aria-orientation="vertical" aria-valuemin={MIN_PAPER_PERCENT} aria-valuemax={80} aria-valuenow={Math.round(paperPercent)} tabIndex={0} onPointerDown={beginWorkspaceResize} onPointerMove={moveWorkspaceResize} onPointerUp={finishWorkspaceResize} onPointerCancel={() => { resizingRef.current = false; }} onDoubleClick={resetWorkspaceResize}><span /></div>
         <aside className="side-pane" style={{ '--chat-scale': chatScale } as CSSProperties}>
-          <div className="mode-tabs"><div className="tab-list"><button type="button" className={paneMode === 'chat' ? 'active' : ''} onClick={() => setPaneMode('chat')}>Chat</button><button type="button" className={paneMode === 'notes' ? 'active' : ''} onClick={() => setPaneMode('notes')}>Notes</button></div>{paneMode === 'chat' && <div className="chat-text-controls" role="group" aria-label="Chat text size"><span className="control-label">Text size</span><div><button type="button" aria-label="Decrease chat text size" title="Decrease chat text size" disabled={chatScale <= MIN_CHAT_SCALE} onClick={() => changeChatScale(-CHAT_SCALE_STEP)}>A−</button><output aria-live="polite" aria-label={`Chat text size ${Math.round(chatScale * 100)} percent`}>{Math.round(chatScale * 100)}%</output><button type="button" aria-label="Increase chat text size" title="Increase chat text size" disabled={chatScale >= MAX_CHAT_SCALE} onClick={() => changeChatScale(CHAT_SCALE_STEP)}>A+</button></div></div>}</div>
-          {paneMode === 'notes' ? <PaperNoteEditor documentId={active.id} paperName={active.original_name.replace(/\.pdf$/i, '')} pendingQuote={pendingNoteQuote} onQuoteConsumed={() => setPendingNoteQuote(null)} /> : historyOpen ? <section className="history-view">
+          <div className="mode-tabs"><div className="tab-list"><button type="button" className={paneMode === 'chat' ? 'active' : ''} onClick={() => setPaneMode('chat')}>Chat</button><button type="button" className={paneMode === 'notes' ? 'active' : ''} onClick={() => setPaneMode('notes')}>Notes</button><button type="button" className={paneMode === 'links' ? 'active links-tab' : 'links-tab'} aria-pressed={paneMode === 'links'} onClick={() => setPaneMode('links')}>Chat links<span>{highlightEntries.reduce((count, entry) => count + (entry.ai_links?.length ?? 0), 0)}</span></button></div>{paneMode === 'chat' && <div className="chat-text-controls" role="group" aria-label="Chat text size"><span className="control-label">Text size</span><div><button type="button" aria-label="Decrease chat text size" title="Decrease chat text size" disabled={chatScale <= MIN_CHAT_SCALE} onClick={() => changeChatScale(-CHAT_SCALE_STEP)}>A−</button><output aria-live="polite" aria-label={`Chat text size ${Math.round(chatScale * 100)} percent`}>{Math.round(chatScale * 100)}%</output><button type="button" aria-label="Increase chat text size" title="Increase chat text size" disabled={chatScale >= MAX_CHAT_SCALE} onClick={() => changeChatScale(CHAT_SCALE_STEP)}>A+</button></div></div>}</div>
+          {paneMode === 'links' ? <ChatLinksPanel key={active.id} entries={highlightEntries} conversations={conversations} activeConversationId={activeConversation?.id} revealedLinkId={revealedLinkId} onShowInPdf={showLinkInPdf} onOpen={openAiConversation} /> : paneMode === 'notes' ? <PaperNoteEditor documentId={active.id} paperName={active.original_name.replace(/\.pdf$/i, '')} pendingQuote={pendingNoteQuote} onQuoteConsumed={() => setPendingNoteQuote(null)} /> : historyOpen ? <section className="history-view">
             <div className="history-header"><div><p>Conversations</p><h2>Chat history</h2><span>{conversations.length} saved for this paper</span></div><button type="button" onClick={() => setHistoryOpen(false)} aria-label="Close chat history">×</button></div>
             <button type="button" className="new-chat-card" onClick={() => void createNewConversation()}><span>＋</span><div><strong>Start a new chat</strong><small>Uses your current default model</small></div><i>→</i></button>
             <div className="history-list">{conversations.map((item) => <article className={`history-card${item.id === activeConversation?.id ? ' current' : ''}`} key={item.id}>{renamingChatId === item.id ? <form className="chat-title-form history-title-form" onSubmit={(event) => void renameConversation(event, item)}><input autoFocus value={chatTitleValue} maxLength={200} aria-label="Chat title" onChange={(event) => setChatTitleValue(event.target.value)} onKeyDown={(event) => { if (event.key === 'Escape') setRenamingChatId(null); }} /><button type="submit" disabled={!chatTitleValue.trim() || titleSaving}>Save</button><button type="button" onClick={() => setRenamingChatId(null)}>Cancel</button></form> : <button type="button" className="history-card-main" onClick={() => void openConversation(item)}><div className="history-card-top"><span className="history-model-mark">✦</span><time>{formatConversationDate(item.updated_at)}</time></div><strong>{item.title}</strong><p>{item.provider} · {item.model_id}</p><div className="history-card-meta"><span>{Math.ceil(item.message_count / 2)} {Math.ceil(item.message_count / 2) === 1 ? 'exchange' : 'exchanges'}</span><span>{item.context_builder_version === 'quick-ask-v1' ? 'Selection only' : 'Full paper'}</span>{item.id === activeConversation?.id && <em>Current</em>}</div></button>}<div className="history-card-actions"><button type="button" aria-label={`Rename ${item.title}`} title="Rename chat" onClick={() => beginChatRename(item)}>✎</button>{item.message_count > 0 && <button type="button" aria-label={`Regenerate title for ${item.title}`} title="Regenerate title with the model selected in Settings" disabled={titleSaving} onClick={() => void regenerateConversationTitle(item)}>↻</button>}<button type="button" className="history-delete" aria-label={`Delete ${item.title}`} title="Delete chat" onClick={() => void deleteConversation(item)}><TrashIcon /></button></div></article>)}</div>
           </section> : <>
             <div className="conversation-header"><div>{activeConversation && renamingChatId === activeConversation.id ? <form className="chat-title-form" onSubmit={(event) => void renameConversation(event, activeConversation)}><input autoFocus value={chatTitleValue} maxLength={200} aria-label="Chat title" onChange={(event) => setChatTitleValue(event.target.value)} onKeyDown={(event) => { if (event.key === 'Escape') setRenamingChatId(null); }} /><button type="submit" disabled={!chatTitleValue.trim() || titleSaving}>Save</button></form> : <button type="button" className="chat-title-button" title="Rename chat" onClick={() => activeConversation && beginChatRename(activeConversation)}><strong>{activeConversation?.title ?? 'Loading chat…'}</strong><span>✎</span></button>}<small>{activeConversation ? `${activeConversation.provider} · ${activeConversation.model_id}` : 'Preparing paper context'}</small></div><div className="conversation-actions">{activeConversation && activeConversation.message_count > 0 && <button type="button" disabled={titleSaving} onClick={() => void regenerateConversationTitle(activeConversation)} title="Regenerate title with the model selected in Settings"><span>↻</span> Title</button>}<button type="button" onClick={() => void createNewConversation()} title="Start a new chat"><span>＋</span> New</button><button type="button" onClick={() => setHistoryOpen(true)}><span>☰</span> History</button></div></div>
             <div className="chat-body" ref={chatBodyRef} onWheelCapture={(event) => { if (event.deltaY < 0) pauseChatFollow(); }} onTouchMove={pauseChatFollow} onPointerDown={(event) => { if (event.target === event.currentTarget) pauseChatFollow(); }} onScroll={(event) => { const element = event.currentTarget; followOutputRef.current = element.scrollHeight - element.scrollTop - element.clientHeight < 40; }}><div className="chat-heading"><span className="spark">✦</span><div><strong>{activeConversation?.context_builder_version === 'quick-ask-v1' ? 'Saved Quick Ask' : 'Ask about this paper'}</strong><p>{activeConversation?.context_builder_version === 'quick-ask-v1' ? 'This saved thread uses only its original selection and Quick Ask prompt.' : 'The full paper is available automatically. Select text only when you want to focus the answer.'}</p></div></div>{chatConfigured === false && <button type="button" className="no-key-notice" onClick={() => setSettingsOpen(true)}><strong>No API key configured</strong><span>Choose a provider and add a key in Settings to enable chat.</span></button>}
-              {chatHistory.map((turn) => <div className="chat-turn" key={turn.id}>{turn.importedQuickAsk && <div className="quick-import-badge">✦ Saved Quick Ask · selection only</div>}<ContextList selections={turn.context} />{activeConversation && turn.context.some((item) => item.rects?.length) && <button type="button" className={`turn-link-button${isAiLinked(activeConversation.id, turn.question) ? ' linked' : ''}`} onClick={() => void toggleAiLink(activeConversation, turn.question, turn.context)}>{isAiLinked(activeConversation.id, turn.question) ? '✦ Linked to PDF · click to unlink' : '✦ Link reference to PDF'}</button>}<div className="user-message"><span>You</span><p>{turn.question}</p></div><div className="answer-card complete"><div className="answer-meta"><span>Adam</span><span className="stream-state">Done</span></div><MarkdownAnswer web={turn.web}>{turn.answer}</MarkdownAnswer><WebEvidence web={turn.web} /></div></div>)}
+              {chatHistory.map((turn) => <div className={`chat-turn${linkedTurn?.conversationId === activeConversation?.id && linkedTurn?.question === turn.question ? ' linked-turn' : ''}`} data-question={turn.question} tabIndex={-1} key={turn.id}>{turn.importedQuickAsk && <div className="quick-import-badge">✦ Saved Quick Ask · selection only</div>}<ContextList selections={turn.context} />{activeConversation && turn.context.some((item) => item.rects?.length) && <button type="button" className={`turn-link-button${isAiLinked(activeConversation.id, turn.question) ? ' linked' : ''}`} onClick={() => void toggleAiLink(activeConversation, turn.question, turn.context)}>{isAiLinked(activeConversation.id, turn.question) ? '✦ Linked to PDF · click to unlink' : '✦ Link reference to PDF'}</button>}<div className="user-message"><span>You</span><p>{turn.question}</p></div><div className="answer-card complete"><div className="answer-meta"><span>Adam</span><span className="stream-state">Done</span></div><MarkdownAnswer web={turn.web}>{turn.answer}</MarkdownAnswer><WebEvidence web={turn.web} /></div></div>)}
               {submittedQuestion && <><ContextList selections={submittedContext} />{activeConversation && streamStatus === 'complete' && submittedContext.some((item) => item.rects?.length) && <button type="button" className={`turn-link-button${isAiLinked(activeConversation.id, submittedQuestion) ? ' linked' : ''}`} onClick={() => void toggleAiLink(activeConversation, submittedQuestion, submittedContext)}>{isAiLinked(activeConversation.id, submittedQuestion) ? '✦ Linked to PDF · click to unlink' : '✦ Link reference to PDF'}</button>}<div className="user-message"><span>You</span><p>{submittedQuestion}</p></div></>}
               {streamStatus !== 'idle' && streamStatus !== 'error' && <div className={`answer-card ${streamStatus}`} aria-live="polite"><div className="answer-meta"><span>Adam</span><span className="stream-state">{streamStatus === 'connecting' ? <>Thinking<span className="thinking-dots"><i /><i /><i /></span></> : streamStatus === 'streaming' ? 'Responding…' : 'Done'}</span></div>{searchNotice && <p className="search-notice" role="status">{searchNotice}</p>}{answer ? <MarkdownAnswer web={answerWeb} streaming={streamStatus === 'streaming'}>{answer}</MarkdownAnswer> : <div className="answer-skeleton"><i /><i /><i /></div>}<WebEvidence web={answerWeb} /></div>}{error && <p className="error-banner compact">{error}</p>}
               {contextSelections.length > 0 ? <ContextList selections={contextSelections} onRemove={(id) => setContextSelections((current) => current.filter((item) => item.id !== id))} /> : !submittedQuestion && chatHistory.length === 0 && <div className="empty-context"><span>✦</span><p>Ask anything about the paper, or select a passage for precise focus.</p></div>}
@@ -1446,6 +1498,93 @@ export default function Home() {
       {paperSearchOpen && <LibrarySpotlight onBrowseFolder={(folderId) => { window.localStorage.setItem('adam.libraryLocation', folderId); setLibraryNavigation((value) => value + 1); setPaperSearchOpen(false); returnToLibrary(); }} papers={papers} onClose={() => setPaperSearchOpen(false)} onOpen={(paper) => { setPaperSearchOpen(false); openPaper(paper); }} />}
     </main>
   );
+}
+
+function LinkedPassageReveal({ entry, viewerRef }: { entry: HighlightEntry; viewerRef: React.RefObject<HTMLDivElement | null> }) {
+  const targetRef = useRef<HTMLDivElement>(null);
+  const [visible, setVisible] = useState(false);
+  const first = entry.rects[0];
+
+  useEffect(() => {
+    const target = targetRef.current;
+    const viewer = viewerRef.current;
+    if (!target || !viewer) return;
+    let seen = false;
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    // Wait until the jump brings the passage into view before starting its fade.
+    const observer = new IntersectionObserver(([result]) => {
+      if (result.isIntersecting && !seen) {
+        seen = true;
+        setVisible(true);
+        timer = setTimeout(() => setVisible(false), 3800);
+      } else if (!result.isIntersecting && seen) {
+        setVisible(false);
+        clearTimeout(timer);
+        observer.disconnect();
+      }
+    }, { root: viewer, threshold: .1 });
+    observer.observe(target);
+    return () => { observer.disconnect(); clearTimeout(timer); };
+  }, [viewerRef]);
+
+  if (!first) return null;
+  return <>
+    <div className="linked-passage-target" ref={targetRef} aria-hidden="true" style={{ left: `${first.left * 100}%`, top: `${first.top * 100}%`, width: `${first.width * 100}%`, height: `${first.height * 100}%` }} />
+    {visible && <>
+      {entry.rects.map((rect, index) => <div className="linked-passage-flash" aria-hidden="true" key={index} style={{ left: `${rect.left * 100}%`, top: `${rect.top * 100}%`, width: `${rect.width * 100}%`, height: `${rect.height * 100}%` }} />)}
+      <div className="linked-passage-toast" role="status" style={{ left: `${Math.min(.65, Math.max(.03, first.left)) * 100}%`, top: `${first.top * 100}%` }}><span aria-hidden="true">✦</span><div><strong>Linked passage</strong><small>Page {entry.page} · Chat reference</small></div></div>
+    </>}
+  </>;
+}
+
+function ChatLinksPanel({ entries, conversations, activeConversationId, revealedLinkId, onShowInPdf, onOpen }: {
+  entries: HighlightEntry[];
+  conversations: Conversation[];
+  activeConversationId?: string;
+  revealedLinkId: string | null;
+  onShowInPdf: (entry: HighlightEntry) => void;
+  onOpen: (link: AiNoteLink) => Promise<void>;
+}) {
+  const [query, setQuery] = useState('');
+  const [opening, setOpening] = useState<string | null>(null);
+  const links = entries.filter((entry) => entry.ai_links?.length)
+    .sort((a, b) => (a.page ?? 0) - (b.page ?? 0) || compareNotePosition(a, b))
+    .flatMap((entry) => entry.ai_links!.map((link, index) => ({
+      entry, link, id: `${entry.id}-${index}`,
+      title: conversations.find((conversation) => conversation.id === link.conversation_id)?.title ?? link.title,
+    })));
+  const search = query.trim().toLowerCase();
+  const filtered = links.filter(({ entry, link, title }) => `${title} ${link.question} ${entry.text} page ${entry.page}`.toLowerCase().includes(search));
+  const pageCount = new Set(links.map(({ entry }) => entry.page)).size;
+
+  async function open(link: AiNoteLink, id: string) {
+    setOpening(id);
+    try { await onOpen(link); } finally { setOpening(null); }
+  }
+
+  return <section className="chat-links-panel" aria-label="Document chat links">
+    <header className="chat-links-header">
+      <div className="chat-links-kicker">✦ Connected to this paper</div>
+      <h2>Chat links</h2>
+      <p>{links.length} {links.length === 1 ? 'link' : 'links'} across {pageCount} {pageCount === 1 ? 'page' : 'pages'}. Preview a linked passage in the PDF, or open its chat.</p>
+      {links.length > 0 && <div className="chat-links-search"><span aria-hidden="true">⌕</span><input type="search" aria-label="Search chat links" placeholder="Search questions, passages, or chats…" value={query} onChange={(event) => setQuery(event.target.value)} /></div>}
+    </header>
+    <div className="chat-links-list">
+      {links.length === 0 ? <div className="chat-links-empty"><span aria-hidden="true">✦</span><h3>No chat links yet</h3><p>Select a passage and ask a question, then choose “Link reference to PDF” in the chat. Your linked questions will appear here.</p></div> : filtered.length === 0 ? <div className="chat-links-empty"><h3>No matching links</h3><p>Try another question, chat title, passage, or page number.</p><button type="button" onClick={() => setQuery('')}>Clear search</button></div> : filtered.map(({ entry, link, title, id }, index) => <div key={id}>
+        {(index === 0 || filtered[index - 1].entry.page !== entry.page) && <h3 className="chat-links-page">Page {entry.page}</h3>}
+        <article className={`chat-link-card${revealedLinkId === entry.id ? ' source-revealed' : ''}`}>
+          <div className="chat-link-title"><span>{title}</span>{activeConversationId === link.conversation_id && <small>Current chat</small>}</div>
+          <strong>{link.question}</strong>
+          <blockquote>{entry.text}</blockquote>
+          <div className="chat-link-actions">
+            <button type="button" className="show-link-in-pdf" aria-label={`Show in PDF: ${link.question}`} aria-pressed={revealedLinkId === entry.id} onClick={() => onShowInPdf(entry)}>Show in PDF <span aria-hidden="true">↗</span></button>
+            <button type="button" className="open-linked-chat" aria-label={`Open chat: ${link.question}`} disabled={opening !== null} onClick={() => void open(link, id)}>{opening === id ? 'Opening…' : 'Open chat'} <span aria-hidden="true">→</span></button>
+          </div>
+        </article>
+      </div>)}
+    </div>
+    {links.length > 0 && <footer className="chat-links-footer">{search ? `${filtered.length} of ${links.length} links` : 'In document order · linked to PDF passages'}</footer>}
+  </section>;
 }
 
 function compareNotePosition(a: HighlightEntry, b: HighlightEntry) {

@@ -603,15 +603,6 @@ async def chat_stream(conversation_id: str, request: ChatRequest, db: Session = 
         conversation.title = request.question.strip()[:80]
     db.commit()
 
-    if should_generate_title:
-        try:
-            conversation.title = await generate_configured_title(f"User: {request.question.strip()}", conversation.title)
-            db.commit()
-        except (httpx.HTTPError, ValueError, KeyError):
-            # A title must never prevent the actual chat request from succeeding.
-            db.rollback()
-            conversation = db.get(Conversation, conversation_id)
-
     model = conversation.model_id
     async def events() -> AsyncIterator[str]:
         complete = ""
@@ -664,7 +655,27 @@ async def chat_stream(conversation_id: str, request: ChatRequest, db: Session = 
                 stored = stream_db.get(Conversation, conversation.id)
                 if stored: stored.updated_at = datetime.now(timezone.utc)
                 stream_db.commit()
-            yield sse({"type": "completed", "web": web})
+            completed_title = conversation.title
+            if should_generate_title:
+                # Resolve vague questions from the answer instead of naming the request.
+                transcript = f"User: {request.question.strip()[:8000]}"
+                if request.selected_text:
+                    transcript += f"\n\nSelected passage: {request.selected_text[:6000]}"
+                transcript += f"\n\nAssistant: {complete[:12000]}"
+                try:
+                    title = await generate_configured_title(transcript, conversation.title)
+                    with SessionLocal() as title_db:
+                        stored = title_db.get(Conversation, conversation.id)
+                        # Preserve a title the user changed while the answer streamed.
+                        if stored and stored.title == conversation.title:
+                            stored.title = title
+                            title_db.commit()
+                        if stored:
+                            completed_title = stored.title
+                except (httpx.HTTPError, ValueError, KeyError):
+                    # A failed title must never turn a saved answer into a chat error.
+                    pass
+            yield sse({"type": "completed", "web": web, "title": completed_title})
         except Exception as exc:
             yield sse({"type": "error", "message": str(exc)})
 
