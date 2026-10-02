@@ -46,9 +46,11 @@ const PROVIDERS: Array<{ id: ProviderId; name: string; keyLabel: string }> = [
   { id: 'google', name: 'Google', keyLabel: 'Google AI key' },
 ];
 const API_BASE = '';
-const MIN_ZOOM = .6;
-const MAX_ZOOM = 1.8;
-const DEFAULT_ZOOM = MAX_ZOOM;
+const MIN_ZOOM = .1;
+const MAX_ZOOM = 32;
+// Keep layout zoom independent of raster resolution to avoid enormous canvases.
+const BASE_RENDER_SCALE = 1.8;
+const DEFAULT_ZOOM = BASE_RENDER_SCALE;
 const MIN_CHAT_SCALE = 1;
 const MAX_CHAT_SCALE = 2;
 const CHAT_SCALE_STEP = .1;
@@ -142,7 +144,7 @@ export default function Home() {
   const autoScrollFrameRef = useRef<number | null>(null);
   const screenshotScrollFrameRef = useRef<number | null>(null);
   const screenshotPointerRef = useRef<{ x: number; y: number } | null>(null);
-  const pendingZoomRef = useRef<{ page: number; y: number } | null>(null);
+  const pendingZoomRef = useRef<{ page: number; x: number; y: number; viewportX: number; viewportY: number } | null>(null);
   const pendingAnswersRef = useRef(new Map<string, PendingAnswer>());
   const activeConversationIdRef = useRef<string | null>(null);
   const activePaperIdRef = useRef<string | null>(null);
@@ -151,6 +153,7 @@ export default function Home() {
   const annotationLoadRef = useRef(0);
   const quickAskRequestRef = useRef(0);
   const zoomRef = useRef(DEFAULT_ZOOM);
+  const fitZoomRef = useRef(true);
   const notesVisibleRef = useRef(false);
   const zoomBeforeNotesRef = useRef<number | null>(null);
   const highlightIdsRef = useRef<string[]>([]);
@@ -170,15 +173,19 @@ export default function Home() {
     }
   }, []);
 
-  const changeZoom = useCallback((delta: number) => {
+  const changeZoom = useCallback((delta: number, anchor?: { x: number; y: number }) => {
     const currentZoom = zoomRef.current;
     const nextZoom = Math.min(MAX_ZOOM, Math.max(MIN_ZOOM, Number((currentZoom + delta).toFixed(2))));
     if (nextZoom === currentZoom) return;
 
+    fitZoomRef.current = false;
     const viewer = viewerRef.current;
     if (viewer) {
       const viewerRect = viewer.getBoundingClientRect();
-      const centerY = viewerRect.top + viewer.clientHeight / 2;
+      const viewportX = anchor ? anchor.x - viewerRect.left : viewer.clientWidth / 2;
+      const viewportY = anchor ? anchor.y - viewerRect.top : viewer.clientHeight / 2;
+      const centerX = viewerRect.left + viewportX;
+      const centerY = viewerRect.top + viewportY;
       const pageElements = Array.from(viewer.querySelectorAll<HTMLElement>('[data-page-number]'));
       const focusedPage = pageElements.reduce<HTMLElement | null>((closest, page) => {
         const rect = page.getBoundingClientRect();
@@ -189,10 +196,13 @@ export default function Home() {
         return distance < closestDistance ? page : closest;
       }, null);
       if (focusedPage) {
-        const rect = focusedPage.getBoundingClientRect();
+        const rect = focusedPage.querySelector('.pdf-page-wrap')!.getBoundingClientRect();
         pendingZoomRef.current = {
           page: Number(focusedPage.dataset.pageNumber),
+          x: Math.min(1, Math.max(0, (centerX - rect.left) / rect.width)),
           y: Math.min(1, Math.max(0, (centerY - rect.top) / rect.height)),
+          viewportX,
+          viewportY,
         };
       }
     }
@@ -206,10 +216,11 @@ export default function Home() {
     if (!viewer) return;
     const styles = window.getComputedStyle(viewer);
     const horizontalPadding = parseFloat(styles.paddingLeft) + parseFloat(styles.paddingRight);
-    const availableWidth = viewer.clientWidth - horizontalPadding - (notesVisibleRef.current ? NOTE_RAIL_WIDTH : 0);
+    const availableWidth = viewer.clientWidth - horizontalPadding - 34 - (notesVisibleRef.current ? NOTE_RAIL_WIDTH : 0);
     if (availableWidth <= 0) return;
-    const fittedZoom = Math.min(MAX_ZOOM, Math.max(MIN_ZOOM, availableWidth / BASE_PAGE_WIDTH));
+    const fittedZoom = Math.min(MAX_ZOOM, Math.max(MIN_ZOOM, Math.floor(availableWidth / BASE_PAGE_WIDTH * 100) / 100));
     changeZoom(fittedZoom - zoomRef.current);
+    fitZoomRef.current = true;
   }, [changeZoom]);
 
   function toggleNotes() {
@@ -268,7 +279,7 @@ export default function Home() {
     const viewer = viewerRef.current;
     if (!viewer || !active) return;
     fitPaperToPane();
-    const observer = new ResizeObserver(fitPaperToPane);
+    const observer = new ResizeObserver(() => { if (fitZoomRef.current) fitPaperToPane(); });
     observer.observe(viewer);
     return () => observer.disconnect();
   }, [active, fitPaperToPane]);
@@ -298,9 +309,9 @@ export default function Home() {
     const page = viewer.querySelector<HTMLElement>(`[data-page-number="${focus.page}"]`);
     if (!page) return;
     const viewerRect = viewer.getBoundingClientRect();
-    const pageRect = page.getBoundingClientRect();
-    viewer.scrollTop += pageRect.top + focus.y * pageRect.height - (viewerRect.top + viewer.clientHeight / 2);
-    viewer.scrollLeft = 0;
+    const pageRect = page.querySelector('.pdf-page-wrap')!.getBoundingClientRect();
+    viewer.scrollTop += pageRect.top + focus.y * pageRect.height - (viewerRect.top + focus.viewportY);
+    viewer.scrollLeft += pageRect.left + focus.x * pageRect.width - (viewerRect.left + focus.viewportX);
     pendingZoomRef.current = null;
   }, [zoom]);
 
@@ -318,26 +329,22 @@ export default function Home() {
       // Browsers expose trackpad pinch as a wheel event with ctrlKey set.
       // Also support explicit Ctrl/Command + mouse-wheel zoom.
       if (!event.ctrlKey && !event.metaKey) {
-        if (event.shiftKey || Math.abs(event.deltaX) > Math.abs(event.deltaY)) {
+        // Shift + a vertical mouse wheel pans horizontally; trackpads use deltaX.
+        if (event.shiftKey && event.deltaX === 0) {
           event.preventDefault();
-          viewer.scrollLeft = 0;
+          viewer.scrollLeft += event.deltaY;
         }
         return;
       }
       event.preventDefault();
-      const direction = event.deltaY < 0 ? 1 : -1;
-      const magnitude = Math.min(.12, Math.max(.02, Math.abs(event.deltaY) / 500));
-      changeZoom(direction * magnitude);
-    };
-    const lockHorizontalPosition = () => {
-      if (viewer.scrollLeft !== 0) viewer.scrollLeft = 0;
+      if (event.deltaY === 0) return;
+      const factor = Math.exp(-Math.max(-100, Math.min(100, event.deltaY)) * .005);
+      changeZoom(zoomRef.current * (factor - 1), { x: event.clientX, y: event.clientY });
     };
 
     viewer.addEventListener('wheel', handleViewerWheel, { passive: false });
-    viewer.addEventListener('scroll', lockHorizontalPosition, { passive: true });
     return () => {
       viewer.removeEventListener('wheel', handleViewerWheel);
-      viewer.removeEventListener('scroll', lockHorizontalPosition);
     };
   }, [active, changeZoom]);
 
@@ -1404,11 +1411,11 @@ export default function Home() {
 
   return (
     <main className="reader-shell">
-      <header className="reader-header"><button className="brand-button" onClick={returnToLibrary} aria-label="Back to library"><Brand /></button><div className="document-title">{renaming ? <form onSubmit={(event) => void renamePaper(event)}><input autoFocus aria-label="PDF filename" value={renameValue} maxLength={512} onChange={(event) => setRenameValue(event.target.value)} onKeyDown={(event) => { if (event.key === 'Escape') setRenaming(false); }} disabled={renameSaving} /><button type="submit" disabled={!renameValue.trim() || renameSaving}>{renameSaving ? 'Saving…' : 'Save'}</button></form> : <button type="button" className="document-title-button" title="Rename PDF" onClick={() => { setRenameValue(active.original_name.replace(/\.pdf$/i, '')); setRenaming(true); }}><strong>{active.original_name.replace(/\.pdf$/i, '')}</strong><span aria-hidden="true">✎</span></button>}<span>{pages || active.page_count} pages · local</span></div><div className="reader-header-tools"><button type="button" className={`note-view-button${notesVisible ? ' active' : ''}`} onClick={toggleNotes} title={notesVisible ? 'Hide anchored notes' : 'View anchored notes'}><span>▰</span>{notesVisible ? 'Hide notes' : 'View notes'}<strong>{highlightEntries.filter((entry) => entry.note_text).length}</strong></button><div className="paper-zoom"><span className="control-label">Paper</span><div className="header-actions" role="group" aria-label="Paper zoom"><button title="Zoom paper out" aria-label="Zoom paper out" disabled={zoom <= MIN_ZOOM} onClick={() => changeZoom(-.1)}>−</button><span>{Math.round(zoom * 100)}%</span><button title="Zoom paper in" aria-label="Zoom paper in" disabled={zoom >= MAX_ZOOM} onClick={() => changeZoom(.1)}>+</button></div></div><button type="button" className="reader-delete-button" aria-label="Delete paper" title="Delete paper" onClick={() => void deletePaper(active)}><TrashIcon /></button><SettingsButton compact onClick={() => setSettingsOpen(true)} /></div></header>
+      <header className="reader-header"><button className="brand-button" onClick={returnToLibrary} aria-label="Back to library"><Brand /></button><div className="document-title">{renaming ? <form onSubmit={(event) => void renamePaper(event)}><input autoFocus aria-label="PDF filename" value={renameValue} maxLength={512} onChange={(event) => setRenameValue(event.target.value)} onKeyDown={(event) => { if (event.key === 'Escape') setRenaming(false); }} disabled={renameSaving} /><button type="submit" disabled={!renameValue.trim() || renameSaving}>{renameSaving ? 'Saving…' : 'Save'}</button></form> : <button type="button" className="document-title-button" title="Rename PDF" onClick={() => { setRenameValue(active.original_name.replace(/\.pdf$/i, '')); setRenaming(true); }}><strong>{active.original_name.replace(/\.pdf$/i, '')}</strong><span aria-hidden="true">✎</span></button>}<span>{pages || active.page_count} pages · local</span></div><div className="reader-header-tools"><button type="button" className={`note-view-button${notesVisible ? ' active' : ''}`} onClick={toggleNotes} title={notesVisible ? 'Hide anchored notes' : 'View anchored notes'}><span>▰</span>{notesVisible ? 'Hide notes' : 'View notes'}<strong>{highlightEntries.filter((entry) => entry.note_text).length}</strong></button><div className="paper-zoom"><span className="control-label">Paper</span><div className="header-actions" role="group" aria-label="Paper zoom"><button title="Zoom paper out" aria-label="Zoom paper out" disabled={zoom <= MIN_ZOOM} onClick={() => changeZoom(zoom * (1 / 1.2 - 1))}>−</button><button className="zoom-reset" title="Reset paper zoom to 100%" aria-label="Reset paper zoom to 100%" onClick={() => changeZoom(1 - zoomRef.current)}>{Math.round(zoom * 100)}%</button><button title="Zoom paper in" aria-label="Zoom paper in" disabled={zoom >= MAX_ZOOM} onClick={() => changeZoom(zoom * .2)}>+</button><button className="zoom-fit" title="Fit paper to pane" aria-label="Fit paper to pane" onClick={fitPaperToPane}>Fit</button></div></div><button type="button" className="reader-delete-button" aria-label="Delete paper" title="Delete paper" onClick={() => void deletePaper(active)}><TrashIcon /></button><SettingsButton compact onClick={() => setSettingsOpen(true)} /></div></header>
       <div className={`reader-workspace${notesVisible ? ' notes-mode' : ''}`} ref={workspaceRef} style={{ gridTemplateColumns: `minmax(0, ${paperPercent}fr) minmax(340px, ${100 - paperPercent}fr)` }}>
         <section className={`pdf-pane${screenshotMode ? ' screenshot-mode' : ''}`} ref={viewerRef} onMouseUp={(event) => { if (!screenshotMode) captureSelection(event); }} onPointerDown={beginScreenshot} onPointerMove={moveScreenshot} onPointerUp={finishScreenshot} onPointerCancel={() => { screenshotPointerRef.current = null; setScreenshotDrag(null); setScreenshotMode(false); }}>
           <PdfDocument file={`${API_BASE}/api/documents/${active.id}/file`} onLoadSuccess={({ numPages }) => setPages(numPages)} loading={<div className="viewer-message">Rendering paper…</div>} error={<div className="viewer-message error-banner">Could not render this PDF.</div>}>
-            {Array.from({ length: pages }, (_, index) => { const pageEntries = highlightEntries.filter((entry) => entry.page === index + 1); const pageNotes = pageEntries.filter((entry) => entry.note_text).sort(compareNotePosition); const aiNotes = pageEntries.filter((entry) => entry.ai_links?.length).sort(compareNotePosition); const markers = pageEntries.filter((entry) => entry.note_text || entry.ai_links?.length).sort(compareNotePosition); const pageScale = zoom / MAX_ZOOM; return <div className="pdf-page-stage" data-page-number={index + 1} key={index + 1}><div className="pdf-page-wrap" style={{ zoom: pageScale, '--page-scale': pageScale } as CSSProperties}><PdfPageWithHighlights pageNumber={index + 1} highlights={pageEntries} />{aiNotes.map((note) => <button type="button" className="ai-note-anchor" style={{ top: `${noteMarkerTop(markers, markers.indexOf(note)) * 100}%` }} title={`${note.ai_links!.length} linked AI ${note.ai_links!.length === 1 ? 'note' : 'notes'}`} aria-label="Open linked AI notes" onClick={() => setSelectedAiNote(note)} key={`ai-${note.id}`}>✦<small>{note.ai_links!.length}</small></button>)}{!notesVisible && pageNotes.map((note) => <button type="button" className="note-anchor" style={{ top: `${noteMarkerTop(markers, markers.indexOf(note)) * 100}%`, '--note-color': note.color } as CSSProperties} title="Open note" aria-label="Open note" onClick={() => openSavedNote(note)} key={note.id}>▰</button>)}{notesVisible && <aside className="page-notes" aria-label={`Notes for page ${index + 1}`}>{pageNotes.map((note, noteIndex) => <button type="button" className="page-note-card" style={{ top: `${noteCardTop(pageNotes, noteIndex) * 100}%`, '--note-color': note.color } as CSSProperties} onClick={() => openSavedNote(note)} key={note.id}><span>Page {index + 1}</span><p>{note.note_text}</p><small>{note.text}</small></button>)}</aside>}<span className="page-label">{index + 1}</span></div></div>; })}
+            {Array.from({ length: pages }, (_, index) => { const pageEntries = highlightEntries.filter((entry) => entry.page === index + 1); const pageNotes = pageEntries.filter((entry) => entry.note_text).sort(compareNotePosition); const aiNotes = pageEntries.filter((entry) => entry.ai_links?.length).sort(compareNotePosition); const markers = pageEntries.filter((entry) => entry.note_text || entry.ai_links?.length).sort(compareNotePosition); const pageScale = zoom / BASE_RENDER_SCALE; return <div className="pdf-page-stage" data-page-number={index + 1} key={index + 1}><div className="pdf-page-wrap" style={{ zoom: pageScale, '--page-scale': pageScale } as CSSProperties}><PdfPageWithHighlights pageNumber={index + 1} highlights={pageEntries} zoom={zoom} />{aiNotes.map((note) => <button type="button" className="ai-note-anchor" style={{ top: `${noteMarkerTop(markers, markers.indexOf(note)) * 100}%` }} title={`${note.ai_links!.length} linked AI ${note.ai_links!.length === 1 ? 'note' : 'notes'}`} aria-label="Open linked AI notes" onClick={() => setSelectedAiNote(note)} key={`ai-${note.id}`}>✦<small>{note.ai_links!.length}</small></button>)}{!notesVisible && pageNotes.map((note) => <button type="button" className="note-anchor" style={{ top: `${noteMarkerTop(markers, markers.indexOf(note)) * 100}%`, '--note-color': note.color } as CSSProperties} title="Open note" aria-label="Open note" onClick={() => openSavedNote(note)} key={note.id}>▰</button>)}{notesVisible && <aside className="page-notes" aria-label={`Notes for page ${index + 1}`}>{pageNotes.map((note, noteIndex) => <button type="button" className="page-note-card" style={{ top: `${noteCardTop(pageNotes, noteIndex) * 100}%`, '--note-color': note.color } as CSSProperties} onClick={() => openSavedNote(note)} key={note.id}><span>Page {index + 1}</span><p>{note.note_text}</p><small>{note.text}</small></button>)}</aside>}<span className="page-label">{index + 1}</span></div></div>; })}
           </PdfDocument>
           {screenshotMode && !screenshotDrag && <div className="screenshot-hint">Drag over the PDF to ask about it · Esc to cancel</div>}
           {screenshotDrag && <div className="screenshot-region" style={{ left: screenshotDrag.overlayLeft, top: screenshotDrag.overlayTop, width: screenshotDrag.overlayWidth, height: screenshotDrag.overlayHeight }} />}
@@ -1524,9 +1531,24 @@ function ContextList({ selections, onRemove }: { selections: ContextSelection[];
   return <div className="context-list"><div className="context-list-heading"><span>Context</span><small>{selections.length} {selections.length === 1 ? 'item' : 'items'}</small></div>{selections.map((selection, index) => <div className={`selection-card${selection.imageDataUrl ? ' image-context' : ''}`} key={selection.id}><div><span>{selection.imageDataUrl ? 'Screenshot' : 'Excerpt'} {index + 1}{selection.page ? ` · ${selection.pageEnd && selection.pageEnd !== selection.page ? `pages ${selection.page}–${selection.pageEnd}` : `page ${selection.page}`}` : ''}</span>{onRemove && <button type="button" aria-label={`Remove context item ${index + 1}`} onClick={() => onRemove(selection.id)}>×</button>}</div>{selection.imageDataUrl ? <img src={selection.imageDataUrl} alt={`Selected area from page ${selection.page ?? ''}`} /> : <blockquote>{selection.text}</blockquote>}</div>)}</div>;
 }
 
-function PdfPageWithHighlights({ pageNumber, highlights }: { pageNumber: number; highlights: HighlightEntry[] }) {
+function PdfPageWithHighlights({ pageNumber, highlights, zoom }: { pageNumber: number; highlights: HighlightEntry[]; zoom: number }) {
+  const [visible, setVisible] = useState(false);
+  const [pageHeight, setPageHeight] = useState<number>();
   const [renderVersion, setRenderVersion] = useState(0);
   const pageElementRef = useRef<HTMLDivElement>(null);
+  // Upgrade only pages near the viewport; cap raster size even at extreme zoom.
+  // CSS zoom keeps the page, text, annotations, and note geometry in sync.
+  useEffect(() => {
+    const element = pageElementRef.current;
+    if (!element) return;
+    const observer = new IntersectionObserver(([entry]) => setVisible(entry.isIntersecting), {
+      root: element.closest('.pdf-pane'), rootMargin: '200px',
+    });
+    observer.observe(element);
+    return () => observer.disconnect();
+  }, []);
+  const renderScale = visible ? Math.max(BASE_RENDER_SCALE, Math.min(zoom, 4)) : BASE_RENDER_SCALE;
+  const pixelRatio = Math.min(typeof window === 'undefined' ? 1 : window.devicePixelRatio, 4 / renderScale);
   const pdfPageRef = useRef<PDFPageProxy | null>(null);
   const textContentRef = useRef<TextContent | null>(null);
   const handleRenderSuccess = useCallback(() => setRenderVersion((version) => version + 1), []);
@@ -1556,7 +1578,7 @@ function PdfPageWithHighlights({ pageNumber, highlights }: { pageNumber: number;
       }
     });
   }, []);
-  return <Page inputRef={pageElementRef} pageNumber={pageNumber} width={BASE_PAGE_WIDTH * MAX_ZOOM} renderAnnotationLayer renderTextLayer onLoadSuccess={(page) => { pdfPageRef.current = page; }} onGetTextSuccess={(content) => { textContentRef.current = content; }} onRenderTextLayerSuccess={alignTextLayer} onRenderSuccess={handleRenderSuccess}><HighlightCanvas highlights={highlights} renderVersion={renderVersion} /></Page>;
+  return <div style={{ width: BASE_PAGE_WIDTH * BASE_RENDER_SCALE, height: pageHeight }}><div style={{ zoom: BASE_RENDER_SCALE / renderScale }}><Page inputRef={pageElementRef} pageNumber={pageNumber} width={BASE_PAGE_WIDTH * renderScale} devicePixelRatio={pixelRatio} renderAnnotationLayer renderTextLayer onLoadSuccess={(page) => { pdfPageRef.current = page; const viewport = page.getViewport({ scale: 1 }); setPageHeight(BASE_PAGE_WIDTH * BASE_RENDER_SCALE * viewport.height / viewport.width); }} onGetTextSuccess={(content) => { textContentRef.current = content; }} onRenderTextLayerSuccess={alignTextLayer} onRenderSuccess={handleRenderSuccess}><HighlightCanvas highlights={highlights} renderVersion={renderVersion} /></Page></div></div>;
 }
 
 function HighlightCanvas({ highlights, renderVersion }: { highlights: HighlightEntry[]; renderVersion: number }) {
