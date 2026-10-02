@@ -15,10 +15,20 @@ def utcnow() -> datetime:
     return datetime.now(timezone.utc)
 
 
+class Folder(Base):
+    __tablename__ = "folders"
+
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=new_id)
+    name: Mapped[str] = mapped_column(String(80), unique=True)
+    color: Mapped[str] = mapped_column(String(7), default="#8c9d65", server_default="#8c9d65")
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
+
+
 class Document(Base):
     __tablename__ = "documents"
 
     id: Mapped[str] = mapped_column(String(36), primary_key=True, default=new_id)
+    folder_id: Mapped[str | None] = mapped_column(ForeignKey("folders.id", ondelete="SET NULL"), index=True, nullable=True)
     sha256: Mapped[str] = mapped_column(String(64), unique=True, index=True)
     original_name: Mapped[str] = mapped_column(String(512))
     byte_size: Mapped[int] = mapped_column(Integer)

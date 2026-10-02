@@ -517,3 +517,83 @@ def test_title_model_settings_are_independent_of_chat_provider(monkeypatch) -> N
     assert len(titles) == 2
     assert all(model == "gemini-test" for model, _ in titles)
     client.put("/api/settings/title", json={"provider": "zen", "model": "gpt-6-luna"})
+
+
+def test_folder_organization_keeps_reader_data_and_moves_atomically() -> None:
+    first = client.post('/api/folders', json={'name': '  Folder lifecycle  '})
+    assert first.status_code == 201
+    folder = first.json()
+    assert folder['name'] == 'Folder lifecycle'
+    assert client.post('/api/folders', json={'name': 'folder lifecycle'}).status_code == 409
+    assert client.post('/api/folders', json={'name': '   '}).status_code == 422
+    assert client.patch(f"/api/folders/{folder['id']}", json={'name': 'Reading group'}).status_code == 200
+    pdf_bytes = sample_pdf('Folder organization preserves the paper.')
+    paper = client.post('/api/documents', files={'file': ('folders.pdf', BytesIO(pdf_bytes), 'application/pdf')}).json()
+    assert paper['folder_id'] is None
+    note = client.put(f"/api/documents/{paper['id']}/paper-note", json={'content_html': '<p>Keep this note.</p>', 'plain_text': 'Keep this note.', 'revision': 0})
+    assert note.status_code == 200
+    move = {'document_ids': [paper['id']], 'folder_id': folder['id']}
+    assert client.post('/api/document-moves', json={**move, 'document_ids': [paper['id'], 'missing']}).status_code == 404
+    assert client.get(f"/api/documents/{paper['id']}").json()['folder_id'] is None
+    assert client.post('/api/document-moves', json={**move, 'folder_id': 'missing'}).status_code == 404
+    assert client.post('/api/document-moves', json=move).json()[0]['folder_id'] == folder['id']
+    assert client.get(f"/api/documents/{paper['id']}").json()['folder_id'] == folder['id']
+    assert client.post('/api/document-moves', json={**move, 'folder_id': None}).json()[0]['folder_id'] is None
+    assert client.post('/api/document-moves', json=move).status_code == 200
+    assert client.delete(f"/api/folders/{folder['id']}").status_code == 204
+    assert client.get(f"/api/documents/{paper['id']}").json()['folder_id'] is None
+    assert client.get(f"/api/documents/{paper['id']}/file").content == pdf_bytes
+    assert 'Folder organization preserves' in client.get(f"/api/documents/{paper['id']}/pages/1/text").json()['text']
+    assert client.get(f"/api/documents/{paper['id']}/paper-note").json()['plain_text'] == 'Keep this note.'
+    assert folder['id'] not in [item['id'] for item in client.get('/api/folders').json()]
+    client.delete(f"/api/documents/{paper['id']}")
+
+
+def test_folder_migration_preserves_existing_papers_and_children(tmp_path) -> None:
+    import sqlite3
+    import subprocess
+    import sys
+    from pathlib import Path
+
+    backend_root = Path(__file__).resolve().parents[1]
+    env = {**os.environ, 'ADAM_DATA_DIR': str(tmp_path)}
+    subprocess.run([sys.executable, '-m', 'alembic', 'upgrade', '0008_ai_note_links'], cwd=backend_root, env=env, check=True, capture_output=True)
+    path = tmp_path / 'database' / 'adam.sqlite3'
+    with sqlite3.connect(path) as db:
+        db.execute("INSERT INTO documents (id, sha256, original_name, byte_size, storage_path, page_count, status, created_at, updated_at) VALUES ('existing', 'hash', 'paper.pdf', 1, 'documents/paper.pdf', 1, 'ready', CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)")
+        db.execute("INSERT INTO pages (id, document_id, page_number, width_pt, height_pt, rotation, native_text) VALUES ('page', 'existing', 1, 595, 842, 0, 'Keep extracted text')")
+        db.execute("INSERT INTO paper_notes (document_id, content_html, plain_text, revision, created_at, updated_at) VALUES ('existing', '<p>Keep note</p>', 'Keep note', 1, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)")
+        db.execute("INSERT INTO conversations (id, document_id, title, provider, model_id, system_prompt, context_builder_version, created_at, updated_at) VALUES ('chat', 'existing', 'Keep chat', 'zen', 'model', '', 'full-paper-v1', CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)")
+        db.execute("INSERT INTO messages (id, document_id, conversation_id, role, content, created_at) VALUES ('message', 'existing', 'chat', 'user', 'Keep message', CURRENT_TIMESTAMP)")
+        db.execute("INSERT INTO annotations (id, document_id, page_number, kind, selected_text, color, geometry_json, created_at) VALUES ('highlight', 'existing', 1, 'highlight', 'Keep highlight', '#f8e58c', '[]', CURRENT_TIMESTAMP)")
+    subprocess.run([sys.executable, '-m', 'alembic', 'upgrade', '0009_folders'], cwd=backend_root, env=env, check=True, capture_output=True)
+    with sqlite3.connect(path) as db:
+        db.execute("INSERT INTO folders (id, name, created_at) VALUES ('old-folder', 'Existing folder', CURRENT_TIMESTAMP)")
+    subprocess.run([sys.executable, '-m', 'alembic', 'upgrade', 'head'], cwd=backend_root, env=env, check=True, capture_output=True)
+    with sqlite3.connect(path) as db:
+        assert db.execute('SELECT id, folder_id FROM documents').fetchall() == [('existing', None)]
+        for table in ['pages', 'paper_notes', 'conversations', 'messages', 'annotations']:
+            assert db.execute(f'SELECT COUNT(*) FROM {table}').fetchone()[0] == 1
+        assert db.execute('SELECT color FROM folders WHERE id = ?', ('old-folder',)).fetchone()[0] == '#8c9d65'
+        assert db.execute('PRAGMA foreign_key_check').fetchall() == []
+
+
+def test_folder_colors_are_validated_and_persist_across_rename() -> None:
+    created = client.post('/api/folders', json={'name': 'Palette lifecycle'})
+    assert created.status_code == 201
+    folder = created.json()
+    assert folder['color'] == '#8c9d65'
+    url = f"/api/folders/{folder['id']}"
+    saved = client.patch(url, json={'name': folder['name'], 'color': '#A13BCD'})
+    assert saved.status_code == 200
+    assert saved.json()['color'] == '#a13bcd'
+    renamed = client.patch(url, json={'name': 'Palette renamed'})
+    assert renamed.json()['color'] == '#a13bcd'
+    assert next(item for item in client.get('/api/folders').json() if item['id'] == folder['id'])['color'] == '#a13bcd'
+    for invalid in ['red', '#fff', '#12345678', 'var(--color)']:
+        assert client.patch(url, json={'name': 'Palette renamed', 'color': invalid}).status_code == 422
+    assert client.delete(url).status_code == 204
+    custom = client.post('/api/folders', json={'name': 'Custom palette', 'color': '#123456'})
+    assert custom.status_code == 201
+    assert custom.json()['color'] == '#123456'
+    client.delete(f"/api/folders/{custom.json()['id']}")
