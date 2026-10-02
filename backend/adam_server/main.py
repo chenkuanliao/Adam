@@ -13,8 +13,8 @@ import httpx
 
 from .config import Settings, get_settings
 from .database import SessionLocal, get_db, run_migrations
-from .models import Annotation, Conversation, Document, Message, ModelFavorite, Page, PaperNote
-from .schemas import AiNoteCreate, AiNoteUnlink, AnnotationIn, AnnotationOut, AnnotationUpdate, AppSettingsOut, AppSettingsUpdate, ChatRequest, ConversationCreate, ConversationDetail, ConversationOut, ConversationUpdate, DocumentOut, DocumentUpdate, ModelFavoriteUpdate, PageTextOut, PaperNoteOut, PaperNoteUpdate, ProviderKeyUpdate, ProviderModelsOut, QuickAskImportRequest, QuickAskRequest, TitleModelUpdate
+from .models import Annotation, Conversation, Document, Folder, Message, ModelFavorite, Page, PaperNote
+from .schemas import AiNoteCreate, AiNoteUnlink, AnnotationIn, AnnotationOut, AnnotationUpdate, AppSettingsOut, AppSettingsUpdate, ChatRequest, ConversationCreate, ConversationDetail, ConversationOut, ConversationUpdate, DocumentMove, DocumentOut, DocumentUpdate, FolderIn, FolderOut, ModelFavoriteUpdate, PageTextOut, PaperNoteOut, PaperNoteUpdate, ProviderKeyUpdate, ProviderModelsOut, QuickAskImportRequest, QuickAskRequest, TitleModelUpdate
 from .services.context import build_paper_context
 from .services.documents import document_file_path, ingest_pdf
 from .services.llm import AnthropicProvider, GoogleProvider, OpenAICompatibleProvider, OpenAIResponsesProvider, TITLE_SYSTEM_PROMPT, clean_title, generate_zen_title, sse
@@ -147,6 +147,70 @@ async def list_provider_models(provider: str, app_settings: Settings = Depends(g
         if provider == "openai" and not model_id.startswith(("gpt-", "o1", "o3", "o4")): continue
         if model_id: models.append(model_id)
     return ProviderModelsOut(provider=provider, models=sorted(set(models)))
+
+
+def validate_folder_name(name: str, db: Session, folder_id: str | None = None) -> str:
+    name = name.strip()
+    if not name or any(ord(char) < 32 for char in name):
+        raise HTTPException(422, "Enter a folder name.")
+    existing = db.scalar(select(Folder).where(func.lower(Folder.name) == name.lower()))
+    if existing and existing.id != folder_id:
+        raise HTTPException(409, "A folder with this name already exists.")
+    return name
+
+
+@app.get("/api/folders", response_model=list[FolderOut])
+def list_folders(db: Session = Depends(get_db)) -> list[Folder]:
+    return list(db.scalars(select(Folder).order_by(func.lower(Folder.name))))
+
+
+@app.post("/api/folders", response_model=FolderOut, status_code=201)
+def create_folder(request: FolderIn, db: Session = Depends(get_db)) -> Folder:
+    folder = Folder(name=validate_folder_name(request.name, db), color=(request.color or "#8c9d65").lower())
+    db.add(folder)
+    db.commit()
+    db.refresh(folder)
+    return folder
+
+
+@app.patch("/api/folders/{folder_id}", response_model=FolderOut)
+def rename_folder(folder_id: str, request: FolderIn, db: Session = Depends(get_db)) -> Folder:
+    folder = db.get(Folder, folder_id)
+    if not folder:
+        raise HTTPException(404, "Folder not found.")
+    folder.name = validate_folder_name(request.name, db, folder_id)
+    if request.color is not None:
+        folder.color = request.color.lower()
+    db.commit()
+    db.refresh(folder)
+    return folder
+
+
+@app.delete("/api/folders/{folder_id}", status_code=204)
+def delete_folder(folder_id: str, db: Session = Depends(get_db)) -> Response:
+    folder = db.get(Folder, folder_id)
+    if not folder:
+        raise HTTPException(404, "Folder not found.")
+    # Deleting an organizational folder always keeps its papers and reader data.
+    for document in db.scalars(select(Document).where(Document.folder_id == folder_id)):
+        document.folder_id = None
+    db.delete(folder)
+    db.commit()
+    return Response(status_code=204)
+
+
+@app.post("/api/document-moves", response_model=list[DocumentOut])
+def move_documents(request: DocumentMove, db: Session = Depends(get_db)) -> list[Document]:
+    if request.folder_id is not None and not db.get(Folder, request.folder_id):
+        raise HTTPException(404, "Destination folder not found.")
+    ids = set(request.document_ids)
+    documents = list(db.scalars(select(Document).where(Document.id.in_(ids))))
+    if len(documents) != len(ids):
+        raise HTTPException(404, "One or more papers no longer exist.")
+    for document in documents:
+        document.folder_id = request.folder_id
+    db.commit()
+    return documents
 
 
 @app.get("/api/documents", response_model=list[DocumentOut])

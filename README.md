@@ -5,6 +5,7 @@ Adam is a local-first, self-hosted research-paper reader with selection-aware AI
 The current vertical slice supports:
 
 - persistent local PDF upload and library
+- optional folders with bulk paper moves, folder-scoped uploads and search, and grid/list views; removing a folder keeps its papers, notes, and chats
 - in-browser PDF rendering and native text selection
 - local native-text extraction with PyMuPDF
 - durable per-paper chat histories with create, switch, delete, and reload restoration

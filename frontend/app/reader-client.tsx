@@ -8,6 +8,9 @@ import ReactMarkdown from 'react-markdown';
 import remarkGfm from 'remark-gfm';
 import remarkMath from 'remark-math';
 import rehypeKatex from 'rehype-katex';
+import ActionTooltips from './action-tooltips';
+import LibrarySpotlight from './library-spotlight';
+import LibraryDashboard, { type LibraryPaper } from './library-dashboard';
 import 'katex/dist/katex.min.css';
 import 'react-pdf/dist/Page/AnnotationLayer.css';
 import 'react-pdf/dist/Page/TextLayer.css';
@@ -16,7 +19,7 @@ import 'react-pdf/dist/Page/TextLayer.css';
 // injects the HMR browser client into the worker, where `window` is unavailable.
 pdfjs.GlobalWorkerOptions.workerSrc = '/pdf.worker.min.mjs';
 
-type Paper = { id: string; original_name: string; byte_size: number; page_count: number; status: string; created_at: string; updated_at: string };
+type Paper = LibraryPaper;
 type ContextSelection = { id: string; text: string; page: number | null; pageEnd?: number | null; imageDataUrl?: string; rects?: HighlightRect[] };
 type PendingSelection = ContextSelection & { x: number; y: number; range: Range };
 type QuickAskTarget = ContextSelection & { x: number; y: number };
@@ -123,9 +126,9 @@ export default function Home() {
   const [asking, setAsking] = useState(false);
   const [error, setError] = useState('');
   const [settingsOpen, setSettingsOpen] = useState(false);
-  const [paperQuery, setPaperQuery] = useState('');
-  const [paperSort, setPaperSort] = useState<'modified' | 'created' | 'title'>('modified');
+  const [libraryLoading, setLibraryLoading] = useState(true);
   const [paperSearchOpen, setPaperSearchOpen] = useState(false);
+  const [libraryNavigation, setLibraryNavigation] = useState(0);
   const [chatConfigured, setChatConfigured] = useState<boolean | null>(null);
   const [paneMode, setPaneMode] = useState<PaneMode>('chat');
   const [pendingNoteQuote, setPendingNoteQuote] = useState<ContextSelection | null>(null);
@@ -170,6 +173,8 @@ export default function Home() {
       setError('');
     } catch (reason) {
       setError(reason instanceof Error ? reason.message : 'The local service is unavailable.');
+    } finally {
+      setLibraryLoading(false);
     }
   }, []);
 
@@ -268,12 +273,12 @@ export default function Home() {
     const openPaperSearch = (event: KeyboardEvent) => {
       if ((event.metaKey || event.ctrlKey) && event.key.toLowerCase() === 'k') {
         event.preventDefault();
-        if (papers.length > 0) setPaperSearchOpen(true);
+        if (!document.querySelector('dialog[open]')) setPaperSearchOpen(true);
       }
     };
     window.addEventListener('keydown', openPaperSearch);
     return () => window.removeEventListener('keydown', openPaperSearch);
-  }, [papers.length]);
+  }, []);
 
   useLayoutEffect(() => {
     const viewer = viewerRef.current;
@@ -451,7 +456,7 @@ export default function Home() {
     window.localStorage.setItem('adam.paperPercent', String(DEFAULT_PAPER_PERCENT));
   }
 
-  async function upload(file: File) {
+  async function upload(file: File, folderId: string | null = null) {
     if (file.type !== 'application/pdf' && !file.name.toLowerCase().endsWith('.pdf')) {
       setError('Choose a PDF file.');
       return;
@@ -462,10 +467,13 @@ export default function Home() {
     body.append('file', file);
     try {
       const response = await fetch(`${API_BASE}/api/documents`, { method: 'POST', body });
-      const payload = await response.json();
+      const payload = await response.json() as Paper & { detail?: string };
       if (!response.ok) throw new Error(payload.detail ?? 'Upload failed.');
+      if (folderId && !payload.folder_id) {
+        const moved = await fetch(`${API_BASE}/api/document-moves`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ document_ids: [payload.id], folder_id: folderId }) });
+        if (!moved.ok) { await loadPapers(); throw new Error('PDF was uploaded, but could not be moved to this folder. Find it in All papers.'); }
+      }
       await loadPapers();
-      openPaper(payload);
     } catch (reason) {
       setError(reason instanceof Error ? reason.message : 'Upload failed.');
     } finally {
@@ -520,6 +528,46 @@ export default function Home() {
       setError(reason instanceof Error ? reason.message : 'Could not rename this PDF.');
     } finally {
       setRenameSaving(false);
+    }
+  }
+
+  function clearHighlights() {
+    const highlights = (CSS as typeof CSS & { highlights?: Map<string, Highlight> }).highlights;
+    highlightIdsRef.current.forEach((id) => highlights?.delete(id));
+    document.querySelectorAll('style[data-highlight-id^="adam-"]').forEach((style) => style.remove());
+    document.querySelectorAll('.react-pdf__Page > .pdf-highlight-mark').forEach((mark) => mark.remove());
+    highlightIdsRef.current = [];
+    highlightEntriesRef.current = [];
+    highlightUndoRef.current = [];
+    highlightRedoRef.current = [];
+    setHighlightEntries([]);
+  }
+
+  function paintHighlights(entries: HighlightEntry[]) {
+    // Remove marks from both the current rectangle renderer and the previous
+    // CSS Highlight implementation (the latter matters during hot reload).
+    const highlights = (CSS as typeof CSS & { highlights?: Map<string, Highlight> }).highlights;
+    highlightIdsRef.current.forEach((id) => highlights?.delete(id));
+    document.querySelectorAll('style[data-highlight-id^="adam-"]').forEach((style) => style.remove());
+    document.querySelectorAll('.react-pdf__Page > .pdf-highlight-mark').forEach((mark) => mark.remove());
+    highlightIdsRef.current = [];
+    setHighlightEntries(entries);
+  }
+
+  async function loadAnnotations(documentId: string) {
+    const loadId = ++annotationLoadRef.current;
+    try {
+      const response = await fetch(`${API_BASE}/api/documents/${documentId}/annotations`);
+      if (!response.ok) throw new Error('Could not load saved highlights.');
+      const annotations = await response.json() as Array<{ id: string; page: number; text: string; color: string; rects: HighlightRect[]; note_text?: string | null; ai_links?: AiNoteLink[] }>;
+      if (activePaperIdRef.current !== documentId || annotationLoadRef.current !== loadId) return;
+      const entries = annotations.map((item) => ({ ...item, range: null }));
+      highlightEntriesRef.current = entries;
+      highlightUndoRef.current = [];
+      highlightRedoRef.current = [];
+      paintHighlights(entries);
+    } catch (reason) {
+      if (activePaperIdRef.current === documentId && annotationLoadRef.current === loadId) setError(reason instanceof Error ? reason.message : 'Could not load saved highlights.');
     }
   }
 
@@ -681,27 +729,13 @@ export default function Home() {
   useEffect(() => {
     if (active || papers.length === 0) return;
     const saved = papers.find((paper) => paper.id === window.localStorage.getItem('adam.activePaper'));
+    // Restoring the saved workspace intentionally synchronizes reader state on mount.
+    // eslint-disable-next-line react-hooks/set-state-in-effect
     if (saved) openPaper(saved);
     // Workspace restoration intentionally runs only after the library changes.
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [papers]);
 
-  async function loadAnnotations(documentId: string) {
-    const loadId = ++annotationLoadRef.current;
-    try {
-      const response = await fetch(`${API_BASE}/api/documents/${documentId}/annotations`);
-      if (!response.ok) throw new Error('Could not load saved highlights.');
-      const annotations = await response.json() as Array<{ id: string; page: number; text: string; color: string; rects: HighlightRect[]; note_text?: string | null; ai_links?: AiNoteLink[] }>;
-      if (activePaperIdRef.current !== documentId || annotationLoadRef.current !== loadId) return;
-      const entries = annotations.map((item) => ({ ...item, range: null }));
-      highlightEntriesRef.current = entries;
-      highlightUndoRef.current = [];
-      highlightRedoRef.current = [];
-      paintHighlights(entries);
-    } catch (reason) {
-      if (activePaperIdRef.current === documentId && annotationLoadRef.current === loadId) setError(reason instanceof Error ? reason.message : 'Could not load saved highlights.');
-    }
-  }
 
   function captureSelection(event: React.MouseEvent<HTMLDivElement>) {
     const domSelection = window.getSelection();
@@ -1175,16 +1209,6 @@ export default function Home() {
     return lines.map((rect) => ({ left: (rect.left - pageRect.left) / pageRect.width, top: (rect.top - pageRect.top) / pageRect.height, width: (rect.right - rect.left) / pageRect.width, height: (rect.bottom - rect.top) / pageRect.height }));
   }
 
-  function paintHighlights(entries: HighlightEntry[]) {
-    // Remove marks from both the current rectangle renderer and the previous
-    // CSS Highlight implementation (the latter matters during hot reload).
-    const highlights = (CSS as typeof CSS & { highlights?: Map<string, Highlight> }).highlights;
-    highlightIdsRef.current.forEach((id) => highlights?.delete(id));
-    document.querySelectorAll('style[data-highlight-id^="adam-"]').forEach((style) => style.remove());
-    document.querySelectorAll('.react-pdf__Page > .pdf-highlight-mark').forEach((mark) => mark.remove());
-    highlightIdsRef.current = [];
-    setHighlightEntries(entries);
-  }
 
   function commitHighlights(next: HighlightEntry[]) {
     const previous = highlightEntriesRef.current;
@@ -1229,17 +1253,6 @@ export default function Home() {
     clearBrowserSelection();
   }
 
-  function clearHighlights() {
-    const highlights = (CSS as typeof CSS & { highlights?: Map<string, Highlight> }).highlights;
-    highlightIdsRef.current.forEach((id) => highlights?.delete(id));
-    document.querySelectorAll('style[data-highlight-id^="adam-"]').forEach((style) => style.remove());
-    document.querySelectorAll('.react-pdf__Page > .pdf-highlight-mark').forEach((mark) => mark.remove());
-    highlightIdsRef.current = [];
-    highlightEntriesRef.current = [];
-    highlightUndoRef.current = [];
-    highlightRedoRef.current = [];
-    setHighlightEntries([]);
-  }
 
   useEffect(() => {
     const handleHistoryHotkey = (event: KeyboardEvent) => {
@@ -1375,42 +1388,16 @@ export default function Home() {
   }
 
   const canAsk = chatConfigured !== false && Boolean(activeConversation);
-  const filteredPapers = papers.filter((paper) => paper.original_name.toLocaleLowerCase().includes(paperQuery.trim().toLocaleLowerCase())).toSorted((a, b) => {
-    if (paperSort === 'title') return a.original_name.localeCompare(b.original_name, undefined, { sensitivity: 'base' });
-    const field = paperSort === 'created' ? 'created_at' : 'updated_at';
-    return new Date(b[field]).getTime() - new Date(a[field]).getTime();
-  });
-
   if (!active) return (<>
-    <main className="library-shell">
-      <header className="library-header"><Brand /><div className="library-actions"><SettingsButton onClick={() => setSettingsOpen(true)} /><UploadButton uploading={uploading} upload={upload} /></div></header>
-      {papers.length === 0 ? <section className="library-content library-empty">
-        <p className="eyebrow">Your research desk</p><h1>Read closely. Ask instantly.</h1>
-        <p className="intro">Your papers and reading context stay on this machine. Select a passage and ask without breaking focus.</p>
-        <LibraryDropzone uploading={uploading} upload={upload} />{error && <p className="error-banner">{error}</p>}
-      </section> : <section className="dashboard-content">
-        <div className="dashboard-heading"><div><p className="eyebrow">Your research desk</p><h1>Paper library</h1><p>Pick up where you left off or add something new to read.</p></div><div className="paper-count"><strong>{papers.length}</strong><span>{papers.length === 1 ? 'paper' : 'papers'}</span></div></div>
-        <div className="library-toolbar"><div className="library-search"><span aria-hidden="true">⌕</span><input type="search" aria-label="Search paper titles" placeholder="Search paper titles…" value={paperQuery} onChange={(event) => setPaperQuery(event.target.value)} /><kbd>⌘ K</kbd></div><label className="library-sort"><span>Sort by</span><select aria-label="Sort papers" value={paperSort} onChange={(event) => setPaperSort(event.target.value as 'modified' | 'created' | 'title')}><option value="modified">Last modified</option><option value="created">Date added</option><option value="title">Title A–Z</option></select></label></div>
-        {error && <p className="error-banner">{error}</p>}
-        <div className="dashboard-grid">
-          {filteredPapers.map((paper) => <article className="paper-card" key={paper.id}>
-            <button className="paper-card-main" onClick={() => openPaper(paper)} aria-label={`Open ${paper.original_name}`}>
-              <PaperPreview paper={paper} />
-              <span className="paper-card-body"><span className="paper-card-format">PDF</span><strong>{paper.original_name.replace(/\.pdf$/i, '')}</strong><span className="paper-card-meta"><span>{paper.page_count} {paper.page_count === 1 ? 'page' : 'pages'}</span><i /> <span>{formatBytes(paper.byte_size)}</span></span><span className="paper-card-date"><small>Last modified</small>{formatPaperDate(paper.updated_at)}</span></span>
-            </button>
-            <button className="paper-card-delete" type="button" aria-label={`Delete ${paper.original_name}`} title="Delete paper" onClick={() => void deletePaper(paper)}><TrashIcon /></button>
-          </article>)}
-          {filteredPapers.length === 0 && <div className="paper-search-empty"><span>⌕</span><strong>No papers found</strong><p>Try a different title or clear your search.</p><button type="button" onClick={() => setPaperQuery('')}>Clear search</button></div>}
-          {!paperQuery && <label className="paper-card paper-card-add" onDragOver={(event) => event.preventDefault()} onDrop={(event) => { event.preventDefault(); const file = event.dataTransfer.files[0]; if (file) void upload(file); }}><span className="add-card-icon">+</span><strong>{uploading ? 'Processing paper…' : 'Add another paper'}</strong><span>Drop or choose a PDF</span><input type="file" accept="application/pdf" hidden disabled={uploading} onChange={(event) => event.target.files?.[0] && void upload(event.target.files[0])} /></label>}
-        </div>
-      </section>}
-    </main>
+    <ActionTooltips />
+    <LibraryDashboard key={libraryNavigation} onSearch={() => setPaperSearchOpen(true)} papers={papers} loading={libraryLoading} uploading={uploading} error={error} brand={<Brand />} settings={<SettingsButton onClick={() => setSettingsOpen(true)} />} preview={(paper) => <PaperPreview paper={paper} />} onOpen={(paper) => openPaper(paper)} onUpload={upload} onDelete={(paper) => deletePaper(paper)} onUpdate={(updated) => setPapers((current) => current.map((paper) => updated.find((item) => item.id === paper.id) ?? paper))} />
     {settingsOpen && <SettingsDialog onClose={closeSettings} />}
-    {paperSearchOpen && <PaperSpotlight papers={papers} onClose={() => setPaperSearchOpen(false)} onOpen={(paper) => { setPaperSearchOpen(false); openPaper(paper); }} />}
+    {paperSearchOpen && <LibrarySpotlight onBrowseFolder={(folderId) => { window.localStorage.setItem('adam.libraryLocation', folderId); setLibraryNavigation((value) => value + 1); setPaperSearchOpen(false); returnToLibrary(); }} papers={papers} onClose={() => setPaperSearchOpen(false)} onOpen={(paper) => { setPaperSearchOpen(false); openPaper(paper); }} />}
   </>);
 
   return (
     <main className="reader-shell">
+      <ActionTooltips />
       <header className="reader-header"><button className="brand-button" onClick={returnToLibrary} aria-label="Back to library"><Brand /></button><div className="document-title">{renaming ? <form onSubmit={(event) => void renamePaper(event)}><input autoFocus aria-label="PDF filename" value={renameValue} maxLength={512} onChange={(event) => setRenameValue(event.target.value)} onKeyDown={(event) => { if (event.key === 'Escape') setRenaming(false); }} disabled={renameSaving} /><button type="submit" disabled={!renameValue.trim() || renameSaving}>{renameSaving ? 'Saving…' : 'Save'}</button></form> : <button type="button" className="document-title-button" title="Rename PDF" onClick={() => { setRenameValue(active.original_name.replace(/\.pdf$/i, '')); setRenaming(true); }}><strong>{active.original_name.replace(/\.pdf$/i, '')}</strong><span aria-hidden="true">✎</span></button>}<span>{pages || active.page_count} pages · local</span></div><div className="reader-header-tools"><button type="button" className={`note-view-button${notesVisible ? ' active' : ''}`} onClick={toggleNotes} title={notesVisible ? 'Hide anchored notes' : 'View anchored notes'}><span>▰</span>{notesVisible ? 'Hide notes' : 'View notes'}<strong>{highlightEntries.filter((entry) => entry.note_text).length}</strong></button><div className="paper-zoom"><span className="control-label">Paper</span><div className="header-actions" role="group" aria-label="Paper zoom"><button title="Zoom paper out" aria-label="Zoom paper out" disabled={zoom <= MIN_ZOOM} onClick={() => changeZoom(zoom * (1 / 1.2 - 1))}>−</button><button className="zoom-reset" title="Reset paper zoom to 100%" aria-label="Reset paper zoom to 100%" onClick={() => changeZoom(1 - zoomRef.current)}>{Math.round(zoom * 100)}%</button><button title="Zoom paper in" aria-label="Zoom paper in" disabled={zoom >= MAX_ZOOM} onClick={() => changeZoom(zoom * .2)}>+</button><button className="zoom-fit" title="Fit paper to pane" aria-label="Fit paper to pane" onClick={fitPaperToPane}>Fit</button></div></div><button type="button" className="reader-delete-button" aria-label="Delete paper" title="Delete paper" onClick={() => void deletePaper(active)}><TrashIcon /></button><SettingsButton compact onClick={() => setSettingsOpen(true)} /></div></header>
       <div className={`reader-workspace${notesVisible ? ' notes-mode' : ''}`} ref={workspaceRef} style={{ gridTemplateColumns: `minmax(0, ${paperPercent}fr) minmax(340px, ${100 - paperPercent}fr)` }}>
         <section className={`pdf-pane${screenshotMode ? ' screenshot-mode' : ''}`} ref={viewerRef} onMouseUp={(event) => { if (!screenshotMode) captureSelection(event); }} onPointerDown={beginScreenshot} onPointerMove={moveScreenshot} onPointerUp={finishScreenshot} onPointerCancel={() => { screenshotPointerRef.current = null; setScreenshotDrag(null); setScreenshotMode(false); }}>
@@ -1456,7 +1443,7 @@ export default function Home() {
         <div className="quick-ask-footer"><span>Save this thread before linking it to the PDF</span><div><button type="button" className="move-to-chat" onClick={() => void importQuickAsk()} disabled={quickAsking || quickImporting || (!quickTurns.length && !quickAnswer)}>{quickImporting ? 'Saving…' : 'Save as new chat →'}</button></div></div>
       </form>}
       {settingsOpen && <SettingsDialog onClose={closeSettings} />}
-      {paperSearchOpen && <PaperSpotlight papers={papers} onClose={() => setPaperSearchOpen(false)} onOpen={(paper) => { setPaperSearchOpen(false); openPaper(paper); }} />}
+      {paperSearchOpen && <LibrarySpotlight onBrowseFolder={(folderId) => { window.localStorage.setItem('adam.libraryLocation', folderId); setLibraryNavigation((value) => value + 1); setPaperSearchOpen(false); returnToLibrary(); }} papers={papers} onClose={() => setPaperSearchOpen(false)} onOpen={(paper) => { setPaperSearchOpen(false); openPaper(paper); }} />}
     </main>
   );
 }
@@ -1635,7 +1622,7 @@ function HighlightCanvas({ highlights, renderVersion }: { highlights: HighlightE
 
 function Brand() { return <div className="brand"><span className="brand-mark">A</span><strong>Adam</strong></div>; }
 function SettingsButton({ onClick, compact = false }: { onClick: () => void; compact?: boolean }) {
-  return <button type="button" className={`settings-button${compact ? ' compact-button' : ''}`} onClick={onClick} title="Settings (⌘/Ctrl + ,)" aria-label="Open settings" aria-keyshortcuts="Meta+, Control+,"><span className="settings-gear" aria-hidden="true">⚙</span><span>{compact ? '' : 'Settings'}</span></button>;
+  return <button type="button" className={`settings-button${compact ? ' compact-button' : ''}`} onClick={onClick} data-tooltip="Open settings (⌘ / Ctrl + ,)" aria-label="Open settings" aria-keyshortcuts="Meta+, Control+,"><span className="settings-gear" aria-hidden="true">⚙</span><span>{compact ? '' : 'Settings'}</span></button>;
 }
 
 function SettingsDialog({ onClose }: { onClose: () => void }) {
@@ -2055,40 +2042,8 @@ function WebEvidence({ web }: { web?: WebInfo | null }) {
   if (!web?.searched && !web?.reused) return null;
   return <div className="web-evidence"><span className="web-badge">{web.searched ? '⌕ Searched web' : '⌕ Earlier web context'}</span>{web.sources.length > 0 && <div className="web-sources"><strong>Sources</strong>{web.sources.map((source, index) => <a key={`${source.url}-${index}`} href={source.url} target="_blank" rel="noreferrer">[W{index + 1}] {source.title}</a>)}</div>}</div>;
 }
-function UploadButton({ uploading, upload }: { uploading: boolean; upload: (file: File) => Promise<void> }) { return <label className="primary-button">{uploading ? 'Opening…' : 'Open PDF'}<input type="file" accept="application/pdf" hidden disabled={uploading} onChange={(event) => event.target.files?.[0] && void upload(event.target.files[0])} /></label>; }
 
-function LibraryDropzone({ uploading, upload }: { uploading: boolean; upload: (file: File) => Promise<void> }) { return <label className="dropzone" onDragOver={(event) => event.preventDefault()} onDrop={(event) => { event.preventDefault(); const file = event.dataTransfer.files[0]; if (file) void upload(file); }}><span className="drop-icon">↥</span><strong>{uploading ? 'Processing your paper…' : 'Drop a research paper here'}</strong><span>or click to choose a PDF</span><input type="file" accept="application/pdf" hidden disabled={uploading} onChange={(event) => event.target.files?.[0] && void upload(event.target.files[0])} /></label>; }
 
 function PaperPreview({ paper }: { paper: Paper }) {
   return <span className="paper-preview" aria-hidden="true"><PdfDocument file={`${API_BASE}/api/documents/${paper.id}/file`} loading={<span className="preview-loading">PDF</span>} error={<span className="preview-loading">PDF</span>}><Page pageNumber={1} width={270} renderTextLayer={false} renderAnnotationLayer={false} /></PdfDocument><span className="preview-shade" /><span className="preview-open">Open paper <b>→</b></span></span>;
-}
-
-function PaperSpotlight({ papers, onClose, onOpen }: { papers: Paper[]; onClose: () => void; onOpen: (paper: Paper) => void }) {
-  const [query, setQuery] = useState('');
-  const [selected, setSelected] = useState(0);
-  const results = papers.filter((paper) => paper.original_name.toLocaleLowerCase().includes(query.trim().toLocaleLowerCase()));
-  useEffect(() => {
-    const navigate = (event: KeyboardEvent) => {
-      if (event.key === 'Escape') { event.preventDefault(); onClose(); }
-      if (event.key === 'ArrowDown') { event.preventDefault(); setSelected((current) => Math.min(results.length - 1, current + 1)); }
-      if (event.key === 'ArrowUp') { event.preventDefault(); setSelected((current) => Math.max(0, current - 1)); }
-      if (event.key === 'Enter' && results[selected]) { event.preventDefault(); onOpen(results[selected]); }
-    };
-    window.addEventListener('keydown', navigate);
-    return () => window.removeEventListener('keydown', navigate);
-  }, [onClose, onOpen, results, selected]);
-  return <div className="spotlight-backdrop" role="presentation" onMouseDown={(event) => { if (event.target === event.currentTarget) onClose(); }}><section className="paper-spotlight" role="dialog" aria-modal="true" aria-label="Search papers">
-    <div className="spotlight-input"><span aria-hidden="true">⌕</span><input autoFocus type="search" placeholder="Search your papers…" aria-label="Search your papers" value={query} onChange={(event) => { setQuery(event.target.value); setSelected(0); }} /><kbd>ESC</kbd></div>
-    <div className="spotlight-results">{results.length > 0 ? results.map((paper, index) => <button type="button" className={index === selected ? 'selected' : ''} key={paper.id} onMouseEnter={() => setSelected(index)} onClick={() => onOpen(paper)}><span className="spotlight-pdf">PDF</span><span><strong>{paper.original_name.replace(/\.pdf$/i, '')}</strong><small>{paper.page_count} pages · {formatBytes(paper.byte_size)} · Modified {formatPaperDate(paper.updated_at).toLocaleLowerCase()}</small></span><i>↵</i></button>) : <div className="spotlight-empty"><strong>No matching papers</strong><span>Try searching with fewer words.</span></div>}</div>
-    <footer><span><kbd>↑</kbd><kbd>↓</kbd> Navigate</span><span><kbd>↵</kbd> Open</span><span><kbd>esc</kbd> Close</span></footer>
-  </section></div>;
-}
-
-function formatBytes(bytes: number) { return bytes >= 1_000_000 ? `${(bytes / 1_000_000).toFixed(1)} MB` : `${Math.max(1, Math.round(bytes / 1_000))} KB`; }
-function formatPaperDate(value: string) {
-  const date = new Date(value);
-  const days = Math.floor((Date.now() - date.getTime()) / 86_400_000);
-  if (days === 0) return `Today, ${date.toLocaleTimeString([], { hour: 'numeric', minute: '2-digit' })}`;
-  if (days === 1) return 'Yesterday';
-  return date.toLocaleDateString([], { month: 'short', day: 'numeric', year: date.getFullYear() === new Date().getFullYear() ? undefined : 'numeric' });
 }

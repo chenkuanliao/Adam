@@ -6,6 +6,7 @@ from pydantic import BaseModel, ConfigDict, Field
 class DocumentOut(BaseModel):
     model_config = ConfigDict(from_attributes=True)
     id: str
+    folder_id: str | None
     original_name: str
     byte_size: int
     page_count: int
@@ -218,3 +219,21 @@ class ModelFavoriteUpdate(BaseModel):
 class ProviderKeyUpdate(BaseModel):
     provider: str = Field(pattern=r"^(zen|openrouter|openai|anthropic|google)$")
     api_key: str | None = Field(default=None, max_length=10000)
+
+
+class FolderIn(BaseModel):
+    name: str = Field(min_length=1, max_length=80)
+    color: str | None = Field(default=None, pattern=r"^#[0-9a-fA-F]{6}$")
+
+
+class FolderOut(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
+    id: str
+    name: str
+    color: str
+    created_at: datetime
+
+
+class DocumentMove(BaseModel):
+    document_ids: list[str] = Field(min_length=1, max_length=500)
+    folder_id: str | None = None
