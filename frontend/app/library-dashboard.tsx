@@ -1,10 +1,12 @@
 'use client';
 
 import FolderColorPicker, { DEFAULT_FOLDER_COLOR, folderStyle } from './folder-appearance';
-import { useEffect, useRef, useState, type ReactNode } from 'react';
+import { useEffect, useRef, useState, type DragEvent, type ReactNode } from 'react';
 
 export type LibraryPaper = { id: string; folder_id: string | null; original_name: string; byte_size: number; page_count: number; status: string; created_at: string; updated_at: string };
 export type Folder = { id: string; name: string; color: string; created_at: string };
+const PAPER_DRAG_TYPE = 'application/x-adam-papers';
+
 type Modal = { kind: 'create' } | { kind: 'rename'; folder: Folder } | { kind: 'delete'; folder: Folder } | { kind: 'move'; ids: string[] };
 
 export function Icon({ kind = 'folder' }: { kind?: 'folder' | 'grid' | 'list' | 'search' | 'file' | 'trash' }) {
@@ -38,6 +40,14 @@ export default function LibraryDashboard({ papers, loading, uploading, error, br
   const [localError, setLocalError] = useState('');
   const [notice, setNotice] = useState('');
   const [dragOver, setDragOver] = useState(false);
+  const [draggedIds, setDraggedIds] = useState<string[]>([]);
+  const [dropTarget, setDropTarget] = useState<string | null>(null);
+  const [movingIds, setMovingIds] = useState<string[]>([]);
+  const dragPreviewRef = useRef<HTMLSpanElement>(null);
+  const dragCountRef = useRef<HTMLSpanElement>(null);
+  const dragIdsRef = useRef<string[]>([]);
+  const movePendingRef = useRef(false);
+  const suppressOpenUntil = useRef(0);
   const uploadRef = useRef<HTMLInputElement>(null);
   const dialogRef = useRef<HTMLDialogElement>(null);
   const currentFolder = folders.find((folder) => folder.id === location);
@@ -62,6 +72,7 @@ export default function LibraryDashboard({ papers, loading, uploading, error, br
 
   function navigate(next: string) { window.localStorage.setItem('adam.libraryLocation', next); setLocation(next); setQuery(''); setSelected([]); setLocalError(''); }
   function openModal(next: Modal) {
+    if (movePendingRef.current) return;
     setLocalError('');
     setName(next.kind === 'rename' ? next.folder.name : '');
     setFolderColor(next.kind === 'rename' ? next.folder.color ?? DEFAULT_FOLDER_COLOR : DEFAULT_FOLDER_COLOR);
@@ -72,8 +83,80 @@ export default function LibraryDashboard({ papers, loading, uploading, error, br
   function toggle(id: string) { setSelected((ids) => ids.includes(id) ? ids.filter((item) => item !== id) : [...ids, id]); }
   function chooseView(next: 'grid' | 'list') { setView(next); window.localStorage.setItem('adam.libraryView', next); }
 
+  function endPaperDrag(event: DragEvent<HTMLElement>) {
+    dragIdsRef.current = [];
+    setDraggedIds([]);
+    setDropTarget(null);
+    suppressOpenUntil.current = event.timeStamp + 250;
+  }
+
+  function startPaperDrag(event: DragEvent<HTMLElement>, paper: LibraryPaper) {
+    if (saving || movePendingRef.current) { event.preventDefault(); return; }
+    const ids = selectedIds.includes(paper.id) ? selectedIds : [paper.id];
+    if (ids.length > 500) {
+      event.preventDefault();
+      setLocalError('Select up to 500 papers at a time.');
+      return;
+    }
+    event.dataTransfer.setData(PAPER_DRAG_TYPE, JSON.stringify(ids));
+    event.dataTransfer.effectAllowed = 'move';
+    if (dragPreviewRef.current && dragCountRef.current) {
+      dragCountRef.current.textContent = String(ids.length);
+      dragCountRef.current.hidden = ids.length === 1;
+      event.dataTransfer.setDragImage(dragPreviewRef.current, 22, 22);
+    }
+    dragIdsRef.current = ids;
+    setDraggedIds(ids);
+    setLocalError('');
+    setNotice('');
+  }
+
+  function canDropPapers(event: DragEvent<HTMLElement>, target: string | null) {
+    return !saving && !movePendingRef.current && event.dataTransfer.types.includes(PAPER_DRAG_TYPE)
+      && papers.some((paper) => dragIdsRef.current.includes(paper.id) && paper.folder_id !== target);
+  }
+
+  async function dropPapers(event: DragEvent<HTMLElement>, target: string | null) {
+    if (!event.dataTransfer.types.includes(PAPER_DRAG_TYPE)) return;
+    event.preventDefault();
+    event.stopPropagation();
+    const ids = canDropPapers(event, target)
+      ? papers.filter((paper) => dragIdsRef.current.includes(paper.id) && paper.folder_id !== target).map((paper) => paper.id) : [];
+    endPaperDrag(event);
+    if (!ids.length) return;
+    movePendingRef.current = true;
+    setMovingIds(ids);
+    setLocalError('');
+    try {
+      const updated = await request<LibraryPaper[]>('document-moves', 'POST', { document_ids: ids, folder_id: target });
+      onUpdate(updated);
+      setSelected((items) => items.filter((id) => !ids.includes(id)));
+      setNotice(`Moved ${updated.length} ${updated.length === 1 ? 'paper' : 'papers'} to ${folders.find((folder) => folder.id === target)?.name ?? 'Unfiled'}.`);
+    } catch (reason) {
+      setLocalError(reason instanceof Error ? reason.message : 'Could not move papers. Please try again.');
+    } finally {
+      movePendingRef.current = false;
+      setMovingIds([]);
+    }
+  }
+
+  function handlePaperDragOver(event: DragEvent<HTMLElement>, target: string | null, surface: string) {
+    if (!event.dataTransfer.types.includes(PAPER_DRAG_TYPE)) return;
+    event.stopPropagation();
+    const allowed = canDropPapers(event, target);
+    event.dataTransfer.dropEffect = allowed ? 'move' : 'none';
+    if (allowed) { event.preventDefault(); setDropTarget(surface); }
+    else setDropTarget(null);
+  }
+
+  function handlePaperDragLeave(event: DragEvent<HTMLElement>, surface: string) {
+    if (!(event.relatedTarget instanceof Node) || !event.currentTarget.contains(event.relatedTarget)) {
+      setDropTarget((current) => current === surface ? null : current);
+    }
+  }
+
   async function saveModal() {
-    if (!modal || saving) return;
+    if (!modal || saving || movePendingRef.current) return;
     setSaving(true); setLocalError('');
     try {
       if (modal.kind === 'move') {
@@ -103,14 +186,15 @@ export default function LibraryDashboard({ papers, loading, uploading, error, br
   const addPDF = <button className="primary-button" data-tooltip={currentFolder ? `Add a PDF to ${currentFolder.name}` : 'Add a PDF to your library'} disabled={uploading || loading} onClick={() => uploadRef.current?.click()}><span aria-hidden="true">＋</span> {uploading ? 'Processing PDF…' : 'Add PDF'}</button>;
 
   return <main className="library-shell files-shell">
+    <span ref={dragPreviewRef} className="files-drag-preview" aria-hidden="true"><Icon kind="file" /><span ref={dragCountRef} className="files-drag-count" hidden /></span>
     <header className="library-header">{brand}<span className="files-header-label">Your research, in one place</span><div className="library-actions">{settings}{addPDF}</div></header>
     <input ref={uploadRef} aria-label="Upload PDF" type="file" accept="application/pdf,.pdf" hidden disabled={uploading} onChange={(event) => { const file = event.target.files?.[0]; if (file) void onUpload(file, folderId); event.target.value = ''; }} />
     <div className="files-workspace">
       <aside className="files-sidebar"><p className="files-nav-label">WORKSPACE</p><nav aria-label="Library navigation">
         <button data-tooltip="View every paper in your library" className={location === 'all' ? 'active' : ''} onClick={() => navigate('all')}><Icon kind="grid" />All papers<span>{papers.length}</span></button>
-        <button data-tooltip="View papers outside folders" className={location === 'unfiled' ? 'active' : ''} onClick={() => navigate('unfiled')}><Icon kind="file" />Unfiled<span>{papers.filter((paper) => !paper.folder_id).length}</span></button>
+        <button data-tooltip="View papers outside folders" onDragOver={(event) => handlePaperDragOver(event, null, 'unfiled')} onDragLeave={(event) => handlePaperDragLeave(event, 'unfiled')} onDrop={(event) => { void dropPapers(event, null); }} className={`${location === 'unfiled' ? 'active' : ''}${dropTarget === 'unfiled' ? ' files-folder-drop-target' : ''}`} onClick={() => navigate('unfiled')}><Icon kind="file" />Unfiled<span>{papers.filter((paper) => !paper.folder_id).length}</span></button>
         <div className="files-folder-heading"><p className="files-nav-label">FOLDERS</p></div>
-        {folderLoading ? <p className="files-sidebar-hint">Loading folders…</p> : folders.map((folder) => <button key={folder.id} style={folderStyle(folder.color)} data-tooltip={`View papers in ${folder.name}`} className={`files-colored-folder${location === folder.id ? ' active' : ''}`} onClick={() => navigate(folder.id)}><Icon /><span className="files-folder-name">{folder.name}</span><span>{papers.filter((paper) => paper.folder_id === folder.id).length}</span></button>)}
+        {folderLoading ? <p className="files-sidebar-hint">Loading folders…</p> : folders.map((folder) => <button key={folder.id} onDragOver={(event) => handlePaperDragOver(event, folder.id, `sidebar-${folder.id}`)} onDragLeave={(event) => handlePaperDragLeave(event, `sidebar-${folder.id}`)} onDrop={(event) => { void dropPapers(event, folder.id); }} style={folderStyle(folder.color)} data-tooltip={`View papers in ${folder.name}`} className={`files-colored-folder${location === folder.id ? ' active' : ''}${dropTarget === `sidebar-${folder.id}` ? ' files-folder-drop-target' : ''}`} onClick={() => navigate(folder.id)}><Icon /><span className="files-folder-name">{folder.name}</span><span>{papers.filter((paper) => paper.folder_id === folder.id).length}</span></button>)}
         {!folderLoading && !folders.length && <p className="files-sidebar-hint">Make a little room for your next big idea.</p>}
         <button className="files-new-folder" data-tooltip="Create a folder to organize your papers" onClick={() => openModal({ kind: 'create' })}><span aria-hidden="true">＋</span> New folder</button>
       </nav><div className="files-local-note"><span className="files-local-dot" />Stored locally<p>Your PDFs, notes, and chats stay on this machine.</p></div></aside>
@@ -118,13 +202,14 @@ export default function LibraryDashboard({ papers, loading, uploading, error, br
         <div className="files-breadcrumb"><button onClick={() => navigate('all')}>Workspace</button><span>/</span><span>{location === 'all' ? 'All papers' : title}</span></div>
         <div className="files-heading"><div><p className="eyebrow">YOUR RESEARCH DESK</p><h1>{currentFolder && <span className="files-heading-folder-icon" style={folderStyle(currentFolder.color)}><Icon /></span>}{title}</h1><p>{currentFolder ? 'A little structure for your next discovery.' : location === 'unfiled' ? 'A home for papers you haven’t organized yet.' : 'Read, collect, and connect your ideas.'}</p></div>{currentFolder && <div className="files-heading-actions"><button className="files-secondary" data-tooltip={currentFolder ? 'Edit the folder name and color' : 'Create a folder to organize your papers'} onClick={() => openModal({ kind: 'rename', folder: currentFolder })}>Edit folder</button><button className="files-icon-button" aria-label="Delete folder" data-tooltip="Remove this folder and keep its papers" onClick={() => openModal({ kind: 'delete', folder: currentFolder })}><Icon kind="trash" /></button></div>}</div>
         {(error || (localError && !modal)) && <p className="error-banner" role="alert">{error || localError}</p>}
+        {movingIds.length > 0 && <div className="files-notice" role="status">Moving {movingIds.length === 1 ? 'paper' : `${movingIds.length} papers`}…</div>}
         {notice && <div className="files-notice" role="status">{notice}<button data-tooltip="Dismiss this message" aria-label="Dismiss notification" onClick={() => setNotice('')}>×</button></div>}
         <div className="files-toolbar"><button className="files-quick-search" aria-label="Search all papers and folders" data-tooltip="Search all papers and folders (⌘ / Ctrl + K)" onClick={onSearch}><Icon kind="search" /><kbd>⌘ K</kbd></button><div className="files-search"><Icon kind="search" /><input aria-label="Search papers and folders" type="search" placeholder={currentFolder ? `Search in ${currentFolder.name}…` : 'Search papers and folders…'} value={query} onChange={(event) => setQuery(event.target.value)} /></div><select data-tooltip="Sort papers by title or date" aria-label="Sort papers" value={sort} onChange={(event) => setSort(event.target.value)}><option value="modified">Last modified</option><option value="created">Date added</option><option value="title">Title A–Z</option></select><div className="files-view-switch" role="group" aria-label="View layout"><button data-tooltip="Show paper previews in a grid" aria-label="Grid view" aria-pressed={view === 'grid'} onClick={() => chooseView('grid')}><Icon kind="grid" /></button><button data-tooltip="Show papers in a compact list" aria-label="List view" aria-pressed={view === 'list'} onClick={() => chooseView('list')}><Icon kind="list" /></button></div></div>
-        {visibleFolders.length > 0 && <><div className="files-section-heading"><h2>Folders</h2><span>{visibleFolders.length}</span></div><div className="files-folder-grid">{visibleFolders.map((folder) => <button className="files-folder-card" style={folderStyle(folder.color)} data-tooltip={`View papers in ${folder.name}`} key={folder.id} onClick={() => navigate(folder.id)}><span className="files-folder-icon"><Icon /></span><strong>{folder.name}</strong><small>{papers.filter((paper) => paper.folder_id === folder.id).length} papers</small><span className="files-folder-arrow" aria-hidden="true">↗</span></button>)}</div></>}
+        {visibleFolders.length > 0 && <><div className="files-section-heading"><h2>Folders</h2><span>{visibleFolders.length}</span></div><div className="files-folder-grid">{visibleFolders.map((folder) => <button onDragOver={(event) => handlePaperDragOver(event, folder.id, `card-${folder.id}`)} onDragLeave={(event) => handlePaperDragLeave(event, `card-${folder.id}`)} onDrop={(event) => { void dropPapers(event, folder.id); }} className={`files-folder-card${dropTarget === `card-${folder.id}` ? ' files-folder-drop-target' : ''}`} style={folderStyle(folder.color)} data-tooltip={`View papers in ${folder.name}`} key={folder.id} onClick={() => navigate(folder.id)}><span className="files-folder-icon"><Icon /></span><strong>{folder.name}</strong><small>{dropTarget === `card-${folder.id}` ? 'Drop to move here' : `${papers.filter((paper) => paper.folder_id === folder.id).length} papers`}</small><span className="files-folder-arrow" aria-hidden="true">↗</span></button>)}</div></>}
         <div className="files-section-heading files-paper-heading"><h2>{location === 'all' ? 'All papers' : 'Papers'}</h2><span>{visible.length}</span><div className="files-selection-actions">{visible.length > 0 && <label><input type="checkbox" aria-label="Select all visible papers" checked={visible.every((paper) => selectedIds.includes(paper.id))} onChange={(event) => setSelected(event.target.checked ? [...new Set([...selectedIds, ...visible.map((paper) => paper.id)])] : selectedIds.filter((id) => !visible.some((paper) => paper.id === id)))} />Select all</label>}</div></div>
-        {selectedIds.length > 0 && <div className="files-selection-bar"><strong>{selectedIds.length} selected</strong><button data-tooltip="Move selected papers into a folder" disabled={selectedIds.length > 500} onClick={() => openModal({ kind: 'move', ids: selectedIds })}><Icon />Move to folder</button><button data-tooltip="Deselect all papers" onClick={() => setSelected([])}>Clear selection</button>{selectedIds.length > 500 && <small>Select up to 500 papers at a time.</small>}</div>}
-        {loading ? <div className="files-empty" role="status"><Icon kind="file" /><h2>Loading your library…</h2></div> : visible.length === 0 ? <div className="files-empty"><span className="files-empty-icon"><Icon kind={query ? 'search' : currentFolder ? 'folder' : 'file'} /></span><h2>{query ? 'No matching papers' : currentFolder ? 'Room for new ideas' : papers.length ? 'Everything has a place' : 'Your next idea starts here'}</h2><p>{query ? 'Try a different title or explore another folder.' : currentFolder ? 'Add a PDF here, or select papers in All papers and move them into this folder.' : papers.length ? 'Papers outside folders will appear here.' : 'Add your first PDF. Keep it here or organize it into a folder.'}</p>{query ? <button className="files-secondary" onClick={() => setQuery('')}>Clear search</button> : addPDF}<small>Drop a PDF anywhere in this area to add it.</small></div> : <div className={`files-papers files-${view}`}>
-          {visible.map((paper) => <article className={`files-paper${selectedIds.includes(paper.id) ? ' is-selected' : ''}`} key={paper.id}><label className="files-paper-select"><input type="checkbox" aria-label={`Select ${paper.original_name}`} checked={selectedIds.includes(paper.id)} onChange={() => toggle(paper.id)} /></label><button className="files-paper-open" onClick={() => onOpen(paper)} data-tooltip={`Open ${paper.original_name}`} aria-label={`Open ${paper.original_name}`}>{view === 'grid' ? preview(paper) : <span className="files-list-icon"><Icon kind="file" /></span>}<span className="files-paper-body"><span className="files-paper-type">PDF<span>{folders.find((folder) => folder.id === paper.folder_id)?.name ?? 'Unfiled'}</span></span><strong>{paper.original_name.replace(/\.pdf$/i, '')}</strong><span className="files-paper-meta">{paper.page_count} {paper.page_count === 1 ? 'page' : 'pages'}<span>·</span>{paper.byte_size < 1048576 ? `${Math.round(paper.byte_size / 1024)} KB` : `${(paper.byte_size / 1048576).toFixed(1)} MB`}</span><span className="files-paper-date">Modified {new Date(paper.updated_at).toLocaleDateString(undefined, { month: 'short', day: 'numeric', year: 'numeric' })}</span></span></button><div className="files-paper-actions"><button aria-label={`Move ${paper.original_name}`} data-tooltip={`Move paper · currently in ${folders.find((folder) => folder.id === paper.folder_id)?.name ?? 'Unfiled'}`} onClick={() => openModal({ kind: 'move', ids: [paper.id] })}><Icon /></button><button aria-label={`Delete ${paper.original_name}`} data-tooltip="Permanently delete this paper and its notes and chats" onClick={() => void onDelete(paper)}><Icon kind="trash" /></button></div></article>)}
+        {selectedIds.length > 0 && <div className="files-selection-bar"><strong>{selectedIds.length} selected</strong><button data-tooltip="Move selected papers into a folder" disabled={selectedIds.length > 500 || movingIds.length > 0} onClick={() => openModal({ kind: 'move', ids: selectedIds })}><Icon />Move to folder</button><button data-tooltip="Deselect all papers" onClick={() => setSelected([])}>Clear selection</button>{selectedIds.length > 500 && <small>Select up to 500 papers at a time.</small>}</div>}
+        {loading ? <div className="files-empty" role="status"><Icon kind="file" /><h2>Loading your library…</h2></div> : visible.length === 0 ? <div className="files-empty"><span className="files-empty-icon"><Icon kind={query ? 'search' : currentFolder ? 'folder' : 'file'} /></span><h2>{query ? 'No matching papers' : currentFolder ? 'Room for new ideas' : papers.length ? 'Everything has a place' : 'Your next idea starts here'}</h2><p>{query ? 'Try a different title or explore another folder.' : currentFolder ? 'Add a PDF here, or select papers in All papers and move them into this folder.' : papers.length ? 'Papers outside folders will appear here.' : 'Add your first PDF. Keep it here or organize it into a folder.'}</p>{query ? <button className="files-secondary" onClick={() => setQuery('')}>Clear search</button> : addPDF}<small>Drop a PDF here to add it. Drag papers onto a folder to organize them.</small></div> : <div className={`files-papers files-${view}`}>
+          {visible.map((paper) => <article className={`files-paper${selectedIds.includes(paper.id) ? ' is-selected' : ''}${draggedIds.includes(paper.id) ? ' is-dragging' : ''}${movingIds.includes(paper.id) ? ' is-moving' : ''}`} aria-busy={movingIds.includes(paper.id)} key={paper.id}><label className="files-paper-select"><input type="checkbox" aria-label={`Select ${paper.original_name}`} checked={selectedIds.includes(paper.id)} onChange={() => toggle(paper.id)} /></label><button className="files-paper-open" draggable={!saving && movingIds.length === 0} onDragStart={(event) => startPaperDrag(event, paper)} onDragEnd={endPaperDrag} onClick={(event) => { if (event.timeStamp >= suppressOpenUntil.current) onOpen(paper); }} data-tooltip={`Open ${paper.original_name}`} aria-label={`Open ${paper.original_name}`}>{view === 'grid' ? preview(paper) : <span className="files-list-icon"><Icon kind="file" /></span>}<span className="files-paper-body"><span className="files-paper-type">PDF<span>{folders.find((folder) => folder.id === paper.folder_id)?.name ?? 'Unfiled'}</span></span><strong>{paper.original_name.replace(/\.pdf$/i, '')}</strong><span className="files-paper-meta">{paper.page_count} {paper.page_count === 1 ? 'page' : 'pages'}<span>·</span>{paper.byte_size < 1048576 ? `${Math.round(paper.byte_size / 1024)} KB` : `${(paper.byte_size / 1048576).toFixed(1)} MB`}</span><span className="files-paper-date">Modified {new Date(paper.updated_at).toLocaleDateString(undefined, { month: 'short', day: 'numeric', year: 'numeric' })}</span></span></button><div className="files-paper-actions"><button aria-label={`Move ${paper.original_name}`} data-tooltip={`Move paper · currently in ${folders.find((folder) => folder.id === paper.folder_id)?.name ?? 'Unfiled'}`} disabled={movingIds.length > 0} onClick={() => openModal({ kind: 'move', ids: [paper.id] })}><Icon /></button><button aria-label={`Delete ${paper.original_name}`} data-tooltip="Permanently delete this paper and its notes and chats" disabled={movingIds.includes(paper.id)} onClick={() => void onDelete(paper)}><Icon kind="trash" /></button></div></article>)}
         </div>}
         {visible.length > 0 && <button className="files-add-more" data-tooltip={currentFolder ? `Add a PDF to ${currentFolder.name}` : 'Add a PDF to your library'} disabled={uploading} onClick={() => uploadRef.current?.click()}><span aria-hidden="true">＋</span>{uploading ? 'Processing paper…' : 'Add a paper to this collection'}<small>or drop a PDF here</small></button>}
       </section>
