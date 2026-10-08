@@ -28,7 +28,7 @@ services:
     volumes:
       - ./search/settings.yml:/etc/searxng/settings.yml:ro
     ports:
-      - "127.0.0.1:8888:8080"
+      - "127.0.0.1:${ADAM_SEARCH_PORT:-8888}:8080"
     restart: unless-stopped
 
   web:
