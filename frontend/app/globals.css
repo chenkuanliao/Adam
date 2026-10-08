@@ -166,3 +166,18 @@
 .chat-links-empty p{max-width:290px;margin:0 auto;font-size:12px;line-height:1.7}
 .chat-links-empty button{margin-top:16px;padding:8px 12px;border:1px solid #d8cbe4;border-radius:7px;background:#fff;color:#7657a4;cursor:pointer}
 .linked-turn{border-radius:8px;outline:2px solid #d9c9e8;outline-offset:6px}
+
+/* Keep the native drag image compact in both library layouts. */
+.files-drag-preview{position:fixed;left:-100px;top:0;display:grid;place-items:center;width:44px;height:44px;background:#fffefa;border:1px solid #d5ddcc;border-radius:10px;color:#607a4a;pointer-events:none}
+.files-drag-preview>svg{width:25px;height:25px}
+.files-drag-count{position:absolute;right:-5px;top:-5px;min-width:18px;height:18px;padding:0 4px;display:grid;place-items:center;border-radius:9px;background:#607a4a;color:white;font-size:10px;font-weight:600}
+.files-drag-count[hidden]{display:none}
+.files-paper-open[draggable=true]{cursor:grab}
+.files-paper-open[draggable=true]:active{cursor:grabbing}
+.files-paper.is-dragging{opacity:.55}
+.files-paper.is-moving{opacity:.55;pointer-events:none}
+.files-paper{transition:border-color .15s,box-shadow .15s,opacity .15s}
+.files-sidebar nav>button{transition:background .15s,box-shadow .15s}
+.files-folder-card.files-folder-drop-target,.files-sidebar nav>button.files-folder-drop-target{background:var(--folder-tint,#edf5e7);border-color:var(--folder-ink,#709061);box-shadow:0 0 0 1px var(--folder-ink,#709061);transform:none}
+.files-folder-drop-target .files-folder-arrow{display:none}
+@media(prefers-reduced-motion:reduce){.files-paper,.files-folder-card,.files-sidebar nav>button{transition:none}}
