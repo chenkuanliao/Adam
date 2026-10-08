@@ -27,6 +27,7 @@ docker compose up --build
 ```
 
 Open <http://localhost:3000>. PDFs and application state are stored under `./data`, outside the containers.
+To run a separate copy from another checkout, give it a unique Compose project and unused ports, for example `ADAM_WEB_PORT=3001 ADAM_SEARCH_PORT=8889 docker compose -p adam-folders up --build -d`. Each checkout keeps its own `./data` and `./secrets` directories.
 The Search web control is off for each new question. When enabled, Adam searches and cites useful sources in its answer. It can include up to 7,500 characters of search snippet and page text from each of five results. Earlier web sources remain available to follow-up questions in that chat. SearXNG needs no search API key; it is reachable only through Docker and localhost port 8888 for local development.
 Settings changed in the app are stored in `./data/settings.json` and survive container rebuilds. Keys remain server-side and are never returned to the browser. An OpenCode Zen key entered in Settings takes precedence over the Docker secret; removing it falls back to the secret.
 The Chat titles section in Settings selects a separate provider and model for automatic chat names and title regeneration. It defaults to OpenCode Zen with `gpt-6-luna`.
