@@ -168,3 +168,16 @@ def test_concurrent_requests_share_one_render_and_queue_is_bounded(monkeypatch: 
         assert not thumbnails._inflight
 
     asyncio.run(scenario())
+
+
+def test_server_shutdown_stops_thumbnail_worker_processes() -> None:
+    paper = client.post("/api/documents", files={"file": ("shutdown.pdf", BytesIO(synthetic_pdf("shutdown")), "application/pdf")}).json()
+    # Entering the client runs the app lifespan; leaving it runs the shutdown hook.
+    with TestClient(app) as running:
+        assert running.get(f"/api/documents/{paper['id']}/thumbnail").status_code == 200
+        workers = list(thumbnails._executor._processes.values())
+        assert workers
+    assert thumbnails._executor is None
+    for worker in workers:
+        worker.join(timeout=10)
+        assert not worker.is_alive()

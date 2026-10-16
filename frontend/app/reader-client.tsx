@@ -3,11 +3,7 @@
 
 import { FormEvent, memo, useCallback, useEffect, useLayoutEffect, useRef, useState, type CSSProperties } from 'react';
 import { Document as PdfDocument, Page, pdfjs } from 'react-pdf';
-import type { PDFPageProxy, TextContent } from 'pdfjs-dist/types/src/display/api';
-import ReactMarkdown from 'react-markdown';
-import remarkGfm from 'remark-gfm';
-import remarkMath from 'remark-math';
-import rehypeKatex from 'rehype-katex';
+import type { PDFDocumentProxy, PDFPageProxy, TextContent } from 'pdfjs-dist/types/src/display/api';
 import AppSelect from './app-select';
 import { sameHighlightLocation } from './highlight-location';
 import EditableNumber from './editable-number';
@@ -16,6 +12,9 @@ import { readingHistory, saveReadingPosition, forgetReadingPosition, type Readin
 import ActionTooltips from './action-tooltips';
 import LibrarySpotlight from './library-spotlight';
 import LibraryDashboard, { type LibraryPaper } from './library-dashboard';
+import { isPageMounted, mountedPageWindow, pageAspects, rasterScale, sameWindow, visiblePageRange, type PageWindow } from './page-window';
+import { DraftInput, DraftTextarea, MarkdownAnswer, StreamingMarkdown, useHasText } from './chat-text';
+import { createStreamBatcher, createTextStore, type StreamBatcher } from './stream-text';
 import 'katex/dist/katex.min.css';
 import 'react-pdf/dist/Page/AnnotationLayer.css';
 import 'react-pdf/dist/Page/TextLayer.css';
@@ -102,9 +101,11 @@ export default function Home() {
   const [pendingSelection, setPendingSelection] = useState<PendingSelection | null>(null);
   const [screenshotSelection, setScreenshotSelection] = useState<ScreenshotSelection | null>(null);
   const [quickAskTarget, setQuickAskTarget] = useState<QuickAskTarget | null>(null);
-  const [quickQuestion, setQuickQuestion] = useState('');
+  const [quickQuestionStore] = useState(createTextStore);
+  const hasQuickQuestion = useHasText(quickQuestionStore, true);
   const [quickActiveQuestion, setQuickActiveQuestion] = useState('');
-  const [quickAnswer, setQuickAnswer] = useState('');
+  const [quickAnswerStore] = useState(createTextStore);
+  const hasQuickAnswer = useHasText(quickAnswerStore);
   const [quickAnswerWeb, setQuickAnswerWeb] = useState<WebInfo | null>(null);
   const [quickSearchEnabled, setQuickSearchEnabled] = useState(false);
   const [quickSearchNotice, setQuickSearchNotice] = useState('');
@@ -114,7 +115,8 @@ export default function Home() {
   const [quickError, setQuickError] = useState('');
   const [revealedLinkId, setRevealedLinkId] = useState<string | null>(null);
   const [linkRevealVersion, setLinkRevealVersion] = useState(0);
-  const [linkedTurn, setLinkedTurn] = useState<{ conversationId: string; question: string } | null>(null);
+  const linkedTurnRevealRef = useRef(0);
+  const [linkedTurn, setLinkedTurn] = useState<{ conversationId: string; question: string; reveal: number } | null>(null);
   const [selectedAiNote, setSelectedAiNote] = useState<HighlightEntry | null>(null);
   const [screenshotMode, setScreenshotMode] = useState(false);
   const [screenshotDrag, setScreenshotDrag] = useState<ScreenshotDrag | null>(null);
@@ -126,10 +128,11 @@ export default function Home() {
   const focusWorkspaceRef = useRef<{ zoom: number; fit: boolean } | null>(null);
   const readingAnchorRef = useRef<{ page: number; offset: number } | null>(null);
   const [noteSaving, setNoteSaving] = useState(false);
-  const [question, setQuestion] = useState('');
+  const [questionStore] = useState(createTextStore);
+  const hasQuestion = useHasText(questionStore, true);
   const [submittedQuestion, setSubmittedQuestion] = useState('');
   const [submittedContext, setSubmittedContext] = useState<ContextSelection[]>([]);
-  const [answer, setAnswer] = useState('');
+  const [answerStore] = useState(createTextStore);
   const [chatHistory, setChatHistory] = useState<ChatTurn[]>([]);
   const [conversations, setConversations] = useState<Conversation[]>([]);
   const [activeConversation, setActiveConversation] = useState<Conversation | null>(null);
@@ -154,15 +157,31 @@ export default function Home() {
   const [settingsOpen, setSettingsOpen] = useState(false);
   const [libraryLoading, setLibraryLoading] = useState(true);
   const [paperSearchOpen, setPaperSearchOpen] = useState(false);
+  const [paperSearchMode, setPaperSearchMode] = useState<'library' | 'online'>('library');
+  const [paperSearchFolder, setPaperSearchFolder] = useState<string | null>(null);
   const [libraryNavigation, setLibraryNavigation] = useState(0);
   const [chatConfigured, setChatConfigured] = useState<boolean | null>(null);
-  const [paneMode, setPaneMode] = useState<PaneMode>('chat');
+  const [paneMode, setPaneModeState] = useState<PaneMode>('chat');
+  const setPaneMode = useCallback((mode: PaneMode) => {
+    setLinkedTurn(null);
+    setPaneModeState(mode);
+  }, []);
   const [pendingNoteQuote, setPendingNoteQuote] = useState<ContextSelection | null>(null);
   const [currentPage, setCurrentPage] = useState(1);
   const [shortcutsOpen, setShortcutsOpen] = useState(false);
   const [sheetOpen, setSheetOpen] = useState(false);
   const pendingReadingRef = useRef<ReadingPosition | null>(null);
   const readyPagesRef = useRef(new Set<number>());
+  // Page aspect ratios (height / width), filled as PDF.js reports each page.
+  // Pages outside `pageWindow` render as placeholders of the same size.
+  const [pdfDocument, setPdfDocument] = useState<PDFDocumentProxy | null>(null);
+  const [pageSizes, setPageSizes] = useState<Array<number | undefined>>([]);
+  const [pageWindow, setPageWindow] = useState<PageWindow | null>(null);
+  const pageWindowRef = useRef<PageWindow | null>(null);
+  const pendingPageSizesRef = useRef(new Map<number, number>());
+  const pageSizeFrameRef = useRef<number | null>(null);
+  const pageSizeAnchorRef = useRef<{ page: number; offset: number } | null>(null);
+  const screenshotDraggingRef = useRef(false);
   const readingSaveTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const pageTrackFrameRef = useRef<number | null>(null);
   const viewerRef = useRef<HTMLDivElement>(null);
@@ -182,6 +201,7 @@ export default function Home() {
   const screenshotPointerRef = useRef<{ x: number; y: number } | null>(null);
   const pendingZoomRef = useRef<{ page: number; x: number; y: number; viewportX: number; viewportY: number } | null>(null);
   const pendingAnswersRef = useRef(new Map<string, PendingAnswer>());
+  const streamBatchersRef = useRef(new Set<StreamBatcher>());
   const activeConversationIdRef = useRef<string | null>(null);
   const activePaperIdRef = useRef<string | null>(null);
   const paperLoadRef = useRef(0);
@@ -229,8 +249,10 @@ export default function Home() {
     return () => window.clearTimeout(timer);
   }, [zoom, persistReading]);
 
-  const pageReady = useCallback((page: number) => {
-    readyPagesRef.current.add(page);
+  // A page is ready once its size is known, so its placeholder already has the
+  // final height. Restore waits for every earlier page, not for their rendering.
+  const pageReady = useCallback((pages: Iterable<number>) => {
+    for (const page of pages) readyPagesRef.current.add(page);
     const saved = pendingReadingRef.current;
     if (!saved || !Array.from({ length: saved.page }, (_, index) => index + 1).every((item) => readyPagesRef.current.has(item))) return;
     window.requestAnimationFrame(() => {
@@ -245,6 +267,101 @@ export default function Home() {
       setCurrentPage(saved.page);
     });
   }, []);
+
+  const updatePageWindow = useCallback(() => {
+    const viewer = viewerRef.current;
+    if (!viewer) return;
+    const stages = viewer.querySelectorAll<HTMLElement>('.pdf-page-stage');
+    const viewerRect = viewer.getBoundingClientRect();
+    const visible = visiblePageRange(stages.length, (index) => stages[index].getBoundingClientRect(), viewerRect.top, viewerRect.bottom);
+    // Never unmount pages holding a live text selection, or pages under an
+    // in-progress region capture, so both can still read their DOM and canvas.
+    const previous = pageWindowRef.current;
+    const next = mountedPageWindow(visible, stages.length, { extend: screenshotDraggingRef.current ? previous : null, pinned: selectionPages(viewer) });
+    if (sameWindow(previous, next)) return;
+    pageWindowRef.current = next;
+    setPageWindow(next);
+  }, []);
+
+  const recordPageSize = useCallback((page: number, aspect: number) => {
+    if (!(aspect > 0)) return;
+    pendingPageSizesRef.current.set(page, aspect);
+    if (pageSizeFrameRef.current !== null) return;
+    pageSizeFrameRef.current = window.requestAnimationFrame(() => {
+      pageSizeFrameRef.current = null;
+      const updates = pendingPageSizesRef.current;
+      if (!updates.size) return;
+      pendingPageSizesRef.current = new Map();
+      // Estimated placeholders above the reading line may change height; keep
+      // the page under that line in place once the real sizes arrive.
+      const viewer = viewerRef.current;
+      pageSizeAnchorRef.current = null;
+      if (viewer && !pendingReadingRef.current) {
+        const top = viewer.getBoundingClientRect().top + 12;
+        const stages = viewer.querySelectorAll<HTMLElement>('.pdf-page-stage');
+        const range = visiblePageRange(stages.length, (index) => stages[index].getBoundingClientRect(), top, top + 1);
+        if (range) {
+          const rect = stages[range.start - 1].getBoundingClientRect();
+          pageSizeAnchorRef.current = { page: range.start, offset: (top - rect.top) / Math.max(1, rect.height) };
+        }
+      }
+      setPageSizes((current) => {
+        if (Array.from(updates).every(([page, aspect]) => current[page - 1] === aspect)) return current;
+        const next = current.slice();
+        updates.forEach((aspect, page) => { next[page - 1] = aspect; });
+        return next;
+      });
+    });
+  }, []);
+
+  useLayoutEffect(() => {
+    const anchor = pageSizeAnchorRef.current;
+    pageSizeAnchorRef.current = null;
+    const viewer = viewerRef.current;
+    const stage = anchor ? viewer?.querySelector<HTMLElement>(`[data-page-number="${anchor.page}"]`) : null;
+    if (viewer && anchor && stage) {
+      const rect = stage.getBoundingClientRect();
+      viewer.scrollTop += rect.top + anchor.offset * rect.height - viewer.getBoundingClientRect().top - 12;
+    }
+    pageReady(pageSizes.flatMap((aspect, index) => aspect === undefined ? [] : [index + 1]));
+    updatePageWindow();
+  }, [pageSizes, pageReady, updatePageWindow]);
+
+  // Read page sizes without rendering so every placeholder gets its final
+  // height. PDF.js caches the page proxies that mounted pages reuse later.
+  useEffect(() => {
+    if (!pdfDocument) return;
+    let cancelled = false;
+    let nextPage = 1;
+    const readSizes = async () => {
+      while (!cancelled && nextPage <= pdfDocument.numPages) {
+        const pageNumber = nextPage++;
+        try {
+          const page = await pdfDocument.getPage(pageNumber);
+          if (cancelled) return;
+          const viewport = page.getViewport({ scale: 1 });
+          recordPageSize(pageNumber, viewport.height / viewport.width);
+        } catch {
+          // Keep the estimate rather than blocking a saved position forever.
+          if (!cancelled) pageReady([pageNumber]);
+        }
+      }
+    };
+    for (let worker = 0; worker < 4; worker++) void readSizes();
+    return () => { cancelled = true; };
+  }, [pdfDocument, recordPageSize, pageReady]);
+
+  useEffect(() => { screenshotDraggingRef.current = isScreenshotDragging; }, [isScreenshotDragging]);
+
+  useEffect(() => {
+    const viewer = viewerRef.current;
+    if (!viewer || !active) return;
+    const observer = new ResizeObserver(() => updatePageWindow());
+    observer.observe(viewer);
+    return () => observer.disconnect();
+  }, [active, updatePageWindow]);
+
+  useEffect(() => () => { if (pageSizeFrameRef.current !== null) window.cancelAnimationFrame(pageSizeFrameRef.current); }, []);
 
   const loadPapers = useCallback(async () => {
     try {
@@ -409,9 +526,9 @@ export default function Home() {
 
   useEffect(() => {
     const openPaperSearch = (event: KeyboardEvent) => {
-      if ((event.metaKey || event.ctrlKey) && event.key.toLowerCase() === 'k') {
+      if (!event.defaultPrevented && !event.altKey && (event.metaKey || event.ctrlKey) && event.key.toLowerCase() === 'k') {
         event.preventDefault();
-        if (!document.querySelector('dialog[open]')) setPaperSearchOpen(true);
+        if (!document.querySelector('dialog[open]')) { setPaperSearchMode(event.shiftKey ? 'online' : 'library'); const location = window.localStorage.getItem('adam.libraryLocation'); setPaperSearchFolder(location && !['all', 'unfiled'].includes(location) ? location : null); setPaperSearchOpen(true); }
       }
     };
     window.addEventListener('keydown', openPaperSearch);
@@ -457,6 +574,9 @@ export default function Home() {
     viewer.scrollLeft += pageRect.left + focus.x * pageRect.width - (viewerRect.left + focus.viewportX);
     pendingZoomRef.current = null;
   }, [zoom]);
+
+  // Zoom, page count, and note/focus layout all move pages without scrolling.
+  useLayoutEffect(() => updatePageWindow(), [pages, zoom, notesVisible, focusReading, updatePageWindow]);
 
   useLayoutEffect(() => {
     if (!focusComposerAfterContextRef.current || contextSelections.length === 0) return;
@@ -544,7 +664,8 @@ export default function Home() {
     };
   }, [isScreenshotDragging]);
 
-  useEffect(() => {
+  // Also called by the streaming answer after each committed fragment batch.
+  const followChatOutput = useCallback(() => {
     const chatBody = chatBodyRef.current;
     if (!chatBody || !followOutputRef.current) return;
     if (autoScrollFrameRef.current !== null) window.cancelAnimationFrame(autoScrollFrameRef.current);
@@ -552,11 +673,20 @@ export default function Home() {
       if (followOutputRef.current) chatBody.scrollTop = chatBody.scrollHeight;
       autoScrollFrameRef.current = null;
     });
+  }, []);
+
+  useEffect(() => {
+    followChatOutput();
     return () => {
       if (autoScrollFrameRef.current !== null) window.cancelAnimationFrame(autoScrollFrameRef.current);
       autoScrollFrameRef.current = null;
     };
-  }, [answer, submittedQuestion, streamStatus, chatHistory.length, contextSelections.length]);
+  }, [followChatOutput, submittedQuestion, streamStatus, chatHistory.length, contextSelections.length]);
+
+  useEffect(() => {
+    const batchers = streamBatchersRef.current;
+    return () => { for (const batcher of batchers) batcher.cancel(); batchers.clear(); };
+  }, []);
 
   const revealNewContext = useCallback(() => {
     changeReadingMode(false);
@@ -564,7 +694,7 @@ export default function Home() {
     setSheetOpen(true);
     followOutputRef.current = true;
     focusComposerAfterContextRef.current = true;
-  }, [changeReadingMode]);
+  }, [changeReadingMode, setPaneMode]);
 
   function pauseChatFollow() {
     followOutputRef.current = false;
@@ -742,6 +872,11 @@ export default function Home() {
     setSelectedAiNote(null);
     changeReadingMode(false);
     setPages(0);
+    setPdfDocument(null);
+    setPageSizes([]);
+    pendingPageSizesRef.current = new Map();
+    pageWindowRef.current = null;
+    setPageWindow(null);
     setCurrentPage(1);
     setShortcutsOpen(false);
     setContextSelections([]);
@@ -751,17 +886,17 @@ export default function Home() {
     notesVisibleRef.current = false;
     zoomBeforeNotesRef.current = null;
     clearHighlights();
-    setQuestion('');
+    questionStore.set('');
     setSubmittedQuestion('');
     setSubmittedContext([]);
-    setAnswer('');
+    answerStore.set('');
     setAnswerWeb(null);
     setSearchEnabled(false);
     setSearchNotice('');
     setAsking(false);
     setQuickAskTarget(null);
     setQuickAsking(false);
-    setQuickAnswer('');
+    quickAnswerStore.set('');
     setChatHistory([]);
     setConversations([]);
     setActiveConversation(null);
@@ -809,6 +944,7 @@ export default function Home() {
 
   async function openConversation(conversation: Conversation) {
     if (activePaperIdRef.current !== conversation.document_id) return;
+    setLinkedTurn(null);
     activeConversationIdRef.current = conversation.id;
     const loadId = ++conversationLoadRef.current;
     const response = await fetch(`${API_BASE}/api/conversations/${conversation.id}`);
@@ -831,7 +967,7 @@ export default function Home() {
     const alreadySaved = pending?.status === 'complete' && turns.some((turn) => turn.question === pending.question && turn.answer === pending.answer);
     if (alreadySaved) pendingAnswersRef.current.delete(conversation.id);
     const visible = alreadySaved ? null : pending;
-    setSubmittedQuestion(visible?.question ?? ''); setSubmittedContext(visible?.context ?? []); setAnswer(visible?.answer ?? ''); setAnswerWeb(visible?.web ?? null); setSearchNotice(visible?.searchNotice ?? ''); setStreamStatus(visible?.status ?? 'idle'); setAsking(visible?.status === 'connecting' || visible?.status === 'streaming'); setContextSelections([]); setError(visible?.error ?? '');
+    setSubmittedQuestion(visible?.question ?? ''); setSubmittedContext(visible?.context ?? []); answerStore.set(visible?.answer ?? ''); setAnswerWeb(visible?.web ?? null); setSearchNotice(visible?.searchNotice ?? ''); setStreamStatus(visible?.status ?? 'idle'); setAsking(visible?.status === 'connecting' || visible?.status === 'streaming'); setContextSelections([]); setError(visible?.error ?? '');
   }
 
   async function createNewConversation() {
@@ -1004,7 +1140,7 @@ export default function Home() {
     const { id, text, page, range } = pendingSelection;
     const pageElement = (range.startContainer.nodeType === Node.ELEMENT_NODE ? range.startContainer as Element : range.startContainer.parentElement)?.closest<HTMLElement>('.react-pdf__Page');
     setQuickAskTarget({ id, text, page, rects: pageElement ? getHighlightRects(range, pageElement) : undefined, ...placeQuickAskBeside(range.getBoundingClientRect()) });
-    setQuickQuestion(''); setQuickActiveQuestion(''); setQuickAnswer(''); setQuickAnswerWeb(null); setQuickSearchEnabled(false); setQuickSearchNotice(''); setQuickTurns([]); setQuickError('');
+    quickQuestionStore.set(''); setQuickActiveQuestion(''); quickAnswerStore.set(''); setQuickAnswerWeb(null); setQuickSearchEnabled(false); setQuickSearchNotice(''); setQuickTurns([]); setQuickError('');
     clearBrowserSelection();
     window.requestAnimationFrame(() => quickAskInputRef.current?.focus());
   }
@@ -1022,14 +1158,14 @@ export default function Home() {
     if (!screenshotSelection) return;
     const { id, text, page, pageEnd, imageDataUrl, rects, left, right, top, bottom } = screenshotSelection;
     setQuickAskTarget({ id, text, page, pageEnd, imageDataUrl, rects, ...placeQuickAskBeside({ left, right, top, bottom }) });
-    setQuickQuestion(''); setQuickActiveQuestion(''); setQuickAnswer(''); setQuickAnswerWeb(null); setQuickSearchEnabled(false); setQuickSearchNotice(''); setQuickTurns([]); setQuickError('');
+    quickQuestionStore.set(''); setQuickActiveQuestion(''); quickAnswerStore.set(''); setQuickAnswerWeb(null); setQuickSearchEnabled(false); setQuickSearchNotice(''); setQuickTurns([]); setQuickError('');
     setScreenshotSelection(null);
     window.requestAnimationFrame(() => quickAskInputRef.current?.focus());
   }
 
   function closeQuickAsk() {
     if (quickAsking) return;
-    setQuickAskTarget(null); setQuickQuestion(''); setQuickActiveQuestion(''); setQuickAnswer(''); setQuickAnswerWeb(null); setQuickSearchEnabled(false); setQuickSearchNotice(''); setQuickTurns([]); setQuickError('');
+    setQuickAskTarget(null); quickQuestionStore.set(''); setQuickActiveQuestion(''); quickAnswerStore.set(''); setQuickAnswerWeb(null); setQuickSearchEnabled(false); setQuickSearchNotice(''); setQuickTurns([]); setQuickError('');
   }
 
   useEffect(() => {
@@ -1038,16 +1174,20 @@ export default function Home() {
 
   async function submitQuickAsk(event: FormEvent) {
     event.preventDefault();
-    if (!quickAskTarget || !activeConversation || !quickQuestion.trim() || quickAsking) return;
+    const previousAnswer = quickAnswerStore.get();
+    const sentQuestion = quickQuestionStore.get().trim();
+    if (!quickAskTarget || !activeConversation || !sentQuestion || quickAsking) return;
     const originPaperId = activePaperIdRef.current;
     const requestId = ++quickAskRequestRef.current;
     const isVisible = () => quickAskRequestRef.current === requestId && activePaperIdRef.current === originPaperId;
-    const priorTurns = quickAnswer ? [...quickTurns, { question: quickActiveQuestion, answer: quickAnswer, web: quickAnswerWeb }] : quickTurns;
-    const sentQuestion = quickQuestion.trim();
+    const priorTurns = previousAnswer ? [...quickTurns, { question: quickActiveQuestion, answer: previousAnswer, web: quickAnswerWeb }] : quickTurns;
     const allowWebSearch = quickSearchEnabled;
-    if (quickAnswer) setQuickTurns(priorTurns);
+    if (previousAnswer) setQuickTurns(priorTurns);
+    let streamed = '';
+    const batcher = createStreamBatcher(() => { if (isVisible()) quickAnswerStore.set(streamed); });
+    streamBatchersRef.current.add(batcher);
     quickFollowRef.current = true;
-    setQuickAsking(true); setQuickActiveQuestion(sentQuestion); setQuickQuestion(''); setQuickAnswer(''); setQuickAnswerWeb(null); setQuickSearchEnabled(false); setQuickSearchNotice(''); setQuickError('');
+    setQuickAsking(true); setQuickActiveQuestion(sentQuestion); quickQuestionStore.set(''); quickAnswerStore.set(''); setQuickAnswerWeb(null); setQuickSearchEnabled(false); setQuickSearchNotice(''); setQuickError('');
     try {
       const selectionText = quickAskTarget.imageDataUrl ? '' : quickAskTarget.text;
       const selectionImages = quickAskTarget.imageDataUrl ? [{ data_url: quickAskTarget.imageDataUrl, page: quickAskTarget.page }] : [];
@@ -1057,17 +1197,19 @@ export default function Home() {
       while (true) {
         const { value, done } = await reader.read(); if (done) break;
         buffer += decoder.decode(value, { stream: true }); const events = buffer.split('\n\n'); buffer = events.pop() ?? '';
-        for (const block of events) { const line = block.split('\n').find((item) => item.startsWith('data: ')); if (!line) continue; const data = JSON.parse(line.slice(6)); if (!isVisible()) continue; if (data.type === 'searching') setQuickSearchNotice('Planning web search…'); if (data.type === 'search_error') setQuickSearchNotice(data.message); if (data.type === 'web_sources') { setQuickAnswerWeb(data.web as WebInfo); setQuickSearchNotice((current) => current.startsWith('Web search is unavailable') ? current : ''); } if (data.type === 'delta') setQuickAnswer((current) => current + data.text); if (data.type === 'completed') setQuickAnswerWeb(data.web as WebInfo); if (data.type === 'error') throw new Error(data.message); }
+        for (const block of events) { const line = block.split('\n').find((item) => item.startsWith('data: ')); if (!line) continue; const data = JSON.parse(line.slice(6)); if (!isVisible()) continue; if (data.type === 'searching') setQuickSearchNotice('Planning web search…'); if (data.type === 'search_error') setQuickSearchNotice(data.message); if (data.type === 'web_sources') { setQuickAnswerWeb(data.web as WebInfo); setQuickSearchNotice((current) => current.startsWith('Web search is unavailable') ? current : ''); } if (data.type === 'delta') { const first = !streamed; streamed += data.text; if (first) batcher.flush(); else batcher.schedule(); } if (data.type === 'completed') setQuickAnswerWeb(data.web as WebInfo); if (data.type === 'error') throw new Error(data.message); }
       }
-    } catch (reason) { if (isVisible()) setQuickError(reason instanceof Error ? reason.message : 'Quick Ask failed.'); }
-    finally { if (isVisible()) setQuickAsking(false); }
+      batcher.flush();
+    } catch (reason) { batcher.flush(); if (isVisible()) setQuickError(reason instanceof Error ? reason.message : 'Quick Ask failed.'); }
+    finally { batcher.cancel(); streamBatchersRef.current.delete(batcher); if (isVisible()) setQuickAsking(false); }
   }
 
-  useLayoutEffect(() => {
+  const followQuickThread = useCallback(() => {
     const thread = quickThreadRef.current;
-    if (!thread || !quickFollowRef.current) return;
-    thread.scrollTop = thread.scrollHeight;
-  }, [quickAnswer, quickAnswerWeb, quickTurns, quickAsking, quickSearchNotice]);
+    if (thread && quickFollowRef.current) thread.scrollTop = thread.scrollHeight;
+  }, []);
+
+  useLayoutEffect(followQuickThread, [followQuickThread, hasQuickAnswer, quickAnswerWeb, quickTurns, quickAsking, quickSearchNotice]);
 
   function beginQuickDrag(event: React.PointerEvent<HTMLDivElement>) {
     if (!quickAskTarget || (event.target as HTMLElement).closest('button')) return;
@@ -1086,14 +1228,15 @@ export default function Home() {
 
   async function importQuickAsk() {
     if (!quickAskTarget || !activeConversation || quickAsking || quickImporting) return;
-    const turns = quickAnswer ? [...quickTurns, { question: quickActiveQuestion, answer: quickAnswer, web: quickAnswerWeb }] : quickTurns;
+    const currentAnswer = quickAnswerStore.get();
+    const turns = currentAnswer ? [...quickTurns, { question: quickActiveQuestion, answer: currentAnswer, web: quickAnswerWeb }] : quickTurns;
     if (!turns.length) return;
     setQuickImporting(true); setQuickError('');
     try {
       const response = await fetch(`${API_BASE}/api/conversations/${activeConversation.id}/quick-ask/import`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ selected_text: quickAskTarget.imageDataUrl ? '' : quickAskTarget.text, images: quickAskTarget.imageDataUrl ? [{ data_url: quickAskTarget.imageDataUrl, page: quickAskTarget.page }] : [], anchors: quickAskTarget.page && quickAskTarget.rects?.length ? [{ text: quickAskTarget.text, page: quickAskTarget.page, rects: quickAskTarget.rects }] : [], page: quickAskTarget.page, turns: turns.map((turn) => ({ ...turn, selected_text: '', images: [], page: quickAskTarget.page })) }) });
       const updated = await response.json() as Conversation; if (!response.ok) throw new Error((updated as unknown as { detail?: string }).detail ?? 'Could not move Quick Ask to chat.');
       setActiveConversation(updated); setConversations((current) => [updated, ...current]);
-      await openConversation(updated); setQuickAskTarget(null); setQuickQuestion(''); setQuickActiveQuestion(''); setQuickAnswer(''); setQuickAnswerWeb(null); setQuickSearchEnabled(false); setQuickSearchNotice(''); setQuickTurns([]);
+      await openConversation(updated); setQuickAskTarget(null); quickQuestionStore.set(''); setQuickActiveQuestion(''); quickAnswerStore.set(''); setQuickAnswerWeb(null); setQuickSearchEnabled(false); setQuickSearchNotice(''); setQuickTurns([]);
     } catch (reason) { setQuickError(reason instanceof Error ? reason.message : 'Could not move Quick Ask to chat.'); }
     finally { setQuickImporting(false); }
   }
@@ -1110,7 +1253,8 @@ export default function Home() {
 
   function showLinkInPdf(entry: HighlightEntry) {
     const viewer = viewerRef.current;
-    const page = viewer?.querySelector<HTMLElement>(`[data-page-number="${entry.page}"] .react-pdf__Page`);
+    // Placeholders share the rendered page geometry, so distant links can scroll before mounting.
+    const page = viewer?.querySelector<HTMLElement>(`[data-page-number="${entry.page}"] .pdf-raster-surface`);
     if (!viewer || !page) {
       setError('The linked PDF page is still loading. Please try again in a moment.');
       return;
@@ -1147,7 +1291,7 @@ export default function Home() {
       setPaneMode('chat');
       changeReadingMode(false);
       setHistoryOpen(false);
-      setLinkedTurn({ conversationId: conversation.id, question: link.question });
+      setLinkedTurn({ conversationId: conversation.id, question: link.question, reveal: ++linkedTurnRevealRef.current });
     } catch (reason) {
       setError(reason instanceof Error ? reason.message : 'This linked chat could not be opened.');
     }
@@ -1227,6 +1371,7 @@ export default function Home() {
       pageTrackFrameRef.current = null;
       const viewer = viewerRef.current;
       if (!viewer) return;
+      updatePageWindow();
       // Match the saved reading anchor, including when several pages fit onscreen.
       const readingLine = viewer.getBoundingClientRect().top + 12;
       const stages = Array.from(viewer.querySelectorAll<HTMLElement>('[data-page-number]'));
@@ -1303,7 +1448,7 @@ export default function Home() {
     }).filter((item) => item.right > selectionLeft && item.left < selectionRight && item.bottom > selectionTop && item.top < selectionBottom);
     if (!intersectingPages.length) return;
     const firstCanvas = intersectingPages[0].element.querySelector<HTMLCanvasElement>('.react-pdf__Page__canvas');
-    if (!firstCanvas) return;
+    if (!firstCanvas?.width) return;
     const nativeScale = firstCanvas.width / intersectingPages[0].rect.width;
     const outputScale = Math.min(nativeScale, 4096 / Math.max(selectionWidth, selectionHeight));
     const output = document.createElement('canvas');
@@ -1315,7 +1460,7 @@ export default function Home() {
     outputContext.fillRect(0, 0, output.width, output.height);
     intersectingPages.forEach(({ element, rect, left, top, right, bottom }) => {
       const source = element.querySelector<HTMLCanvasElement>('.react-pdf__Page__canvas');
-      if (!source) return;
+      if (!source?.width || !source.height) return;
       const cropLeft = Math.max(selectionLeft, left);
       const cropTop = Math.max(selectionTop, top);
       const cropRight = Math.min(selectionRight, right);
@@ -1576,34 +1721,61 @@ export default function Home() {
 
   async function ask(event: FormEvent) {
     event.preventDefault();
-    if (!active || !activeConversation || !question.trim() || asking) return;
+    const sentQuestion = questionStore.get().trim();
+    if (!active || !activeConversation || !sentQuestion || asking) return;
     const originPaperId = active.id;
     const originConversationId = activeConversation.id;
     const existing = pendingAnswersRef.current.get(originConversationId);
     if (existing?.status === 'connecting' || existing?.status === 'streaming') return;
     const sendingConversation = activeConversation.message_count === 0 ? await syncConversationDefaults(activeConversation) : activeConversation;
     if (activePaperIdRef.current !== originPaperId || activeConversationIdRef.current !== originConversationId) return;
-    const sentQuestion = question.trim();
     const sentContext = contextSelections.map((selection) => ({ ...selection }));
     const pending: PendingAnswer = { question: sentQuestion, context: sentContext, answer: '', status: 'connecting', error: '', web: null, searchNotice: '' };
     pendingAnswersRef.current.set(originConversationId, pending);
     const isVisible = () => activePaperIdRef.current === originPaperId && activeConversationIdRef.current === originConversationId && pendingAnswersRef.current.get(originConversationId) === pending;
-    if (submittedQuestion && answer) {
-      setChatHistory((current) => [...current, { id: crypto.randomUUID(), question: submittedQuestion, answer, context: submittedContext, web: answerWeb }]);
+    const previousAnswer = answerStore.get();
+    if (submittedQuestion && previousAnswer) {
+      setChatHistory((current) => [...current, { id: crypto.randomUUID(), question: submittedQuestion, answer: previousAnswer, context: submittedContext, web: answerWeb }]);
     }
+    // Fragments always accumulate in `pending` (so background conversations stay
+    // current); the visible answer is published at most once per batch interval.
+    const batcher = createStreamBatcher(() => { if (isVisible()) answerStore.set(pending.answer); });
+    streamBatchersRef.current.add(batcher);
     followOutputRef.current = true;
     setAsking(true);
-    setQuestion('');
+    questionStore.set('');
     setSubmittedQuestion(sentQuestion);
     setSubmittedContext(sentContext);
     setContextSelections([]);
-    setAnswer('');
+    answerStore.set('');
     setAnswerWeb(null);
     setSearchNotice('');
     const allowWebSearch = searchEnabled;
     setSearchEnabled(false);
     setError('');
     setStreamStatus('connecting');
+    let finished = false;
+    let generatedTitle: string | null = null;
+    const applyTitle = (title: string) => {
+      generatedTitle = title;
+      setActiveConversation((current) => current?.id === sendingConversation.id ? { ...current, title } : current);
+      setConversations((current) => current.map((item) => item.id === sendingConversation.id ? { ...item, title } : item));
+    };
+    // The answer is saved once `completed` arrives; the stream may stay open only to deliver a slow title.
+    const finishAnswer = () => {
+      if (finished) return;
+      finished = true;
+      // Publish every buffered fragment before unlocking, so the next turn archives the full answer.
+      batcher.flush();
+      pending.status = 'complete';
+      if (isVisible()) { answerStore.set(pending.answer); setStreamStatus('complete'); setAsking(false); }
+      void fetch(`${API_BASE}/api/conversations/${sendingConversation.id}`).then((result) => result.ok ? result.json() as Promise<Conversation> : null).catch(() => null).then((savedConversation) => {
+        const updatedConversation = { ...sendingConversation, ...(savedConversation ?? {}), message_count: savedConversation?.message_count ?? sendingConversation.message_count + 2, updated_at: savedConversation?.updated_at ?? new Date().toISOString() };
+        if (generatedTitle) updatedConversation.title = generatedTitle;
+        if (isVisible()) setActiveConversation((current) => current?.id === updatedConversation.id ? updatedConversation : current);
+        setConversations((current) => current.map((item) => item.id === updatedConversation.id ? updatedConversation : item));
+      });
+    };
     try {
       const response = await fetch(`${API_BASE}/api/conversations/${sendingConversation.id}/messages/stream`, {
         method: 'POST', headers: { 'Content-Type': 'application/json' },
@@ -1643,26 +1815,31 @@ export default function Home() {
             if (isVisible()) { setAnswerWeb(pending.web); setSearchNotice(pending.searchNotice); }
           }
           if (data.type === 'delta') {
+            const first = pending.status !== 'streaming';
             pending.answer += data.text;
             pending.status = 'streaming';
-            if (isVisible()) { setAnswer(pending.answer); setStreamStatus('streaming'); }
+            if (first) { batcher.flush(); if (isVisible()) setStreamStatus('streaming'); } else batcher.schedule();
           }
           if (data.type === 'error') throw new Error(data.message);
           if (data.type === 'completed') {
             pending.web = data.web as WebInfo;
             if (isVisible()) { setAnswerWeb(pending.web); if (!pending.searchNotice) setSearchNotice(''); }
+            finishAnswer();
           }
+          if (data.type === 'title' && data.title) applyTitle(data.title);
         }
       }
-      const savedConversation = await fetch(`${API_BASE}/api/conversations/${sendingConversation.id}`).then((result) => result.ok ? result.json() as Promise<Conversation> : null).catch(() => null);
-      const updatedConversation = { ...sendingConversation, ...(savedConversation ?? {}), message_count: savedConversation?.message_count ?? sendingConversation.message_count + 2, updated_at: savedConversation?.updated_at ?? new Date().toISOString() };
-      pending.status = 'complete';
-      if (isVisible()) { setAnswer(pending.answer); setStreamStatus('complete'); setAsking(false); setActiveConversation((current) => current?.id === updatedConversation.id ? updatedConversation : current); }
-      setConversations((current) => current.map((item) => item.id === updatedConversation.id ? updatedConversation : item));
+      finishAnswer();
     } catch (reason) {
+      // A dropped connection while waiting for the title must not mark the saved answer failed.
+      if (finished) return;
+      batcher.flush();
       pending.error = reason instanceof Error ? reason.message : 'The model request failed.';
       pending.status = 'error';
       if (isVisible()) { setError(pending.error); setStreamStatus('error'); setAsking(false); }
+    } finally {
+      batcher.cancel();
+      streamBatchersRef.current.delete(batcher);
     }
   }
 
@@ -1670,11 +1847,12 @@ export default function Home() {
   if (!active) return (<>
     <ActionTooltips />
     <AppDialogs />
-    <LibraryDashboard key={libraryNavigation} onSearch={() => setPaperSearchOpen(true)} papers={papers} loading={libraryLoading} uploading={uploading} error={error} brand={<Brand />} settings={<SettingsButton onClick={() => setSettingsOpen(true)} />} preview={(paper) => <PaperPreview paper={paper} />} onOpen={(paper) => openPaper(paper)} onUpload={upload} onDelete={(paper) => deletePaper(paper)} onUpdate={(updated) => setPapers((current) => current.map((paper) => updated.find((item) => item.id === paper.id) ?? paper))} />
+    <LibraryDashboard key={libraryNavigation} onSearch={(folderId) => { setPaperSearchMode('library'); setPaperSearchFolder(folderId ?? null); setPaperSearchOpen(true); }} onFindPapers={(folderId) => { setPaperSearchMode('online'); setPaperSearchFolder(folderId); setPaperSearchOpen(true); }} papers={papers} loading={libraryLoading} uploading={uploading} error={error} brand={<Brand />} settings={<SettingsButton onClick={() => setSettingsOpen(true)} />} preview={(paper) => <PaperPreview paper={paper} />} onOpen={(paper) => openPaper(paper)} onUpload={upload} onDelete={(paper) => deletePaper(paper)} onUpdate={(updated) => setPapers((current) => current.map((paper) => updated.find((item) => item.id === paper.id) ?? paper))} />
     {settingsOpen && <SettingsDialog onClose={closeSettings} />}
-    {paperSearchOpen && <LibrarySpotlight onBrowseFolder={(folderId) => { window.localStorage.setItem('adam.libraryLocation', folderId); setLibraryNavigation((value) => value + 1); setPaperSearchOpen(false); returnToLibrary(); }} papers={papers} onClose={() => setPaperSearchOpen(false)} onOpen={(paper) => { setPaperSearchOpen(false); openPaper(paper); }} />}
+    {paperSearchOpen && <LibrarySpotlight initialMode={paperSearchMode} initialFolderId={paperSearchFolder} onImported={(paper) => setPapers((current) => current.some((item) => item.id === paper.id) ? current.map((item) => item.id === paper.id ? paper : item) : [paper, ...current])} onBrowseFolder={(folderId) => { window.localStorage.setItem('adam.libraryLocation', folderId); setLibraryNavigation((value) => value + 1); setPaperSearchOpen(false); returnToLibrary(); }} papers={papers} onClose={() => setPaperSearchOpen(false)} onOpen={(paper) => { setPaperSearchOpen(false); openPaper(paper); }} />}
   </>);
 
+  const aspects = pageAspects(pageSizes, pages);
   return (
     <main className={`reader-shell${focusReading ? ' focus-reading' : ''}`}>
       <ActionTooltips />
@@ -1682,8 +1860,8 @@ export default function Home() {
       <header className="reader-header"><div className="reader-header-start"><button className="brand-button reader-back" onClick={returnToLibrary} aria-label="Back to library" data-tooltip="Back to your library"><UiIcon kind="back" /><span className="brand-mark" aria-hidden="true">A</span><span className="reader-back-label">Library</span></button></div><div className="document-title">{renaming ? <form onSubmit={(event) => void renamePaper(event)}><input autoFocus aria-label="PDF filename" value={renameValue} maxLength={512} onChange={(event) => setRenameValue(event.target.value)} onKeyDown={(event) => { if (event.key === 'Escape') setRenaming(false); }} disabled={renameSaving} /><button type="submit" disabled={!renameValue.trim() || renameSaving}>{renameSaving ? 'Saving…' : 'Save'}</button></form> : <button type="button" className="document-title-button" title="Rename PDF" onClick={() => { setRenameValue(active.original_name.replace(/\.pdf$/i, '')); setRenaming(true); }}><strong>{active.original_name.replace(/\.pdf$/i, '')}</strong><span aria-hidden="true">✎</span></button>}<span>{pages || active.page_count} pages · stored locally</span></div><div className="reader-header-tools"><button type="button" ref={focusButtonRef} className="focus-reading-button" aria-pressed={focusReading} aria-keyshortcuts="F" title={focusReading ? 'Exit focus reading · Esc' : 'Focus reading · F'} onClick={() => changeReadingMode(!focusReading)}><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.7" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true"><path d={focusReading ? 'M4 9h5V4m11 5h-5V4M4 15h5v5m11-5h-5v5' : 'M9 4H4v5m11-5h5v5M4 15v5h5m11-5v5h-5'} /></svg><span>{focusReading ? 'Exit focus' : 'Focus reading'}</span><kbd>{focusReading ? 'Esc' : 'F'}</kbd></button><button type="button" className={`note-view-button${notesVisible ? ' active' : ''}`} onClick={toggleNotes} data-tooltip={notesVisible ? 'Hide anchored notes beside the pages' : 'Show anchored notes beside the pages'} aria-pressed={notesVisible}><UiIcon kind="note" /><span className="note-view-label">{notesVisible ? 'Hide notes' : 'Notes'}</span><strong>{highlightEntries.filter((entry) => entry.note_text).length}</strong></button><button type="button" className="reader-delete-button" aria-label="Delete paper" data-tooltip="Permanently delete this paper" onClick={() => void deletePaper(active)}><TrashIcon /></button><SettingsButton compact onClick={() => setSettingsOpen(true)} /></div></header>
       <div className={`reader-workspace${notesVisible && !focusReading ? ' notes-mode' : ''}`} ref={workspaceRef} style={{ gridTemplateColumns: `minmax(0, ${paperPercent}fr) minmax(340px, ${100 - paperPercent}fr)` }}>
         <section className={`pdf-pane${screenshotMode ? ' screenshot-mode' : ''}`} ref={viewerRef} onScroll={trackCurrentPage} onMouseUp={() => { if (!screenshotMode) captureSelection(); }} onPointerDown={beginScreenshot} onPointerMove={moveScreenshot} onPointerUp={finishScreenshot} onPointerCancel={() => { screenshotPointerRef.current = null; setScreenshotDrag(null); setScreenshotMode(false); }}>
-          <PdfDocument key={active.id} file={`${API_BASE}/api/documents/${active.id}/file`} onLoadSuccess={({ numPages }) => setPages(numPages)} loading={<div className="viewer-message">Rendering paper…</div>} error={<div className="viewer-message error-banner">Could not render this PDF.</div>}>
-            {Array.from({ length: pages }, (_, index) => { const pageEntries = highlightEntries.filter((entry) => entry.page === index + 1); const pageNotes = pageEntries.filter((entry) => entry.note_text).sort(compareNotePosition); const aiNotes = pageEntries.filter((entry) => entry.ai_links?.length).sort(compareNotePosition); const markers = pageEntries.filter((entry) => entry.note_text || entry.ai_links?.length).sort(compareNotePosition); const pageScale = zoom / BASE_RENDER_SCALE; return <div className="pdf-page-stage" data-page-number={index + 1} key={index + 1}><div className="pdf-page-wrap" style={{ zoom: pageScale, '--page-scale': pageScale } as CSSProperties}><PdfPageWithHighlights pageNumber={index + 1} highlights={pageEntries} zoom={rasterZoom} onReady={pageReady} />{pageEntries.filter((entry) => entry.id === revealedLinkId).map((entry) => <LinkedPassageReveal key={`${entry.id}-${linkRevealVersion}`} entry={entry} viewerRef={viewerRef} />)}{aiNotes.map((note) => <button type="button" className="ai-note-anchor" style={{ top: `${noteMarkerTop(markers, markers.indexOf(note)) * 100}%` }} title={`${note.ai_links!.length} linked AI ${note.ai_links!.length === 1 ? 'note' : 'notes'}`} aria-label="Open linked AI notes" onClick={() => { changeReadingMode(false); setPaneMode('links'); setSelectedAiNote(note); }} key={`ai-${note.id}`}>✦<small>{note.ai_links!.length}</small></button>)}{(!notesVisible || focusReading) && pageNotes.map((note) => <button type="button" className="note-anchor" style={{ top: `${noteMarkerTop(markers, markers.indexOf(note)) * 100}%`, '--note-color': note.color } as CSSProperties} title="Open note" aria-label="Open note" onClick={() => openSavedNote(note)} key={note.id}>▰</button>)}{notesVisible && !focusReading && <aside className="page-notes" aria-label={`Notes for page ${index + 1}`}>{pageNotes.map((note, noteIndex) => <button type="button" className="page-note-card" style={{ top: `${noteCardTop(pageNotes, noteIndex) * 100}%`, '--note-color': note.color } as CSSProperties} onClick={() => openSavedNote(note)} key={note.id}><span>Page {index + 1}</span><p>{note.note_text}</p><small>{note.text}</small></button>)}</aside>}<span className="page-label">{index + 1}</span></div></div>; })}
+          <PdfDocument key={active.id} file={`${API_BASE}/api/documents/${active.id}/file`} onLoadSuccess={(pdf) => { setPdfDocument(pdf); setPages(pdf.numPages); }} loading={<div className="viewer-message">Rendering paper…</div>} error={<div className="viewer-message error-banner">Could not render this PDF.</div>}>
+            {Array.from({ length: pages }, (_, index) => { const pageEntries = highlightEntries.filter((entry) => entry.page === index + 1); const pageNotes = pageEntries.filter((entry) => entry.note_text).sort(compareNotePosition); const aiNotes = pageEntries.filter((entry) => entry.ai_links?.length).sort(compareNotePosition); const markers = pageEntries.filter((entry) => entry.note_text || entry.ai_links?.length).sort(compareNotePosition); const pageScale = zoom / BASE_RENDER_SCALE; const surfaceHeight = BASE_PAGE_WIDTH * BASE_RENDER_SCALE * aspects[index]; const mounted = isPageMounted(pageWindow, index + 1); return <div className="pdf-page-stage" data-page-number={index + 1} key={index + 1}><div className="pdf-page-wrap" style={{ zoom: pageScale, '--page-scale': pageScale } as CSSProperties}>{mounted ? <PdfPageWithHighlights pageNumber={index + 1} highlights={pageEntries} zoom={rasterZoom} height={surfaceHeight} onSize={recordPageSize} /> : <div className="pdf-raster-surface pdf-page-placeholder" style={{ width: BASE_PAGE_WIDTH * BASE_RENDER_SCALE, height: surfaceHeight }} aria-hidden="true" />}{pageEntries.filter((entry) => entry.id === revealedLinkId).map((entry) => <LinkedPassageReveal key={`${entry.id}-${linkRevealVersion}`} entry={entry} viewerRef={viewerRef} />)}{aiNotes.map((note) => <button type="button" className="ai-note-anchor" style={{ top: `${noteMarkerTop(markers, markers.indexOf(note)) * 100}%` }} title={`${note.ai_links!.length} linked AI ${note.ai_links!.length === 1 ? 'note' : 'notes'}`} aria-label="Open linked AI notes" onClick={() => { changeReadingMode(false); setPaneMode('links'); setSelectedAiNote(note); }} key={`ai-${note.id}`}>✦<small>{note.ai_links!.length}</small></button>)}{(!notesVisible || focusReading) && pageNotes.map((note) => <button type="button" className="note-anchor" style={{ top: `${noteMarkerTop(markers, markers.indexOf(note)) * 100}%`, '--note-color': note.color } as CSSProperties} title="Open note" aria-label="Open note" onClick={() => openSavedNote(note)} key={note.id}>▰</button>)}{notesVisible && !focusReading && <aside className="page-notes" aria-label={`Notes for page ${index + 1}`}>{pageNotes.map((note, noteIndex) => <button type="button" className="page-note-card" style={{ top: `${noteCardTop(pageNotes, noteIndex) * 100}%`, '--note-color': note.color } as CSSProperties} onClick={() => openSavedNote(note)} key={note.id}><span>Page {index + 1}</span><p>{note.note_text}</p><small>{note.text}</small></button>)}</aside>}<span className="page-label">{index + 1}</span></div></div>; })}
           </PdfDocument>
           {screenshotMode && !screenshotDrag && <div className="screenshot-hint">Drag over the PDF to ask about it · Esc to cancel</div>}
           {screenshotDrag && <div className="screenshot-region" style={{ left: screenshotDrag.overlayLeft, top: screenshotDrag.overlayTop, width: screenshotDrag.overlayWidth, height: screenshotDrag.overlayHeight }} />}
@@ -1697,14 +1875,14 @@ export default function Home() {
             <button type="button" className="new-chat-card" onClick={() => void createNewConversation()}><span>＋</span><div><strong>Start a new chat</strong><small>Uses your current default model</small></div><i>→</i></button>
             <div className="history-list">{conversations.map((item) => <article className={`history-card${item.id === activeConversation?.id ? ' current' : ''}`} key={item.id}>{renamingChatId === item.id ? <form className="chat-title-form history-title-form" onSubmit={(event) => void renameConversation(event, item)}><input autoFocus value={chatTitleValue} maxLength={200} aria-label="Chat title" onChange={(event) => setChatTitleValue(event.target.value)} onKeyDown={(event) => { if (event.key === 'Escape') setRenamingChatId(null); }} /><button type="submit" disabled={!chatTitleValue.trim() || titleSaving}>Save</button><button type="button" onClick={() => setRenamingChatId(null)}>Cancel</button></form> : <button type="button" className="history-card-main" onClick={() => void openConversation(item)}><div className="history-card-top"><span className="history-model-mark">✦</span><time>{formatConversationDate(item.updated_at)}</time></div><strong>{item.title}</strong><p>{item.provider} · {item.model_id}</p><div className="history-card-meta"><span>{Math.ceil(item.message_count / 2)} {Math.ceil(item.message_count / 2) === 1 ? 'exchange' : 'exchanges'}</span><span>{item.context_builder_version === 'quick-ask-v1' ? 'Selection only' : 'Full paper'}</span>{item.id === activeConversation?.id && <em>Current</em>}</div></button>}<div className="history-card-actions"><button type="button" aria-label={`Rename ${item.title}`} title="Rename chat" onClick={() => beginChatRename(item)}>✎</button>{item.message_count > 0 && <button type="button" aria-label={`Regenerate title for ${item.title}`} title="Regenerate title with the model selected in Settings" disabled={titleSaving} onClick={() => void regenerateConversationTitle(item)}>↻</button>}<button type="button" className="history-delete" aria-label={`Delete ${item.title}`} title="Delete chat" onClick={() => void deleteConversation(item)}><TrashIcon /></button></div></article>)}</div>
           </section> : <>
-            <div className="conversation-header"><div>{activeConversation && renamingChatId === activeConversation.id ? <form className="chat-title-form" onSubmit={(event) => void renameConversation(event, activeConversation)}><input autoFocus value={chatTitleValue} maxLength={200} aria-label="Chat title" onChange={(event) => setChatTitleValue(event.target.value)} onKeyDown={(event) => { if (event.key === 'Escape') setRenamingChatId(null); }} /><button type="submit" disabled={!chatTitleValue.trim() || titleSaving}>Save</button></form> : <button type="button" className="chat-title-button" title="Rename chat" onClick={() => activeConversation && beginChatRename(activeConversation)}><strong>{activeConversation?.title ?? 'Loading chat…'}</strong><span>✎</span></button>}<small>{activeConversation ? `${activeConversation.provider} · ${activeConversation.model_id}` : 'Preparing paper context'}</small></div><div className="conversation-actions">{activeConversation && activeConversation.message_count > 0 && <button type="button" disabled={titleSaving} onClick={() => void regenerateConversationTitle(activeConversation)} title="Regenerate title with the model selected in Settings"><UiIcon kind="refresh" /><span>Title</span></button>}<button type="button" onClick={() => void createNewConversation()} title="Start a new chat"><UiIcon kind="plus" /><span>New</span></button><button type="button" onClick={() => setHistoryOpen(true)} title="Browse chats for this paper"><UiIcon kind="history" /><span>History</span></button></div></div>
+            <div className="conversation-header"><div>{activeConversation && renamingChatId === activeConversation.id ? <form className="chat-title-form" onSubmit={(event) => void renameConversation(event, activeConversation)}><input autoFocus value={chatTitleValue} maxLength={200} aria-label="Chat title" onChange={(event) => setChatTitleValue(event.target.value)} onKeyDown={(event) => { if (event.key === 'Escape') setRenamingChatId(null); }} /><button type="submit" disabled={!chatTitleValue.trim() || titleSaving}>Save</button></form> : <button type="button" className="chat-title-button" title="Rename chat" onClick={() => activeConversation && beginChatRename(activeConversation)}><strong>{activeConversation?.title ?? 'Loading chat…'}</strong><span>✎</span></button>}<small>{activeConversation ? `${activeConversation.provider} · ${activeConversation.model_id}` : 'Preparing paper context'}</small></div><div className="conversation-actions">{activeConversation && activeConversation.message_count > 0 && <button type="button" disabled={titleSaving} onClick={() => void regenerateConversationTitle(activeConversation)} title="Regenerate title with the model selected in Settings"><UiIcon kind="refresh" /><span>Title</span></button>}<button type="button" onClick={() => void createNewConversation()} title="Start a new chat"><UiIcon kind="plus" /><span>New</span></button><button type="button" onClick={() => { setLinkedTurn(null); setHistoryOpen(true); }} title="Browse chats for this paper"><UiIcon kind="history" /><span>History</span></button></div></div>
             <div className="chat-body" ref={chatBodyRef} onWheelCapture={(event) => { if (event.deltaY < 0) pauseChatFollow(); }} onTouchMove={pauseChatFollow} onPointerDown={(event) => { if (event.target === event.currentTarget) pauseChatFollow(); }} onScroll={(event) => { const element = event.currentTarget; followOutputRef.current = element.scrollHeight - element.scrollTop - element.clientHeight < 40; }}><div className="chat-heading"><span className="spark">✦</span><div><strong>{activeConversation?.context_builder_version === 'quick-ask-v1' ? 'Saved Quick Ask' : 'Ask about this paper'}</strong><p>{activeConversation?.context_builder_version === 'quick-ask-v1' ? 'This saved thread uses only its original selection and Quick Ask prompt.' : 'The full paper is available automatically. Select text only when you want to focus the answer.'}</p></div></div>{chatConfigured === false && <button type="button" className="no-key-notice" onClick={() => setSettingsOpen(true)}><strong>No API key configured</strong><span>Choose a provider and add a key in Settings to enable chat.</span></button>}
-              {chatHistory.map((turn) => <div className={`chat-turn${linkedTurn?.conversationId === activeConversation?.id && linkedTurn?.question === turn.question ? ' linked-turn' : ''}`} data-question={turn.question} tabIndex={-1} key={turn.id}>{turn.importedQuickAsk && <div className="quick-import-badge">✦ Saved Quick Ask · selection only</div>}<ContextList selections={turn.context} />{activeConversation && turn.context.some((item) => item.rects?.length) && <button type="button" className={`turn-link-button${isAiLinked(activeConversation.id, turn.question) ? ' linked' : ''}`} onClick={() => void toggleAiLink(activeConversation, turn.question, turn.context)}>{isAiLinked(activeConversation.id, turn.question) ? '✦ Linked to PDF · click to unlink' : '✦ Link reference to PDF'}</button>}<div className="user-message"><span>You</span><p>{turn.question}</p></div><div className="answer-card complete"><div className="answer-meta"><span>Adam</span><span className="stream-state">Done</span></div><MarkdownAnswer web={turn.web}>{turn.answer}</MarkdownAnswer><WebEvidence web={turn.web} /></div></div>)}
+              {chatHistory.map((turn) => <div className="chat-turn" data-question={turn.question} tabIndex={-1} key={turn.id}>{linkedTurn?.conversationId === activeConversation?.id && linkedTurn?.question === turn.question && <span key={linkedTurn.reveal} className="linked-turn-reveal" aria-hidden="true" onAnimationEnd={() => setLinkedTurn((current) => current === linkedTurn ? null : current)} />}{turn.importedQuickAsk && <div className="quick-import-badge">✦ Saved Quick Ask · selection only</div>}<ContextList selections={turn.context} />{activeConversation && turn.context.some((item) => item.rects?.length) && <button type="button" className={`turn-link-button${isAiLinked(activeConversation.id, turn.question) ? ' linked' : ''}`} onClick={() => void toggleAiLink(activeConversation, turn.question, turn.context)}>{isAiLinked(activeConversation.id, turn.question) ? '✦ Linked to PDF · click to unlink' : '✦ Link reference to PDF'}</button>}<div className="user-message"><span>You</span><p>{turn.question}</p></div><div className="answer-card complete"><div className="answer-meta"><span>Adam</span><span className="stream-state">Done</span></div><MarkdownAnswer web={turn.web}>{turn.answer}</MarkdownAnswer><WebEvidence web={turn.web} /></div></div>)}
               {submittedQuestion && <><ContextList selections={submittedContext} />{activeConversation && streamStatus === 'complete' && submittedContext.some((item) => item.rects?.length) && <button type="button" className={`turn-link-button${isAiLinked(activeConversation.id, submittedQuestion) ? ' linked' : ''}`} onClick={() => void toggleAiLink(activeConversation, submittedQuestion, submittedContext)}>{isAiLinked(activeConversation.id, submittedQuestion) ? '✦ Linked to PDF · click to unlink' : '✦ Link reference to PDF'}</button>}<div className="user-message"><span>You</span><p>{submittedQuestion}</p></div></>}
-              {streamStatus !== 'idle' && streamStatus !== 'error' && <div className={`answer-card ${streamStatus}`} aria-live="polite"><div className="answer-meta"><span>Adam</span><span className="stream-state">{streamStatus === 'connecting' ? <>Thinking<span className="thinking-dots"><i /><i /><i /></span></> : streamStatus === 'streaming' ? 'Responding…' : 'Done'}</span></div>{searchNotice && <p className="search-notice" role="status">{searchNotice}</p>}{answer ? <MarkdownAnswer web={answerWeb} streaming={streamStatus === 'streaming'}>{answer}</MarkdownAnswer> : <div className="answer-skeleton"><i /><i /><i /></div>}<WebEvidence web={answerWeb} /></div>}{error && <p className="error-banner compact">{error}</p>}
-              {contextSelections.length > 0 ? <ContextList selections={contextSelections} onRemove={(id) => setContextSelections((current) => current.filter((item) => item.id !== id))} /> : !submittedQuestion && chatHistory.length === 0 && <div className="empty-context"><span>✦</span><p>Ask anything about the paper, or select a passage for precise focus.</p>{canAsk && activeConversation?.context_builder_version !== 'quick-ask-v1' && <div className="prompt-suggestions">{PROMPT_SUGGESTIONS.map((suggestion) => <button type="button" key={suggestion} onClick={() => { setQuestion(suggestion); composerRef.current?.focus(); }}>{suggestion}</button>)}</div>}</div>}
+              {streamStatus !== 'idle' && streamStatus !== 'error' && <div className={`answer-card ${streamStatus}`} aria-live="polite"><div className="answer-meta"><span>Adam</span><span className="stream-state">{streamStatus === 'connecting' ? <>Thinking<span className="thinking-dots"><i /><i /><i /></span></> : streamStatus === 'streaming' ? 'Responding…' : 'Done'}</span></div>{searchNotice && <p className="search-notice" role="status">{searchNotice}</p>}<StreamingMarkdown store={answerStore} web={answerWeb} streaming={streamStatus === 'streaming'} onCommit={followChatOutput} /><WebEvidence web={answerWeb} /></div>}{error && <p className="error-banner compact">{error}</p>}
+              {contextSelections.length > 0 ? <ContextList selections={contextSelections} onRemove={(id) => setContextSelections((current) => current.filter((item) => item.id !== id))} /> : !submittedQuestion && chatHistory.length === 0 && <div className="empty-context"><span>✦</span><p>Ask anything about the paper, or select a passage for precise focus.</p>{canAsk && activeConversation?.context_builder_version !== 'quick-ask-v1' && <div className="prompt-suggestions">{PROMPT_SUGGESTIONS.map((suggestion) => <button type="button" key={suggestion} onClick={() => { questionStore.set(suggestion); composerRef.current?.focus(); }}>{suggestion}</button>)}</div>}</div>}
             </div>
-            <form className="composer" onSubmit={ask}><div className="composer-scope"><span className={`scope-pill${contextSelections.length ? ' focused' : ''}`}><i aria-hidden="true" />{chatConfigured === false ? 'Chat unavailable' : activeConversation?.context_builder_version === 'quick-ask-v1' ? 'Selection-only context' : contextSelections.length ? `${contextSelections.length} context ${contextSelections.length === 1 ? 'item' : 'items'}` : 'Full paper context'}</span></div><textarea ref={composerRef} value={question} onChange={(event) => setQuestion(event.target.value)} onKeyDown={(event) => { if (event.key === 'Enter' && !event.shiftKey && !event.nativeEvent.isComposing) { event.preventDefault(); event.currentTarget.form?.requestSubmit(); } }} placeholder={chatConfigured === false ? 'Add an API key in Settings to chat…' : activeConversation?.context_builder_version === 'quick-ask-v1' ? 'Continue this saved Quick Ask…' : contextSelections.length ? 'Ask about your context…' : 'Ask anything about this paper…'} disabled={!canAsk || asking} rows={3} /><div><button type="button" className={`composer-search-toggle${searchEnabled ? ' active' : ''}`} aria-pressed={searchEnabled} onClick={() => setSearchEnabled((enabled) => !enabled)} title="Allow a web search for this question"><UiIcon kind="globe" />Search web</button><span className="composer-hint"><kbd>↵</kbd> send <kbd>⇧↵</kbd> new line</span><button type="submit" disabled={!canAsk || !question.trim() || asking}>{asking ? '…' : <UiIcon kind="send" />}</button></div></form>
+            <form className="composer" onSubmit={ask}><div className="composer-scope"><span className={`scope-pill${contextSelections.length ? ' focused' : ''}`}><i aria-hidden="true" />{chatConfigured === false ? 'Chat unavailable' : activeConversation?.context_builder_version === 'quick-ask-v1' ? 'Selection-only context' : contextSelections.length ? `${contextSelections.length} context ${contextSelections.length === 1 ? 'item' : 'items'}` : 'Full paper context'}</span></div><DraftTextarea store={questionStore} ref={composerRef} onKeyDown={(event) => { if (event.key === 'Enter' && !event.shiftKey && !event.nativeEvent.isComposing) { event.preventDefault(); event.currentTarget.form?.requestSubmit(); } }} placeholder={chatConfigured === false ? 'Add an API key in Settings to chat…' : activeConversation?.context_builder_version === 'quick-ask-v1' ? 'Continue this saved Quick Ask…' : contextSelections.length ? 'Ask about your context…' : 'Ask anything about this paper…'} disabled={!canAsk || asking} rows={3} /><div><button type="button" className={`composer-search-toggle${searchEnabled ? ' active' : ''}`} aria-pressed={searchEnabled} onClick={() => setSearchEnabled((enabled) => !enabled)} title="Allow a web search for this question"><UiIcon kind="globe" />Search web</button><span className="composer-hint"><kbd>↵</kbd> send <kbd>⇧↵</kbd> new line</span><button type="submit" disabled={!canAsk || !hasQuestion || asking}>{asking ? '…' : <UiIcon kind="send" />}</button></div></form>
           </>}
         </aside>
       </div>
@@ -1717,15 +1895,15 @@ export default function Home() {
         <div className={`quick-ask-context${quickAskTarget.imageDataUrl ? ' image' : ''}`}>{quickAskTarget.imageDataUrl ? <img src={quickAskTarget.imageDataUrl} alt="Selected PDF area" /> : <blockquote>{quickAskTarget.text}</blockquote>}</div>
         <div className="quick-thread" ref={quickThreadRef} onWheelCapture={(event) => { if (event.deltaY < 0) quickFollowRef.current = false; }} onTouchMove={() => { quickFollowRef.current = false; }} onScroll={(event) => { const element = event.currentTarget; quickFollowRef.current = element.scrollHeight - element.scrollTop - element.clientHeight < 24; }}>
           {quickTurns.map((turn, index) => <div className="quick-turn" key={index}><div className="quick-user">{turn.question}</div><MarkdownAnswer web={turn.web}>{turn.answer}</MarkdownAnswer><WebEvidence web={turn.web} /></div>)}
-          {(quickActiveQuestion && (quickAnswer || quickAsking)) && <div className="quick-turn"><div className="quick-user">{quickActiveQuestion}</div>{quickSearchNotice && <p className="search-notice">{quickSearchNotice}</p>}{quickAnswer ? <MarkdownAnswer streaming={quickAsking} web={quickAnswerWeb}>{quickAnswer}</MarkdownAnswer> : <div className="answer-skeleton"><i /><i /><i /></div>}<WebEvidence web={quickAnswerWeb} /></div>}
+          {(quickActiveQuestion && (hasQuickAnswer || quickAsking)) && <div className="quick-turn"><div className="quick-user">{quickActiveQuestion}</div>{quickSearchNotice && <p className="search-notice">{quickSearchNotice}</p>}<StreamingMarkdown store={quickAnswerStore} streaming={quickAsking} web={quickAnswerWeb} onCommit={followQuickThread} /><WebEvidence web={quickAnswerWeb} /></div>}
         </div>
-        <div className="quick-ask-entry"><input ref={quickAskInputRef} value={quickQuestion} onChange={(event) => setQuickQuestion(event.target.value)} placeholder={quickTurns.length || quickAnswer ? 'Ask a follow-up…' : 'What would you like clarified?'} disabled={quickAsking} /><button type="submit" disabled={!quickQuestion.trim() || quickAsking}>{quickAsking ? '…' : '↑'}</button></div>
+        <div className="quick-ask-entry"><DraftInput store={quickQuestionStore} ref={quickAskInputRef} placeholder={quickTurns.length || hasQuickAnswer ? 'Ask a follow-up…' : 'What would you like clarified?'} disabled={quickAsking} /><button type="submit" disabled={!hasQuickQuestion || quickAsking}>{quickAsking ? '…' : '↑'}</button></div>
         <div className="quick-ask-search-row"><button type="button" className={`composer-search-toggle${quickSearchEnabled ? ' active' : ''}`} aria-pressed={quickSearchEnabled} onClick={() => setQuickSearchEnabled((enabled) => !enabled)} title="Allow a web search for this question">⌕ Search web</button></div>
         {quickError && <p className="quick-ask-error">{quickError}</p>}
-        <div className="quick-ask-footer"><span>Save this thread before linking it to the PDF</span><div><button type="button" className="move-to-chat" onClick={() => void importQuickAsk()} disabled={quickAsking || quickImporting || (!quickTurns.length && !quickAnswer)}>{quickImporting ? 'Saving…' : 'Save as new chat →'}</button></div></div>
+        <div className="quick-ask-footer"><span>Save this thread before linking it to the PDF</span><div><button type="button" className="move-to-chat" onClick={() => void importQuickAsk()} disabled={quickAsking || quickImporting || (!quickTurns.length && !hasQuickAnswer)}>{quickImporting ? 'Saving…' : 'Save as new chat →'}</button></div></div>
       </form>}
       {settingsOpen && <SettingsDialog onClose={closeSettings} />}
-      {paperSearchOpen && <LibrarySpotlight onBrowseFolder={(folderId) => { window.localStorage.setItem('adam.libraryLocation', folderId); setLibraryNavigation((value) => value + 1); setPaperSearchOpen(false); returnToLibrary(); }} papers={papers} onClose={() => setPaperSearchOpen(false)} onOpen={(paper) => { setPaperSearchOpen(false); openPaper(paper); }} />}
+      {paperSearchOpen && <LibrarySpotlight initialMode={paperSearchMode} initialFolderId={paperSearchFolder} onImported={(paper) => setPapers((current) => current.some((item) => item.id === paper.id) ? current.map((item) => item.id === paper.id ? paper : item) : [paper, ...current])} onBrowseFolder={(folderId) => { window.localStorage.setItem('adam.libraryLocation', folderId); setLibraryNavigation((value) => value + 1); setPaperSearchOpen(false); returnToLibrary(); }} papers={papers} onClose={() => setPaperSearchOpen(false)} onOpen={(paper) => { setPaperSearchOpen(false); openPaper(paper); }} />}
     </main>
   );
 }
@@ -1887,13 +2065,26 @@ function ContextList({ selections, onRemove }: { selections: ContextSelection[];
   return <div className="context-list"><div className="context-list-heading"><span>Context</span><small>{selections.length} {selections.length === 1 ? 'item' : 'items'}</small></div>{selections.map((selection, index) => <div className={`selection-card${selection.imageDataUrl ? ' image-context' : ''}`} key={selection.id}><div><span>{selection.imageDataUrl ? 'Screenshot' : 'Excerpt'} {index + 1}{selection.page ? ` · ${selection.pageEnd && selection.pageEnd !== selection.page ? `pages ${selection.page}–${selection.pageEnd}` : `page ${selection.page}`}` : ''}</span>{onRemove && <button type="button" aria-label={`Remove context item ${index + 1}`} onClick={() => onRemove(selection.id)}>×</button>}</div>{selection.imageDataUrl ? <img src={selection.imageDataUrl} alt={`Selected area from page ${selection.page ?? ''}`} /> : <blockquote>{selection.text}</blockquote>}</div>)}</div>;
 }
 
-const PdfPageWithHighlights = memo(function PdfPageWithHighlights({ pageNumber, highlights, zoom, onReady }: { pageNumber: number; highlights: HighlightEntry[]; zoom: number; onReady: (page: number) => void }) {
+// Pages holding the live text selection's endpoints, so scrolling never
+// removes the nodes its range is anchored to.
+function selectionPages(viewer: HTMLElement): number[] {
+  const selection = window.getSelection();
+  if (!selection || selection.isCollapsed || !selection.rangeCount) return [];
+  const pageOf = (node: Node | null) => {
+    const element = node?.nodeType === Node.ELEMENT_NODE ? node as Element : node?.parentElement;
+    return viewer.contains(element ?? null) ? Number(element?.closest<HTMLElement>('[data-page-number]')?.dataset.pageNumber) || null : null;
+  };
+  return [pageOf(selection.anchorNode), pageOf(selection.focusNode)].filter((page): page is number => page !== null);
+}
+
+const PdfPageWithHighlights = memo(function PdfPageWithHighlights({ pageNumber, highlights, zoom, height, onSize }: { pageNumber: number; highlights: HighlightEntry[]; zoom: number; height: number; onSize: (page: number, aspect: number) => void }) {
   const [visible, setVisible] = useState(false);
-  const [pageHeight, setPageHeight] = useState<number>();
-  useLayoutEffect(() => { if (pageHeight) onReady(pageNumber); }, [pageHeight, onReady, pageNumber]);
   const [renderVersion, setRenderVersion] = useState(0);
   const pageElementRef = useRef<HTMLDivElement>(null);
   const [rasterPage, setRasterPage] = useState<PDFPageProxy | null>(null);
+  // Release decoded images and operator lists when this page leaves the
+  // mounted window. PDF.js defers this until any active render settles.
+  useEffect(() => { if (rasterPage) return () => { rasterPage.cleanup(); }; }, [rasterPage]);
   // Upgrade only pages near the viewport; cap raster size even at extreme zoom.
   // CSS zoom keeps the page, text, annotations, and note geometry in sync.
   useEffect(() => {
@@ -1905,7 +2096,7 @@ const PdfPageWithHighlights = memo(function PdfPageWithHighlights({ pageNumber, 
     observer.observe(element);
     return () => observer.disconnect();
   }, []);
-  const renderScale = visible ? Math.max(BASE_RENDER_SCALE, Math.min(zoom, 4)) : BASE_RENDER_SCALE;
+  const renderScale = rasterPage ? rasterScale({ zoom, baseScale: BASE_RENDER_SCALE, baseWidth: BASE_PAGE_WIDTH, aspect: height / (BASE_PAGE_WIDTH * BASE_RENDER_SCALE), devicePixelRatio: window.devicePixelRatio, visible }) : 0;
   const pdfPageRef = useRef<PDFPageProxy | null>(null);
   const textContentRef = useRef<TextContent | null>(null);
   const handleRenderSuccess = useCallback(() => setRenderVersion((version) => version + 1), []);
@@ -1939,12 +2130,13 @@ const PdfPageWithHighlights = memo(function PdfPageWithHighlights({ pageNumber, 
     // every text run when the sharper text layer arrives after zooming.
     corrections.forEach(({ span, transform }) => { span.style.transform = transform; });
   }, []);
-  return <div className="pdf-raster-surface" style={{ width: BASE_PAGE_WIDTH * BASE_RENDER_SCALE, height: pageHeight }}><Page inputRef={pageElementRef} pageNumber={pageNumber} width={BASE_PAGE_WIDTH * BASE_RENDER_SCALE} renderMode="none" renderAnnotationLayer renderTextLayer onLoadSuccess={(page) => { pdfPageRef.current = page; setRasterPage(page); const viewport = page.getViewport({ scale: 1 }); setPageHeight(BASE_PAGE_WIDTH * BASE_RENDER_SCALE * viewport.height / viewport.width); }} onGetTextSuccess={(content) => { textContentRef.current = content; }} onRenderTextLayerSuccess={alignTextLayer}><PdfRasterCanvas page={rasterPage} renderScale={renderScale} onRenderSuccess={handleRenderSuccess} /><HighlightCanvas highlights={highlights} renderVersion={renderVersion} /></Page></div>;
+  return <div className="pdf-raster-surface" style={{ width: BASE_PAGE_WIDTH * BASE_RENDER_SCALE, height }}><Page inputRef={pageElementRef} pageNumber={pageNumber} width={BASE_PAGE_WIDTH * BASE_RENDER_SCALE} renderMode="none" renderAnnotationLayer renderTextLayer onLoadSuccess={(page) => { pdfPageRef.current = page; setRasterPage(page); const viewport = page.getViewport({ scale: 1 }); onSize(pageNumber, viewport.height / viewport.width); }} onGetTextSuccess={(content) => { textContentRef.current = content; }} onRenderTextLayerSuccess={alignTextLayer}><PdfRasterCanvas page={rasterPage} renderScale={renderScale} onRenderSuccess={handleRenderSuccess} /><HighlightCanvas highlights={highlights} renderVersion={renderVersion} /></Page></div>;
 
-}, (previous, next) => previous.pageNumber === next.pageNumber && previous.zoom === next.zoom && previous.highlights.length === next.highlights.length && previous.highlights.every((entry, index) => entry === next.highlights[index]));
+}, (previous, next) => previous.pageNumber === next.pageNumber && previous.zoom === next.zoom && previous.height === next.height && previous.onSize === next.onSize && previous.highlights.length === next.highlights.length && previous.highlights.every((entry, index) => entry === next.highlights[index]));
 
 // Keep the interactive Page/text layer at a fixed scale. Only the offscreen
 // raster changes resolution; completed images replace the displayed pixels.
+// `renderScale` is device pixels per base layout unit (see rasterScale).
 function PdfRasterCanvas({ page, renderScale, onRenderSuccess }: { page: PDFPageProxy | null; renderScale: number; onRenderSuccess: () => void }) {
   const canvasRef = useRef<HTMLCanvasElement>(null);
   const [error, setError] = useState('');
@@ -1953,10 +2145,9 @@ function PdfRasterCanvas({ page, renderScale, onRenderSuccess }: { page: PDFPage
   const height = baseViewport ? width * baseViewport.height / baseViewport.width : undefined;
 
   useEffect(() => {
-    if (!page) return;
+    if (!page || renderScale <= 0) return;
     const base = page.getViewport({ scale: 1 });
-    const pixelRatio = Math.min(window.devicePixelRatio || 1, 4 / renderScale);
-    const viewport = page.getViewport({ scale: BASE_PAGE_WIDTH * renderScale * pixelRatio / base.width });
+    const viewport = page.getViewport({ scale: BASE_PAGE_WIDTH * renderScale / base.width });
     const buffer = document.createElement('canvas');
     buffer.width = Math.floor(viewport.width);
     buffer.height = Math.floor(viewport.height);
@@ -1978,6 +2169,11 @@ function PdfRasterCanvas({ page, renderScale, onRenderSuccess }: { page: PDFPage
     }).finally(() => { buffer.width = 0; buffer.height = 0; });
     return () => { cancelled = true; task.cancel(); };
   }, [page, renderScale, onRenderSuccess]);
+  // Free the displayed backing store as soon as the page unmounts.
+  useEffect(() => {
+    const canvas = canvasRef.current;
+    return () => { if (canvas) { canvas.width = 0; canvas.height = 0; } };
+  }, []);
 
   return <><canvas ref={canvasRef} className="react-pdf__Page__canvas pdf-displayed-canvas" style={{ width, height }} aria-hidden="true" />{error && <div className="viewer-message error-banner" role="alert">{error}</div>}</>;
 }
@@ -2038,6 +2234,10 @@ function HighlightCanvas({ highlights, renderVersion }: { highlights: HighlightE
       overlayContext.stroke();
     }));
   }, [highlights, renderVersion]);
+  useEffect(() => {
+    const overlay = overlayRef.current;
+    return () => { if (overlay) { overlay.width = 0; overlay.height = 0; } };
+  }, []);
   return <canvas className="pdf-highlight-canvas" ref={overlayRef} aria-hidden="true" />;
 }
 
@@ -2455,46 +2655,6 @@ function PaperNoteEditor({ documentId, paperName, pendingQuote, onQuoteConsumed 
     <div className="paper-note-canvas"><div ref={editorRef} className="paper-note-editor" contentEditable suppressContentEditableWarning role="textbox" aria-multiline="true" aria-label="Paper note" spellCheck onKeyDown={applyInputRule} onInput={changed} onClick={(event) => { if ((event.target as HTMLElement).matches('input[type="checkbox"]')) changed(); }} onBlur={() => void save()} /><div className={`paper-note-placeholder${empty ? ' visible' : ''}`} aria-hidden="true"><strong>Start writing about this paper…</strong><span>Try # through ##### for headings, - for bullets, 1. for numbers, - [ ] for tasks, or &gt; for quotes.</span></div></div>
     {errorMessage && <button type="button" className="paper-note-error" onClick={() => void save()}>{errorMessage} Click to retry.</button>}
   </section>;
-}
-
-function normalizeMathDelimiters(markdown: string): string {
-  const lines = markdown.split('\n');
-  let fence: { marker: string; length: number } | null = null;
-  let prose = '';
-  let result = '';
-  const flushProse = () => {
-    result += prose.replace(/(`+)[\s\S]*?\1|\\\[([\s\S]*?)\\\]|\\\(([^\n]*?)\\\)/g, (match, _ticks: string, display: string | undefined, inline: string | undefined) => {
-      if (display !== undefined) return `\n$$\n${display.trim()}\n$$\n`;
-      if (inline !== undefined) return `$${inline}$`;
-      return match;
-    });
-    prose = '';
-  };
-
-  for (const [index, line] of lines.entries()) {
-    const suffix = index < lines.length - 1 ? '\n' : '';
-    const opening = /^ {0,3}(`{3,}|~{3,})/.exec(line);
-    if (fence) {
-      result += line + suffix;
-      if (new RegExp(`^ {0,3}${fence.marker}{${fence.length},}[ \\t]*$`).test(line)) fence = null;
-    } else if (opening) {
-      flushProse();
-      fence = { marker: opening[1][0], length: opening[1].length };
-      result += line + suffix;
-    } else {
-      prose += line + suffix;
-    }
-  }
-  flushProse();
-  return result;
-}
-
-function MarkdownAnswer({ children, streaming = false, web }: { children: string; streaming?: boolean; web?: WebInfo | null }) {
-  const linked = web ? children.replace(/\[W(\d+)\]/g, (marker, number: string) => {
-    const url = web.sources[Number(number) - 1]?.url;
-    return url ? `[${marker}](<${url.replaceAll('>', '%3E')}>)` : marker;
-  }) : children;
-  return <div className="markdown-answer"><ReactMarkdown remarkPlugins={[remarkGfm, remarkMath]} rehypePlugins={[rehypeKatex]} components={{ a: ({ children: linkText, ...props }) => <a {...props} target="_blank" rel="noreferrer">{linkText}</a> }}>{normalizeMathDelimiters(linked)}</ReactMarkdown>{streaming && <i className="stream-cursor" />}</div>;
 }
 
 function WebEvidence({ web }: { web?: WebInfo | null }) {

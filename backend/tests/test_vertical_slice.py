@@ -12,6 +12,7 @@ os.environ.pop("ADAM_OPENCODE_API_KEY", None)
 from fastapi.testclient import TestClient  # noqa: E402
 
 from adam_server.main import app  # noqa: E402
+from adam_server.database import engine  # noqa: E402
 from adam_server import main as main_module  # noqa: E402
 from adam_server.services import web_search as web_search_module  # noqa: E402
 from adam_server.services.web_search import plan_search  # noqa: E402
@@ -571,12 +572,15 @@ def test_folder_migration_preserves_existing_papers_and_children(tmp_path) -> No
     subprocess.run([sys.executable, '-m', 'alembic', 'upgrade', '0009_folders'], cwd=backend_root, env=env, check=True, capture_output=True)
     with sqlite3.connect(path) as db:
         db.execute("INSERT INTO folders (id, name, created_at) VALUES ('old-folder', 'Existing folder', CURRENT_TIMESTAMP)")
+        db.execute("UPDATE documents SET folder_id = 'old-folder' WHERE id = 'existing'")
     subprocess.run([sys.executable, '-m', 'alembic', 'upgrade', 'head'], cwd=backend_root, env=env, check=True, capture_output=True)
     with sqlite3.connect(path) as db:
-        assert db.execute('SELECT id, folder_id FROM documents').fetchall() == [('existing', None)]
+        assert db.execute('SELECT id, folder_id FROM documents').fetchall() == [('existing', 'old-folder')]
         for table in ['pages', 'paper_notes', 'conversations', 'messages', 'annotations']:
             assert db.execute(f'SELECT COUNT(*) FROM {table}').fetchone()[0] == 1
-        assert db.execute('SELECT color FROM folders WHERE id = ?', ('old-folder',)).fetchone()[0] == '#8c9d65'
+        assert db.execute('SELECT color, icon FROM folders WHERE id = ?', ('old-folder',)).fetchone() == ('#8c9d65', 'folder')
+        assert 'discovery_json' in {column[1] for column in db.execute('PRAGMA table_info(documents)')}
+        assert db.execute('SELECT version_num FROM alembic_version').fetchall() == [('0013_merge_discovery_folders',)]
         assert db.execute('PRAGMA foreign_key_check').fetchall() == []
 
 
@@ -634,3 +638,370 @@ def test_auto_title_uses_answer_and_preserves_chat_on_title_failure(monkeypatch)
         detail = client.get(f"/api/conversations/{conversation['id']}").json()
         assert detail["messages"][-1]["content"].startswith("Residual connections")
         assert detail["title"] == ("What does this do?" if mode == "failure" else "My residual connection notes")
+
+
+def test_slow_title_does_not_hold_answer_completion(monkeypatch) -> None:
+    uploaded = client.post("/api/documents", files={"file": ("slow-titles.pdf", BytesIO(sample_pdf("Layer normalization stabilizes training.")), "application/pdf")}).json()
+    monkeypatch.setattr(type(main_module.settings), "provider_api_key", lambda _self, _provider: "test-key")
+
+    class FakeProvider:
+        async def stream_answer(self, question, selected_text, images, page, history):
+            yield f"Answer to {question}"
+
+    monkeypatch.setattr(main_module, "make_provider", lambda *_args: FakeProvider())
+    title_requests: list[str] = []
+    release = {}
+    outcome = {}
+
+    async def slow_title(transcript, fallback):
+        title_requests.append(transcript)
+        await release[transcript.split("\n")[0]].wait()
+        if outcome.get("raise"):
+            raise RuntimeError("Title model crashed")
+        return "Layer Normalization Explained"
+
+    monkeypatch.setattr(main_module, "generate_configured_title", slow_title)
+
+    def stored(conversation_id):
+        with main_module.SessionLocal() as db:
+            conversation = db.get(main_module.Conversation, conversation_id)
+            return conversation.title, [message.role for message in conversation.messages]
+
+    async def open_stream(conversation_id, question):
+        response = await main_module.chat_stream(conversation_id, main_module.ChatRequest(question=question))
+        return response.body_iterator
+
+    async def next_event(stream):
+        chunk = await asyncio.wait_for(anext(stream), timeout=2)
+        return json.loads(chunk.removeprefix("data: "))
+
+    async def until(stream, kind):
+        while (event := await next_event(stream))["type"] != kind:
+            assert event["type"] != "error", event
+        return event
+
+    async def scenario(mode):
+        conversation_id = client.post(f"/api/documents/{uploaded['id']}/conversations", json={}).json()["id"]
+        question = f"Why normalize ({mode})?"
+        release[f"User: {question}"] = asyncio.Event()
+        outcome["raise"] = mode == "failure"
+        stream = await open_stream(conversation_id, question)
+        completed = await until(stream, "completed")
+        # The answer is durable and the composer can unlock while the title model is still running.
+        assert completed["title_pending"] is True
+        assert completed["title"] == question
+        assert stored(conversation_id) == (question, ["user", "assistant"])
+        assert conversation_id in main_module.title_jobs
+        await asyncio.sleep(0)
+        # Streams own short sessions only: none is checked out while the title model is pending.
+        assert engine.pool.checkedout() == 0
+        assert title_requests == [f"User: {question}\n\nAssistant: Answer to {question}"]
+
+        if mode == "followup":
+            # A next turn started before the title finishes completes on its own and never queues a second title job.
+            followup = await open_stream(conversation_id, "And dropout?")
+            events = [json.loads(chunk.removeprefix("data: ")) async for chunk in followup]
+            assert [event["type"] for event in events][-1] == "completed"
+            assert events[-1]["title_pending"] is False
+            assert len(title_requests) == 1
+            assert stored(conversation_id) == (question, ["user", "assistant", "user", "assistant"])
+        if mode == "rename":
+            with main_module.SessionLocal() as db_rename:
+                db_rename.get(main_module.Conversation, conversation_id).title = "My normalization notes"
+                db_rename.commit()
+        if mode == "disconnect":
+            await stream.aclose()
+
+        release[f"User: {question}"].set()
+        if mode == "disconnect":
+            for _ in range(100):
+                if conversation_id not in main_module.title_jobs:
+                    break
+                await asyncio.sleep(0.01)
+            assert stored(conversation_id)[0] == "Layer Normalization Explained"
+            return
+        remaining = [json.loads(chunk.removeprefix("data: ")) async for chunk in stream]
+        titles = [event["title"] for event in remaining if event["type"] == "title"]
+        assert all(event["type"] != "error" for event in remaining)
+        expected = {"followup": "Layer Normalization Explained", "rename": "My normalization notes", "failure": question}[mode]
+        assert titles == ([] if mode == "failure" else [expected])
+        assert stored(conversation_id)[0] == expected
+        assert conversation_id not in main_module.title_jobs
+
+    for mode in ("followup", "rename", "failure", "disconnect"):
+        title_requests.clear()
+        asyncio.run(scenario(mode))
+
+
+# Discovery/import regressions: external I/O is mocked; the real ingestion and DB run.
+def test_discovery_partial_failure_and_versions(monkeypatch) -> None:
+    from adam_server.services import paper_discovery as discovery
+    from adam_server.schemas import PaperCandidate
+
+    paper = PaperCandidate(title="Discovery test paper", source="arXiv", source_url="https://arxiv.org/abs/2601.12345v2", arxiv_id="2601.12345v2", pdf_urls=["https://arxiv.org/pdf/2601.12345v2"])
+
+    async def arxiv(_query): return [paper]
+    async def unavailable(*_args): raise OSError("offline")
+    monkeypatch.setattr(discovery, "search_arxiv", arxiv)
+    monkeypatch.setattr(discovery, "search_general", unavailable)
+    result = client.get('/api/paper-discovery/search', params={'q': 'test paper'})
+    assert result.status_code == 200
+    assert result.json()['results'][0]['title'] == paper.title
+    assert len(result.json()['warnings']) == 1
+    assert client.get('/api/paper-discovery/search', params={'q': '   '}).status_code == 422
+
+    async def general(*_args):
+        return [paper.model_copy(update={'pdf_urls': ['https://example.org/alternative.pdf']}), paper.model_copy(update={'arxiv_id': '2601.12345v1', 'source_url': 'https://arxiv.org/abs/2601.12345v1'})]
+    monkeypatch.setattr(discovery, "search_general", general)
+    data = client.get('/api/paper-discovery/search', params={'q': 'test paper'}).json()
+    assert len(data['results']) == 2  # versions must remain distinct
+    assert len(data['results'][0]['pdf_urls']) == 2
+
+
+def test_discovery_import_provenance_duplicate_and_folder(monkeypatch) -> None:
+    from adam_server import main
+    from fastapi import UploadFile
+    import httpx
+
+    content = sample_pdf('Unique remote import paper for discovery tests.')
+    async def download(*_args): return UploadFile(file=BytesIO(content), filename='Discovered.pdf')
+    monkeypatch.setattr(main, 'download_pdf', download)
+    folder = client.post('/api/folders', json={'name': 'Discovery imports'}).json()
+    paper = {'title': 'Discovered paper', 'source': 'arXiv', 'source_url': 'https://arxiv.org/abs/2601.54321v1', 'arxiv_id': '2601.54321v1', 'doi': '10.1234/discovery'}
+    request = {'paper': paper, 'pdf_url': 'https://arxiv.org/pdf/2601.54321v1', 'folder_id': folder['id']}
+    result = client.post('/api/paper-discovery/import', json=request)
+    assert result.status_code == 200, result.text
+    saved = result.json()
+    assert saved['folder_id'] == folder['id']
+    assert saved['discovery']['arxiv_id'] == paper['arxiv_id']
+    assert saved['discovery']['pdf_url'] == request['pdf_url']
+    assert client.get(f"/api/documents/{saved['id']}/file").content == content
+    assert 'Unique remote' in client.get(f"/api/documents/{saved['id']}/pages/1/text").json()['text']
+    client.put(f"/api/documents/{saved['id']}/paper-note", json={'content_html': '<p>Keep me</p>', 'plain_text': 'Keep me', 'revision': 0})
+
+    async def should_not_download(*_args): raise AssertionError('Duplicate must not download')
+    monkeypatch.setattr(main, 'download_pdf', should_not_download)
+    repeated = client.post('/api/paper-discovery/import', json={**request, 'folder_id': None})
+    assert repeated.json()['id'] == saved['id']
+    assert repeated.json()['folder_id'] == folder['id']
+    assert client.get(f"/api/documents/{saved['id']}/paper-note").json()['plain_text'] == 'Keep me'
+
+    from adam_server.services.paper_discovery import existing_paper
+    from adam_server.schemas import PaperCandidate
+    with main.SessionLocal() as db:
+        assert existing_paper(db, PaperCandidate(**{**paper, 'arxiv_id': '2601.54321v2', 'source_url': 'https://arxiv.org/abs/2601.54321v2'})) is None
+
+    # Identical local uploads are reused by hash and retain their destination/name.
+    monkeypatch.setattr(main, 'download_pdf', download)
+    by_hash = client.post('/api/paper-discovery/import', json={**request, 'paper': {**paper, 'arxiv_id': None, 'doi': None, 'source_url': 'https://other.example/paper'}})
+    assert by_hash.json()['id'] == saved['id']
+    assert by_hash.json()['folder_id'] == folder['id']
+    assert client.post('/api/paper-discovery/import', json={**request, 'folder_id': 'missing'}).status_code == 404
+
+    async def offline(*_args): raise httpx.ConnectError('offline')
+    monkeypatch.setattr(main, 'download_pdf', offline)
+    assert client.post('/api/paper-discovery/import', json={**request, 'paper': {**paper, 'arxiv_id': '2601.99999v1'}}).status_code == 502
+
+
+def test_discovery_public_url_and_dns_guard(monkeypatch) -> None:
+    from adam_server.services import paper_discovery as discovery
+    from fastapi import HTTPException
+    import pytest
+
+    for url in ('file:///etc/passwd', 'https://user:pass@example.org/paper.pdf', 'http://example.org:8000/p.pdf', 'javascript:alert(1)'):
+        with pytest.raises(HTTPException): discovery.public_url(url)
+    for address in ('127.0.0.1', '10.1.2.3', '169.254.169.254', '::1', '::ffff:127.0.0.1'):
+        monkeypatch.setattr(discovery.socket, 'getaddrinfo', lambda *_args, **_kwargs: [(2, 1, 6, '', (address, 443))])
+        with pytest.raises(HTTPException): asyncio.run(discovery.public_address('example.org', 443))
+    # A mixed public/private DNS answer is also rejected.
+    monkeypatch.setattr(discovery.socket, 'getaddrinfo', lambda *_args, **_kwargs: [(2, 1, 6, '', (ip, 443)) for ip in ('8.8.8.8', '127.0.0.1')])
+    with pytest.raises(HTTPException): asyncio.run(discovery.public_address('example.org', 443))
+
+
+def test_discovery_pinned_download_redirect_limits_and_invalid_content(monkeypatch) -> None:
+    from adam_server.services import paper_discovery as discovery
+    from fastapi import HTTPException
+    import httpx
+    import pytest
+
+    real_client = httpx.AsyncClient
+    calls = []
+    content = sample_pdf('Public PDF download test.')
+    def handler(request):
+        calls.append(request)
+        assert request.url.host == '8.8.8.8'  # no second hostname DNS lookup
+        assert request.headers['host'] == 'papers.example'
+        assert request.extensions['sni_hostname'] == 'papers.example'
+        if request.url.path == '/redirect': return httpx.Response(302, headers={'location': 'http://127.0.0.1/internal'})
+        if request.url.path == '/pdf': return httpx.Response(200, content=content)
+        if request.url.path == '/large': return httpx.Response(200, content=content, headers={'content-length': '99999999'})
+        return httpx.Response(200, content=b'<html>Login required</html>')
+    monkeypatch.setattr(discovery.httpx, 'AsyncClient', lambda **kwargs: real_client(transport=httpx.MockTransport(handler), **kwargs))
+    async def address(host, _port):
+        if host == '127.0.0.1': raise HTTPException(400, 'Private address')
+        return '8.8.8.8'
+    monkeypatch.setattr(discovery, 'public_address', address)
+
+    async def run():
+        upload = await discovery.download_pdf('https://papers.example/pdf', '../Unsafe title', 100000)
+        assert await upload.read() == content
+        assert '/' not in upload.filename
+        await upload.close()
+        for path, limit, expected in [('/redirect', 100000, 400), ('/html', 100000, 400), ('/large', 100000, 413), ('/pdf', 10, 413)]:
+            with pytest.raises(HTTPException) as error:
+                await discovery.download_pdf('https://papers.example' + path, 'Paper', limit)
+            assert error.value.status_code == expected
+        assert len(calls) == 5  # private redirect was never fetched
+    asyncio.run(run())
+
+
+def test_discovery_resolves_relative_pdf_and_rejects_unsafe_links() -> None:
+    from adam_server.services.paper_discovery import PdfLinks, arxiv_id
+    parser = PdfLinks('https://papers.example/article/1')
+    parser.feed('<meta name="citation_pdf_url" content="/files/paper.pdf"><a href="javascript:alert(1)">PDF</a><link type="application/pdf" href="/other.pdf">')
+    assert parser.urls == ['https://papers.example/files/paper.pdf', 'https://papers.example/other.pdf']
+    assert arxiv_id('https://arxiv.org/pdf/1706.03762v7.pdf') == '1706.03762v7'
+    assert arxiv_id('arXiv:hep-th/9901001v2') == 'hep-th/9901001v2'
+    assert arxiv_id('https://example.org/1706.03762') is None
+
+
+def test_discovery_arxiv_metadata_cache_and_resolver(monkeypatch) -> None:
+    from adam_server.services import paper_discovery as discovery
+    from adam_server.schemas import PaperCandidate
+    import httpx
+
+    atom = '''<feed xmlns="http://www.w3.org/2005/Atom" xmlns:arxiv="http://arxiv.org/schemas/atom"><entry><id>http://arxiv.org/abs/2610.11111v3</id><title> A test\n title </title><author><name>A. Author</name></author><published>2026-10-01</published><summary>An abstract</summary><arxiv:doi>10.1234/example</arxiv:doi></entry></feed>'''
+    real_client = httpx.AsyncClient
+    calls = []
+    def handler(request):
+        calls.append(request)
+        return httpx.Response(200, text=atom)
+    monkeypatch.setattr(discovery.httpx, 'AsyncClient', lambda **kwargs: real_client(transport=httpx.MockTransport(handler), **kwargs))
+    monkeypatch.setattr(discovery, '_cache', {})
+    monkeypatch.setattr(discovery, '_arxiv_last', 0)
+    async def run():
+        papers = await discovery.search_arxiv('2610.11111v3')
+        assert papers[0].title == 'A test title'
+        assert papers[0].doi == '10.1234/example'
+        assert papers[0].pdf_urls == ['https://arxiv.org/pdf/2610.11111v3']
+        papers[0].title = 'Mutated response'
+        cached = await discovery.search_arxiv('2610.11111v3')
+        assert cached[0].title == 'A test title'
+        assert len(calls) == 1
+        assert calls[0].url.params['id_list'] == '2610.11111v3'
+    asyncio.run(run())
+
+    from contextlib import asynccontextmanager
+    @asynccontextmanager
+    async def source(_url):
+        yield httpx.Response(200, text='<meta name="citation_title" content="Actual title"><meta name="citation_author" content="A. Researcher"><meta name="citation_publication_date" content="2026/10/01"><meta name="citation_doi" content="10.1234/source"><meta name="citation_pdf_url" content="/download.pdf">', headers={'content-type': 'text/html'}), 'https://papers.example/landing'
+    monkeypatch.setattr(discovery, 'public_stream', source)
+    paper = PaperCandidate(title='Search snippet title', source_url='https://papers.example/landing')
+    resolved = client.post('/api/paper-discovery/resolve', json=paper.model_dump())
+    assert resolved.status_code == 200
+    assert resolved.json()['title'] == 'Actual title'
+    assert resolved.json()['authors'] == ['A. Researcher']
+    assert resolved.json()['year'] == '2026'
+    assert resolved.json()['pdf_urls'] == ['https://papers.example/download.pdf']
+
+
+def test_discovery_invalid_pdf_leaves_no_library_entry(monkeypatch) -> None:
+    from adam_server import main
+    from fastapi import UploadFile
+    before = {paper['id'] for paper in client.get('/api/documents').json()}
+    async def invalid(*_args): return UploadFile(file=BytesIO(b'%PDF-not-a-real-pdf'), filename='Broken.pdf')
+    monkeypatch.setattr(main, 'download_pdf', invalid)
+    response = client.post('/api/paper-discovery/import', json={'paper': {'title': 'Damaged remote PDF', 'source_url': 'https://papers.example/broken'}, 'pdf_url': 'https://papers.example/broken.pdf'})
+    assert response.status_code == 400
+    assert {paper['id'] for paper in client.get('/api/documents').json()} == before
+    assert not list((main.settings.data_dir / 'tmp').glob('upload-*'))
+
+
+def test_nested_folders_inherit_colors_move_safely_and_keep_contents() -> None:
+    root = client.post('/api/folders', json={'name': 'Nested root', 'color': '#123456'}).json()
+    other = client.post('/api/folders', json={'name': 'Other root', 'color': '#654321'}).json()
+    child = client.post('/api/folders', json={'name': 'Child', 'parent_id': root['id'], 'color': '#ffffff', 'icon': 'book'}).json()
+    leaf = client.post('/api/folders', json={'name': 'Leaf', 'parent_id': child['id']}).json()
+    assert child['color'] == leaf['color'] == root['color']
+    assert client.post('/api/folders', json={'name': 'child', 'parent_id': root['id']}).status_code == 409
+    twin = client.post('/api/folders', json={'name': 'Child', 'parent_id': other['id']})
+    assert twin.status_code == 201
+    assert client.patch(f"/api/folders/{root['id']}", json={'parent_id': leaf['id']}).status_code == 422
+    assert client.patch(f"/api/folders/{child['id']}", json={'parent_id': child['id']}).status_code == 422
+    assert client.patch(f"/api/folders/{child['id']}", json={'parent_id': 'missing'}).status_code == 404
+    # Conflicting moves leave the whole branch unchanged.
+    assert client.patch(f"/api/folders/{child['id']}", json={'parent_id': other['id']}).status_code == 409
+    client.delete(f"/api/folders/{twin.json()['id']}")
+    moved = client.patch(f"/api/folders/{child['id']}", json={'parent_id': other['id']})
+    assert moved.json()['color'] == other['color']
+    assert moved.json()['icon'] == 'book'
+    icon_update = client.patch(f"/api/folders/{child['id']}", json={'icon': 'star'})
+    assert icon_update.json()['icon'] == 'star'
+    assert icon_update.json()['parent_id'] == other['id']
+    assert icon_update.json()['color'] == other['color']
+    client.patch(f"/api/folders/{other['id']}", json={'color': '#abcdef'})
+    folders = {folder['id']: folder for folder in client.get('/api/folders').json()}
+    assert folders[leaf['id']]['color'] == '#abcdef'
+    detached = client.patch(f"/api/folders/{child['id']}", json={'parent_id': None}).json()
+    assert detached['parent_id'] is None and detached['color'] != '#abcdef'
+    paper = client.post('/api/documents', files={'file': ('nested.pdf', BytesIO(sample_pdf('Nested contents survive.')), 'application/pdf')}).json()
+    assert client.post('/api/document-moves', json={'document_ids': [paper['id']], 'folder_id': leaf['id']}).status_code == 200
+    # Reopening reads the persisted hierarchy; removing a parent keeps its children and papers.
+    assert client.delete(f"/api/folders/{child['id']}").status_code == 204
+    folders = {folder['id']: folder for folder in client.get('/api/folders').json()}
+    assert folders[leaf['id']]['parent_id'] is None
+    assert client.get(f"/api/documents/{paper['id']}").json()['folder_id'] == leaf['id']
+    for folder in [root, other, leaf]:
+        client.delete(f"/api/folders/{folder['id']}")
+
+def test_folder_icons_are_validated_and_persist_across_updates() -> None:
+    folder = client.post('/api/folders', json={'name': 'Icon lifecycle'}).json()
+    assert folder['icon'] == 'folder'
+    url = f"/api/folders/{folder['id']}"
+    icons = ['folder', 'book', 'bookmark', 'star', 'heart', 'lightbulb', 'flask', 'code', 'globe', 'leaf', 'briefcase', 'graduation']
+    for icon in icons:
+        saved = client.patch(url, json={'name': folder['name'], 'icon': icon})
+        assert saved.status_code == 200
+        assert saved.json()['icon'] == icon
+    renamed = client.patch(url, json={'name': 'Icon renamed', 'color': '#618fbd'})
+    assert renamed.json()['icon'] == 'graduation'
+    assert next(item for item in client.get('/api/folders').json() if item['id'] == folder['id'])['icon'] == 'graduation'
+    for invalid in ['', 'unknown', '<svg>', 5]:
+        assert client.patch(url, json={'name': 'Icon renamed', 'icon': invalid}).status_code == 422
+        assert client.post('/api/folders', json={'name': 'Invalid icon', 'icon': invalid}).status_code == 422
+    assert client.patch(url, json={'name': 'Icon renamed', 'icon': None}).json()['icon'] == 'graduation'
+    client.delete(url)
+    custom = client.post('/api/folders', json={'name': 'Book collection', 'icon': 'book', 'color': '#9275bc'})
+    assert custom.status_code == 201
+    assert custom.json()['icon'] == 'book'
+    client.delete(f"/api/folders/{custom.json()['id']}")
+
+
+def test_folder_and_discovery_migrations_upgrade_all_feature_branches(tmp_path) -> None:
+    import sqlite3
+    import subprocess
+    import sys
+    from pathlib import Path
+
+    backend_root = Path(__file__).resolve().parents[1]
+    for revision in ['0011_folder_icons', '0011_nested_folders', '0011_paper_discovery', '0012_merge_folder_features']:
+        data_dir = tmp_path / revision
+        env = {**os.environ, 'ADAM_DATA_DIR': str(data_dir)}
+        def upgrade(target):
+            subprocess.run([sys.executable, '-m', 'alembic', 'upgrade', target], cwd=backend_root, env=env, check=True, capture_output=True)
+        upgrade(revision)
+        path = data_dir / 'database' / 'adam.sqlite3'
+        with sqlite3.connect(path) as db:
+            db.execute("INSERT INTO folders (id, name, color, created_at) VALUES ('root', 'Root', '#123456', CURRENT_TIMESTAMP)")
+            if revision == '0011_folder_icons':
+                db.execute("UPDATE folders SET icon = 'book' WHERE id = 'root'")
+            elif revision in ['0011_nested_folders', '0012_merge_folder_features']:
+                db.execute("INSERT INTO folders (id, name, color, parent_id, created_at) VALUES ('child', 'Child', '#123456', 'root', CURRENT_TIMESTAMP)")
+        upgrade('head')
+        with sqlite3.connect(path) as db:
+            assert db.execute("SELECT color, icon, parent_id FROM folders WHERE id = 'root'").fetchone() == ('#123456', 'book' if revision == '0011_folder_icons' else 'folder', None)
+            if revision in ['0011_nested_folders', '0012_merge_folder_features']:
+                assert db.execute("SELECT parent_id, icon FROM folders WHERE id = 'child'").fetchone() == ('root', 'folder')
+            assert 'discovery_json' in {column[1] for column in db.execute('PRAGMA table_info(documents)')}
+            assert db.execute('SELECT version_num FROM alembic_version').fetchall() == [('0013_merge_discovery_folders',)]
+            assert db.execute('PRAGMA foreign_key_check').fetchall() == []

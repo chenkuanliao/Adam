@@ -1,10 +1,15 @@
+import asyncio
 import json
+import logging
 import os
 from collections.abc import AsyncIterator
+from contextlib import asynccontextmanager
+from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
 
-from fastapi import Depends, FastAPI, HTTPException, Request, Response, UploadFile
+from fastapi import Depends, FastAPI, HTTPException, Query, Request, Response, UploadFile
+from fastapi.concurrency import run_in_threadpool
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse, StreamingResponse
 from sqlalchemy import func, select
@@ -14,17 +19,29 @@ import httpx
 from .config import Settings, get_settings
 from .database import SessionLocal, get_db, run_migrations
 from .models import Annotation, Conversation, Document, Folder, Message, ModelFavorite, Page, PaperNote
-from .schemas import AiNoteCreate, AiNoteUnlink, AnnotationIn, AnnotationOut, AnnotationUpdate, AppSettingsOut, AppSettingsUpdate, ChatRequest, ConversationCreate, ConversationDetail, ConversationOut, ConversationUpdate, DocumentMove, DocumentOut, DocumentUpdate, FolderIn, FolderOut, ModelFavoriteUpdate, PageTextOut, PaperNoteOut, PaperNoteUpdate, ProviderKeyUpdate, ProviderModelsOut, QuickAskImportRequest, QuickAskRequest, TitleModelUpdate
+from .schemas import AiNoteCreate, AiNoteUnlink, AnnotationIn, AnnotationOut, AnnotationUpdate, AppSettingsOut, AppSettingsUpdate, ChatRequest, ConversationCreate, ConversationDetail, ConversationOut, ConversationUpdate, DocumentMove, DocumentOut, DocumentUpdate, FolderIn, FolderOut, FolderUpdate, ModelFavoriteUpdate, PageTextOut, PaperNoteOut, PaperNoteUpdate, ProviderKeyUpdate, ProviderModelsOut, QuickAskImportRequest, QuickAskRequest, TitleModelUpdate
+from .schemas import ChatTurnIn, ContextImageIn
 from .services.context import build_paper_context
 from .services.documents import document_file_path, ingest_pdf
-from .services.thumbnails import THUMBNAIL_MEDIA_TYPE, THUMBNAIL_WIDTHS, ThumbnailBusy, ensure_thumbnail, remove_thumbnails, thumbnail_etag
+from .services.thumbnails import THUMBNAIL_MEDIA_TYPE, THUMBNAIL_WIDTHS, ThumbnailBusy, ensure_thumbnail, remove_thumbnails, shutdown_thumbnail_workers, thumbnail_etag
 from .services.llm import AnthropicProvider, GoogleProvider, OpenAICompatibleProvider, OpenAIResponsesProvider, TITLE_SYSTEM_PROMPT, clean_title, generate_zen_title, sse
 from .services.web_search import asks_for_citing_papers, plan_search, previous_sources, search_citing_papers, search_web, web_context
+from .schemas import PaperCandidate, PaperImportIn, PaperSearchOut
+from .services.paper_discovery import discover, download_pdf, existing_paper, resolve_pdf
 
 settings = get_settings()
 run_migrations()
+logger = logging.getLogger(__name__)
 
-app = FastAPI(title="Adam API", version="0.1.0")
+
+@asynccontextmanager
+async def lifespan(_app: FastAPI) -> AsyncIterator[None]:
+    yield
+    # Stop thumbnail worker processes with the server instead of leaving them to interpreter exit.
+    await run_in_threadpool(shutdown_thumbnail_workers)
+
+
+app = FastAPI(title="Adam API", version="0.1.0", lifespan=lifespan)
 app.add_middleware(
     CORSMiddleware,
     allow_origins=[origin.strip() for origin in settings.cors_origins.split(",")],
@@ -32,6 +49,37 @@ app.add_middleware(
     allow_methods=["GET", "POST", "PUT", "PATCH", "DELETE", "OPTIONS"],
     allow_headers=["Content-Type"],
 )
+
+
+@app.get("/api/paper-discovery/search", response_model=PaperSearchOut)
+async def search_papers(q: str = Query(min_length=1, max_length=500), db: Session = Depends(get_db)):
+    if not q.strip():
+        raise HTTPException(422, "Enter a paper title, keywords, DOI, or arXiv link.")
+    return await discover(q.strip(), settings.search_base_url, db)
+
+
+@app.post("/api/paper-discovery/resolve", response_model=PaperCandidate)
+async def resolve_paper(paper: PaperCandidate):
+    try:
+        async with asyncio.timeout(35):
+            return await resolve_pdf(paper)
+    except (httpx.HTTPError, OSError, TimeoutError):
+        raise HTTPException(502, "The source could not be reached. Open its page or try another result.") from None
+
+
+@app.post("/api/paper-discovery/import", response_model=DocumentOut)
+async def import_paper(request: PaperImportIn, db: Session = Depends(get_db)):
+    if request.folder_id and not db.get(Folder, request.folder_id):
+        raise HTTPException(404, "The destination folder no longer exists. Choose another folder.")
+    if existing := existing_paper(db, request.paper):
+        return existing
+    try:
+        upload = await download_pdf(request.pdf_url, request.paper.title, settings.max_upload_mb * 1024 * 1024)
+        metadata = request.paper.model_dump(exclude={"existing_document_id", "pdf_urls"})
+        metadata.update({"pdf_url": request.pdf_url, "imported_at": datetime.now(timezone.utc).isoformat()})
+        return await ingest_pdf(upload, settings, folder_id=request.folder_id, discovery=metadata)
+    except (httpx.HTTPError, OSError, TimeoutError):
+        raise HTTPException(502, "The PDF could not be downloaded. Retry, choose another source, or upload it manually.") from None
 
 
 def make_provider(provider_name: str, api_key: str, model: str, system_prompt: str):
@@ -59,6 +107,31 @@ async def generate_configured_title(transcript: str, fallback: str) -> str:
         if sum(map(len, parts)) > 1000:
             break
     return clean_title("".join(parts), fallback)
+
+
+# One title job per conversation; strong references keep running tasks alive.
+title_jobs: dict[str, asyncio.Task] = {}
+
+
+async def persist_generated_title(conversation_id: str, provisional_title: str, transcript: str) -> str | None:
+    try:
+        title = await generate_configured_title(transcript, provisional_title)
+        # Open the session only after the slow model call so no connection is held while waiting.
+        return await run_in_threadpool(save_generated_title, conversation_id, provisional_title, title)
+    except Exception:
+        # A failed title must never turn a saved answer into a chat error.
+        logger.warning("Automatic title generation failed for conversation %s", conversation_id, exc_info=True)
+        return None
+
+
+def start_title_job(conversation_id: str, provisional_title: str, transcript: str) -> asyncio.Task:
+    job = title_jobs.get(conversation_id)
+    if job and not job.done():
+        return job
+    job = asyncio.create_task(persist_generated_title(conversation_id, provisional_title, transcript))
+    title_jobs[conversation_id] = job
+    job.add_done_callback(lambda done: title_jobs.pop(conversation_id, None) if title_jobs.get(conversation_id) is done else None)
+    return job
 
 
 @app.get("/health")
@@ -150,14 +223,44 @@ async def list_provider_models(provider: str, app_settings: Settings = Depends(g
     return ProviderModelsOut(provider=provider, models=sorted(set(models)))
 
 
-def validate_folder_name(name: str, db: Session, folder_id: str | None = None) -> str:
+FOLDER_COLORS = ["#8c9d65", "#618fbd", "#b8836d", "#9a80b8", "#c29d54", "#689f98"]
+
+
+def validate_folder_name(name: str, db: Session, folder_id: str | None = None, parent_id: str | None = None) -> str:
     name = name.strip()
     if not name or any(ord(char) < 32 for char in name):
         raise HTTPException(422, "Enter a folder name.")
-    existing = db.scalar(select(Folder).where(func.lower(Folder.name) == name.lower()))
-    if existing and existing.id != folder_id:
-        raise HTTPException(409, "A folder with this name already exists.")
+    existing = db.scalar(select(Folder).where(func.lower(Folder.name) == name.lower(), Folder.parent_id == parent_id, Folder.id != (folder_id or "")))
+    if existing:
+        raise HTTPException(409, "A folder with this name already exists here.")
     return name
+
+
+def folder_parent(db: Session, parent_id: str | None, folder_id: str | None = None) -> Folder | None:
+    parent = db.get(Folder, parent_id) if parent_id else None
+    if parent_id and not parent:
+        raise HTTPException(404, "Destination folder not found.")
+    ancestor = parent
+    while ancestor:
+        if ancestor.id == folder_id:
+            raise HTTPException(422, "A folder cannot be moved into itself or its descendants.")
+        ancestor = db.get(Folder, ancestor.parent_id) if ancestor.parent_id else None
+    return parent
+
+
+def automatic_folder_color(db: Session, previous: str | None = None) -> str:
+    roots = list(db.scalars(select(Folder).where(Folder.parent_id.is_(None))))
+    choices = [color for color in FOLDER_COLORS if color != previous]
+    return min(choices, key=lambda color: sum(root.color == color for root in roots))
+
+
+def color_branch(db: Session, folder: Folder, color: str) -> None:
+    pending = [folder]
+    children = list(db.scalars(select(Folder)))
+    while pending:
+        current = pending.pop()
+        current.color = color
+        pending.extend(child for child in children if child.parent_id == current.id)
 
 
 @app.get("/api/folders", response_model=list[FolderOut])
@@ -167,23 +270,29 @@ def list_folders(db: Session = Depends(get_db)) -> list[Folder]:
 
 @app.post("/api/folders", response_model=FolderOut, status_code=201)
 def create_folder(request: FolderIn, db: Session = Depends(get_db)) -> Folder:
-    folder = Folder(name=validate_folder_name(request.name, db), color=(request.color or "#8c9d65").lower())
+    parent = folder_parent(db, request.parent_id)
+    folder = Folder(name=validate_folder_name(request.name, db, parent_id=request.parent_id), parent_id=request.parent_id,
+                    color=parent.color if parent else (request.color or automatic_folder_color(db)).lower(), icon=request.icon or "folder")
     db.add(folder)
     db.commit()
-    db.refresh(folder)
     return folder
 
 
 @app.patch("/api/folders/{folder_id}", response_model=FolderOut)
-def rename_folder(folder_id: str, request: FolderIn, db: Session = Depends(get_db)) -> Folder:
+def rename_folder(folder_id: str, request: FolderUpdate, db: Session = Depends(get_db)) -> Folder:
     folder = db.get(Folder, folder_id)
     if not folder:
         raise HTTPException(404, "Folder not found.")
-    folder.name = validate_folder_name(request.name, db, folder_id)
-    if request.color is not None:
-        folder.color = request.color.lower()
+    parent_id = request.parent_id if "parent_id" in request.model_fields_set else folder.parent_id
+    parent = folder_parent(db, parent_id, folder_id)
+    name = validate_folder_name(request.name if request.name is not None else folder.name, db, folder_id, parent_id)
+    color = parent.color if parent else (automatic_folder_color(db, folder.color) if folder.parent_id else request.color or folder.color)
+    folder.name = name
+    folder.parent_id = parent_id
+    color_branch(db, folder, color.lower())
+    if request.icon is not None:
+        folder.icon = request.icon
     db.commit()
-    db.refresh(folder)
     return folder
 
 
@@ -192,7 +301,17 @@ def delete_folder(folder_id: str, db: Session = Depends(get_db)) -> Response:
     folder = db.get(Folder, folder_id)
     if not folder:
         raise HTTPException(404, "Folder not found.")
-    # Deleting an organizational folder always keeps its papers and reader data.
+    # Keep children and their contents, promoting them to the library root.
+    children = list(db.scalars(select(Folder).where(Folder.parent_id == folder_id)))
+    for child in children:
+        base = child.name
+        suffix = 2
+        while db.scalar(select(Folder).where(Folder.parent_id.is_(None), func.lower(Folder.name) == child.name.lower(), Folder.id != child.id)):
+            child.name = f"{base[:70]} ({suffix})"
+            suffix += 1
+        child.parent_id = None
+        color_branch(db, child, automatic_folder_color(db, child.color))
+        db.flush()
     for document in db.scalars(select(Document).where(Document.folder_id == folder_id)):
         document.folder_id = None
     db.delete(folder)
@@ -222,10 +341,9 @@ def list_documents(db: Session = Depends(get_db)) -> list[Document]:
 @app.post("/api/documents", response_model=DocumentOut, status_code=201)
 async def upload_document(
     file: UploadFile,
-    db: Session = Depends(get_db),
     app_settings: Settings = Depends(get_settings),
 ) -> Document:
-    return await ingest_pdf(file, db, app_settings)
+    return await ingest_pdf(file, app_settings)
 
 
 @app.get("/api/documents/{document_id}", response_model=DocumentOut)
@@ -581,25 +699,41 @@ def update_conversation(conversation_id: str, request: ConversationUpdate, db: S
     return conversation
 
 
+def load_title_transcript(conversation_id: str) -> tuple[str, str]:
+    with SessionLocal() as db:
+        conversation = db.get(Conversation, conversation_id)
+        if not conversation:
+            raise HTTPException(404, "Conversation not found.")
+        if not settings.provider_api_key(settings.title_provider):
+            raise HTTPException(503, f"No {settings.title_provider} API key is configured for chat titles.")
+        messages = list(db.scalars(select(Message).where(Message.conversation_id == conversation.id).order_by(Message.created_at)))
+        if not messages:
+            raise HTTPException(409, "Send a message before generating a title.")
+        transcript = "\n\n".join(f"{message.role.title()}: {message.content}" for message in messages)
+        fallback = next((message.content for message in messages if message.role == "user"), conversation.title)[:80]
+        return transcript, fallback
+
+
+def save_regenerated_title(conversation_id: str, title: str) -> ConversationOut:
+    with SessionLocal() as db:
+        conversation = db.get(Conversation, conversation_id)
+        if not conversation:
+            raise HTTPException(404, "Conversation not found.")
+        conversation.title = title
+        db.commit()
+        db.refresh(conversation)
+        return ConversationOut.model_validate(conversation)
+
+
 @app.post("/api/conversations/{conversation_id}/regenerate-title", response_model=ConversationOut)
-async def regenerate_conversation_title(conversation_id: str, db: Session = Depends(get_db)) -> Conversation:
-    conversation = db.get(Conversation, conversation_id)
-    if not conversation:
-        raise HTTPException(404, "Conversation not found.")
-    if not settings.provider_api_key(settings.title_provider):
-        raise HTTPException(503, f"No {settings.title_provider} API key is configured for chat titles.")
-    messages = list(db.scalars(select(Message).where(Message.conversation_id == conversation.id).order_by(Message.created_at)))
-    if not messages:
-        raise HTTPException(409, "Send a message before generating a title.")
-    transcript = "\n\n".join(f"{message.role.title()}: {message.content}" for message in messages)
-    fallback = next((message.content for message in messages if message.role == "user"), conversation.title)[:80]
+async def regenerate_conversation_title(conversation_id: str) -> ConversationOut:
+    # No session stays open while the title model is awaited.
+    transcript, fallback = await run_in_threadpool(load_title_transcript, conversation_id)
     try:
-        conversation.title = await generate_configured_title(transcript, fallback)
+        title = await generate_configured_title(transcript, fallback)
     except (httpx.HTTPError, ValueError, KeyError) as exc:
         raise HTTPException(502, "The title model could not generate a title.") from exc
-    db.commit()
-    db.refresh(conversation)
-    return conversation
+    return await run_in_threadpool(save_regenerated_title, conversation_id, title)
 
 
 @app.post("/api/conversations/{conversation_id}/sync-defaults", response_model=ConversationOut)
@@ -637,48 +771,91 @@ def delete_conversation(conversation_id: str, db: Session = Depends(get_db)) -> 
     return Response(status_code=204)
 
 
+@dataclass(frozen=True)
+class ChatStreamSetup:
+    conversation_id: str
+    document_id: str
+    title: str
+    provider_name: str
+    model: str
+    api_key: str
+    system_prompt: str
+    paper_title: str
+    paper_context: str
+    context_mode: str
+    history: list[ChatTurnIn]
+    prior_sources: list[dict]
+    should_generate_title: bool
+
+
+def prepare_chat_stream(conversation_id: str, request: ChatRequest) -> ChatStreamSetup:
+    # Streams outlive request dependencies, so they copy plain values out of a short session.
+    with SessionLocal() as db:
+        conversation = db.get(Conversation, conversation_id)
+        if not conversation:
+            raise HTTPException(404, "Conversation not found.")
+        paper_title = Path(db.get(Document, conversation.document_id).original_name).stem
+        provider_name = conversation.provider
+        api_key = settings.provider_api_key(provider_name)
+        if not api_key:
+            raise HTTPException(503, f"No API key is configured for {provider_name}. Open Settings to enable chat.")
+
+        if conversation.context_builder_version == "quick-ask-v1":
+            paper_context, context_mode = "", "quick_ask_history"
+        else:
+            paper_context, context_mode = build_paper_context(db, conversation, request.question, request.selected_text)
+        history_messages = list(db.scalars(select(Message).where(Message.conversation_id == conversation.id).order_by(Message.created_at)))
+        history = []
+        pending = None
+        for message in history_messages:
+            if message.role == "user":
+                saved = json.loads(message.context_json or "{}")
+                pending = (message, saved)
+            elif message.role == "assistant" and pending:
+                prior, saved = pending
+                history.append(ChatTurnIn(question=prior.content, answer=message.content, selected_text=saved.get("selected_text", ""), page=saved.get("page"), images=[ContextImageIn(**item) for item in saved.get("images", [])]))
+                pending = None
+        prior_sources = previous_sources(db, conversation.id)
+
+        scope = "quick_ask_followup" if conversation.context_builder_version == "quick-ask-v1" else ("selection" if request.selected_text or request.images else "paper")
+        context = {"scope": scope, "page": request.page, "selected_text": request.selected_text, "images": [image.model_dump() for image in request.images], "anchors": [anchor.model_dump() for anchor in request.anchors], "context_mode": context_mode, "search_requested": request.allow_web_search}
+        db.add(Message(document_id=conversation.document_id, conversation_id=conversation.id, role="user", content=request.question, context_json=json.dumps(context)))
+        should_generate_title = conversation.title == "New chat" and bool(settings.provider_api_key(settings.title_provider))
+        if conversation.title == "New chat":
+            conversation.title = request.question.strip()[:80]
+        db.commit()
+        return ChatStreamSetup(conversation.id, conversation.document_id, conversation.title, provider_name, conversation.model_id, api_key,
+                               conversation.system_prompt, paper_title, paper_context, context_mode, history, prior_sources, should_generate_title)
+
+
+def save_assistant_message(setup: ChatStreamSetup, content: str, web: dict, keep_web: bool) -> None:
+    with SessionLocal() as db:
+        db.add(Message(document_id=setup.document_id, conversation_id=setup.conversation_id, role="assistant", content=content, context_json=json.dumps({"web": web}) if keep_web else None))
+        stored = db.get(Conversation, setup.conversation_id)
+        if stored: stored.updated_at = datetime.now(timezone.utc)
+        db.commit()
+
+
+def save_generated_title(conversation_id: str, provisional_title: str, title: str) -> str | None:
+    with SessionLocal() as db:
+        stored = db.get(Conversation, conversation_id)
+        # Preserve a title the user changed while the answer streamed.
+        if stored and stored.title == provisional_title:
+            stored.title = title
+            db.commit()
+        return stored.title if stored else None
+
+
 @app.post("/api/conversations/{conversation_id}/messages/stream")
-async def chat_stream(conversation_id: str, request: ChatRequest, db: Session = Depends(get_db)) -> StreamingResponse:
-    conversation = db.get(Conversation, conversation_id)
-    if not conversation:
-        raise HTTPException(404, "Conversation not found.")
-    paper_title = Path(db.get(Document, conversation.document_id).original_name).stem
-    provider_name = conversation.provider
-    api_key = settings.provider_api_key(provider_name)
-    if not api_key:
-        raise HTTPException(503, f"No API key is configured for {provider_name}. Open Settings to enable chat.")
+async def chat_stream(conversation_id: str, request: ChatRequest) -> StreamingResponse:
+    setup = await run_in_threadpool(prepare_chat_stream, conversation_id, request)
+    provider_name, api_key, model, paper_title = setup.provider_name, setup.api_key, setup.model, setup.paper_title
 
-    if conversation.context_builder_version == "quick-ask-v1":
-        paper_context, context_mode = "", "quick_ask_history"
-    else:
-        paper_context, context_mode = build_paper_context(db, conversation, request.question, request.selected_text)
-    scope = "quick_ask_followup" if conversation.context_builder_version == "quick-ask-v1" else ("selection" if request.selected_text or request.images else "paper")
-    context = {"scope": scope, "page": request.page, "selected_text": request.selected_text, "images": [image.model_dump() for image in request.images], "anchors": [anchor.model_dump() for anchor in request.anchors], "context_mode": context_mode, "search_requested": request.allow_web_search}
-    user_message = Message(document_id=conversation.document_id, conversation_id=conversation.id, role="user", content=request.question, context_json=json.dumps(context))
-    db.add(user_message)
-    should_generate_title = conversation.title == "New chat" and bool(settings.provider_api_key(settings.title_provider))
-    if conversation.title == "New chat":
-        conversation.title = request.question.strip()[:80]
-    db.commit()
-
-    model = conversation.model_id
     async def events() -> AsyncIterator[str]:
         complete = ""
         try:
-            history_messages = list(db.scalars(select(Message).where(Message.conversation_id == conversation.id, Message.id != user_message.id).order_by(Message.created_at)))
-            history = []
-            pending = None
-            from .schemas import ChatTurnIn, ContextImageIn
-            for message in history_messages:
-                if message.role == "user":
-                    saved = json.loads(message.context_json or "{}")
-                    pending = (message, saved)
-                elif message.role == "assistant" and pending:
-                    prior, saved = pending
-                    history.append(ChatTurnIn(question=prior.content, answer=message.content, selected_text=saved.get("selected_text", ""), page=saved.get("page"), images=[ContextImageIn(**item) for item in saved.get("images", [])]))
-                    pending = None
-            yield sse({"type": "started", "provider": provider_name, "model": model, "context_mode": context_mode, "conversation_id": conversation.id, "title": conversation.title})
-            prior_sources = previous_sources(db, conversation.id)
+            yield sse({"type": "started", "provider": provider_name, "model": model, "context_mode": setup.context_mode, "conversation_id": setup.conversation_id, "title": setup.title})
+            prior_sources = setup.prior_sources
             fresh_sources = []
             search_query = None
             search_performed = False
@@ -703,59 +880,55 @@ async def chat_stream(conversation_id: str, request: ChatRequest, db: Session = 
             sources = (fresh_sources + [item for item in prior_sources if item["url"] not in {source["url"] for source in fresh_sources}])[:6]
             web = {"searched": search_performed, "query": search_query if search_performed else None, "reused": bool(prior_sources), "sources": sources}
             yield sse({"type": "web_sources", "web": web})
-            system_prompt = conversation.system_prompt + paper_context + web_context(sources)
+            system_prompt = setup.system_prompt + setup.paper_context + web_context(sources)
             provider = make_provider(provider_name, api_key, model, system_prompt)
-            async for delta in provider.stream_answer(request.question, request.selected_text, request.images, request.page, history[-20:]):
+            async for delta in provider.stream_answer(request.question, request.selected_text, request.images, request.page, setup.history[-20:]):
                 complete += delta
                 yield sse({"type": "delta", "text": delta})
-            with SessionLocal() as stream_db:
-                stream_db.add(Message(document_id=conversation.document_id, conversation_id=conversation.id, role="assistant", content=complete, context_json=json.dumps({"web": web}) if search_performed or sources else None))
-                stored = stream_db.get(Conversation, conversation.id)
-                if stored: stored.updated_at = datetime.now(timezone.utc)
-                stream_db.commit()
-            completed_title = conversation.title
-            if should_generate_title:
+            await run_in_threadpool(save_assistant_message, setup, complete, web, bool(search_performed or sources))
+            title_job = None
+            if setup.should_generate_title:
                 # Resolve vague questions from the answer instead of naming the request.
                 transcript = f"User: {request.question.strip()[:8000]}"
                 if request.selected_text:
                     transcript += f"\n\nSelected passage: {request.selected_text[:6000]}"
                 transcript += f"\n\nAssistant: {complete[:12000]}"
-                try:
-                    title = await generate_configured_title(transcript, conversation.title)
-                    with SessionLocal() as title_db:
-                        stored = title_db.get(Conversation, conversation.id)
-                        # Preserve a title the user changed while the answer streamed.
-                        if stored and stored.title == conversation.title:
-                            stored.title = title
-                            title_db.commit()
-                        if stored:
-                            completed_title = stored.title
-                except (httpx.HTTPError, ValueError, KeyError):
-                    # A failed title must never turn a saved answer into a chat error.
-                    pass
-            yield sse({"type": "completed", "web": web, "title": completed_title})
+                title_job = start_title_job(setup.conversation_id, setup.title, transcript)
+            # The answer is saved: release the composer now instead of waiting on the title model.
+            yield sse({"type": "completed", "web": web, "title": setup.title, "title_pending": title_job is not None})
+            if title_job:
+                # Shield the job so a client disconnect still lets the title finish and persist.
+                title = await asyncio.shield(title_job)
+                if title:
+                    yield sse({"type": "title", "title": title})
         except Exception as exc:
             yield sse({"type": "error", "message": str(exc)})
 
     return StreamingResponse(events(), media_type="text/event-stream", headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"})
 
 
+def prepare_quick_ask(conversation_id: str, request: QuickAskRequest) -> tuple[str, str, str, str]:
+    with SessionLocal() as db:
+        conversation = db.get(Conversation, conversation_id)
+        if not conversation:
+            raise HTTPException(404, "Conversation not found.")
+        history_has_selection = any(turn.selected_text or turn.images for turn in request.history)
+        if not request.selected_text and not request.images and not history_has_selection:
+            raise HTTPException(422, "Quick Ask requires selected text or a screenshot.")
+        api_key = settings.provider_api_key(conversation.provider)
+        if not api_key:
+            raise HTTPException(503, f"No API key is configured for {conversation.provider}. Open Settings to enable Quick Ask.")
+        paper_title = Path(db.get(Document, conversation.document_id).original_name).stem
+        return conversation.provider, conversation.model_id, api_key, paper_title
+
+
 @app.post("/api/conversations/{conversation_id}/quick-ask/stream")
-async def quick_ask_stream(conversation_id: str, request: QuickAskRequest, db: Session = Depends(get_db)) -> StreamingResponse:
-    conversation = db.get(Conversation, conversation_id)
-    if not conversation:
-        raise HTTPException(404, "Conversation not found.")
-    history_has_selection = any(turn.selected_text or turn.images for turn in request.history)
-    if not request.selected_text and not request.images and not history_has_selection:
-        raise HTTPException(422, "Quick Ask requires selected text or a screenshot.")
-    api_key = settings.provider_api_key(conversation.provider)
-    if not api_key:
-        raise HTTPException(503, f"No API key is configured for {conversation.provider}. Open Settings to enable Quick Ask.")
-    paper_title = Path(db.get(Document, conversation.document_id).original_name).stem
+async def quick_ask_stream(conversation_id: str, request: QuickAskRequest) -> StreamingResponse:
+    provider_name, model, api_key, paper_title = await run_in_threadpool(prepare_quick_ask, conversation_id, request)
 
     async def events() -> AsyncIterator[str]:
         try:
-            yield sse({"type": "started", "provider": conversation.provider, "model": conversation.model_id})
+            yield sse({"type": "started", "provider": provider_name, "model": model})
             prior_sources = []
             seen_urls = set()
             for turn in reversed(request.history):
@@ -773,7 +946,7 @@ async def quick_ask_stream(conversation_id: str, request: QuickAskRequest, db: S
             if request.allow_web_search:
                 yield sse({"type": "searching"})
                 try:
-                    planner = make_provider(conversation.provider, api_key, conversation.model_id, "")
+                    planner = make_provider(provider_name, api_key, model, "")
                     search_selection = request.selected_text or (request.history[0].selected_text if request.history else "")
                     search_query = await plan_search(planner, request.question, search_selection, paper_title)
                 except Exception:
@@ -792,7 +965,7 @@ async def quick_ask_stream(conversation_id: str, request: QuickAskRequest, db: S
             sources = (fresh_sources + [item for item in prior_sources if item["url"] not in {source["url"] for source in fresh_sources}])[:6]
             web = {"searched": search_performed, "query": search_query if search_performed else None, "reused": bool(prior_sources), "sources": sources}
             yield sse({"type": "web_sources", "web": web})
-            provider = make_provider(conversation.provider, api_key, conversation.model_id, settings.quick_ask_prompt + web_context(sources))
+            provider = make_provider(provider_name, api_key, model, settings.quick_ask_prompt + web_context(sources))
             async for delta in provider.stream_answer(request.question, request.selected_text, request.images, request.page, request.history):
                 yield sse({"type": "delta", "text": delta})
             yield sse({"type": "completed", "web": web})
