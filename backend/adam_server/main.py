@@ -1,10 +1,12 @@
 import json
 import os
 from collections.abc import AsyncIterator
+from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
 
 from fastapi import Depends, FastAPI, HTTPException, Response, UploadFile
+from fastapi.concurrency import run_in_threadpool
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse, StreamingResponse
 from sqlalchemy import func, select
@@ -15,6 +17,7 @@ from .config import Settings, get_settings
 from .database import SessionLocal, get_db, run_migrations
 from .models import Annotation, Conversation, Document, Folder, Message, ModelFavorite, Page, PaperNote
 from .schemas import AiNoteCreate, AiNoteUnlink, AnnotationIn, AnnotationOut, AnnotationUpdate, AppSettingsOut, AppSettingsUpdate, ChatRequest, ConversationCreate, ConversationDetail, ConversationOut, ConversationUpdate, DocumentMove, DocumentOut, DocumentUpdate, FolderIn, FolderOut, ModelFavoriteUpdate, PageTextOut, PaperNoteOut, PaperNoteUpdate, ProviderKeyUpdate, ProviderModelsOut, QuickAskImportRequest, QuickAskRequest, TitleModelUpdate
+from .schemas import ChatTurnIn, ContextImageIn
 from .services.context import build_paper_context
 from .services.documents import document_file_path, ingest_pdf
 from .services.llm import AnthropicProvider, GoogleProvider, OpenAICompatibleProvider, OpenAIResponsesProvider, TITLE_SYSTEM_PROMPT, clean_title, generate_zen_title, sse
@@ -523,25 +526,41 @@ def update_conversation(conversation_id: str, request: ConversationUpdate, db: S
     return conversation
 
 
+def load_title_transcript(conversation_id: str) -> tuple[str, str]:
+    with SessionLocal() as db:
+        conversation = db.get(Conversation, conversation_id)
+        if not conversation:
+            raise HTTPException(404, "Conversation not found.")
+        if not settings.provider_api_key(settings.title_provider):
+            raise HTTPException(503, f"No {settings.title_provider} API key is configured for chat titles.")
+        messages = list(db.scalars(select(Message).where(Message.conversation_id == conversation.id).order_by(Message.created_at)))
+        if not messages:
+            raise HTTPException(409, "Send a message before generating a title.")
+        transcript = "\n\n".join(f"{message.role.title()}: {message.content}" for message in messages)
+        fallback = next((message.content for message in messages if message.role == "user"), conversation.title)[:80]
+        return transcript, fallback
+
+
+def save_regenerated_title(conversation_id: str, title: str) -> ConversationOut:
+    with SessionLocal() as db:
+        conversation = db.get(Conversation, conversation_id)
+        if not conversation:
+            raise HTTPException(404, "Conversation not found.")
+        conversation.title = title
+        db.commit()
+        db.refresh(conversation)
+        return ConversationOut.model_validate(conversation)
+
+
 @app.post("/api/conversations/{conversation_id}/regenerate-title", response_model=ConversationOut)
-async def regenerate_conversation_title(conversation_id: str, db: Session = Depends(get_db)) -> Conversation:
-    conversation = db.get(Conversation, conversation_id)
-    if not conversation:
-        raise HTTPException(404, "Conversation not found.")
-    if not settings.provider_api_key(settings.title_provider):
-        raise HTTPException(503, f"No {settings.title_provider} API key is configured for chat titles.")
-    messages = list(db.scalars(select(Message).where(Message.conversation_id == conversation.id).order_by(Message.created_at)))
-    if not messages:
-        raise HTTPException(409, "Send a message before generating a title.")
-    transcript = "\n\n".join(f"{message.role.title()}: {message.content}" for message in messages)
-    fallback = next((message.content for message in messages if message.role == "user"), conversation.title)[:80]
+async def regenerate_conversation_title(conversation_id: str) -> ConversationOut:
+    # No session stays open while the title model is awaited.
+    transcript, fallback = await run_in_threadpool(load_title_transcript, conversation_id)
     try:
-        conversation.title = await generate_configured_title(transcript, fallback)
+        title = await generate_configured_title(transcript, fallback)
     except (httpx.HTTPError, ValueError, KeyError) as exc:
         raise HTTPException(502, "The title model could not generate a title.") from exc
-    db.commit()
-    db.refresh(conversation)
-    return conversation
+    return await run_in_threadpool(save_regenerated_title, conversation_id, title)
 
 
 @app.post("/api/conversations/{conversation_id}/sync-defaults", response_model=ConversationOut)
@@ -579,48 +598,91 @@ def delete_conversation(conversation_id: str, db: Session = Depends(get_db)) -> 
     return Response(status_code=204)
 
 
+@dataclass(frozen=True)
+class ChatStreamSetup:
+    conversation_id: str
+    document_id: str
+    title: str
+    provider_name: str
+    model: str
+    api_key: str
+    system_prompt: str
+    paper_title: str
+    paper_context: str
+    context_mode: str
+    history: list[ChatTurnIn]
+    prior_sources: list[dict]
+    should_generate_title: bool
+
+
+def prepare_chat_stream(conversation_id: str, request: ChatRequest) -> ChatStreamSetup:
+    # Streams outlive request dependencies, so they copy plain values out of a short session.
+    with SessionLocal() as db:
+        conversation = db.get(Conversation, conversation_id)
+        if not conversation:
+            raise HTTPException(404, "Conversation not found.")
+        paper_title = Path(db.get(Document, conversation.document_id).original_name).stem
+        provider_name = conversation.provider
+        api_key = settings.provider_api_key(provider_name)
+        if not api_key:
+            raise HTTPException(503, f"No API key is configured for {provider_name}. Open Settings to enable chat.")
+
+        if conversation.context_builder_version == "quick-ask-v1":
+            paper_context, context_mode = "", "quick_ask_history"
+        else:
+            paper_context, context_mode = build_paper_context(db, conversation, request.question, request.selected_text)
+        history_messages = list(db.scalars(select(Message).where(Message.conversation_id == conversation.id).order_by(Message.created_at)))
+        history = []
+        pending = None
+        for message in history_messages:
+            if message.role == "user":
+                saved = json.loads(message.context_json or "{}")
+                pending = (message, saved)
+            elif message.role == "assistant" and pending:
+                prior, saved = pending
+                history.append(ChatTurnIn(question=prior.content, answer=message.content, selected_text=saved.get("selected_text", ""), page=saved.get("page"), images=[ContextImageIn(**item) for item in saved.get("images", [])]))
+                pending = None
+        prior_sources = previous_sources(db, conversation.id)
+
+        scope = "quick_ask_followup" if conversation.context_builder_version == "quick-ask-v1" else ("selection" if request.selected_text or request.images else "paper")
+        context = {"scope": scope, "page": request.page, "selected_text": request.selected_text, "images": [image.model_dump() for image in request.images], "anchors": [anchor.model_dump() for anchor in request.anchors], "context_mode": context_mode, "search_requested": request.allow_web_search}
+        db.add(Message(document_id=conversation.document_id, conversation_id=conversation.id, role="user", content=request.question, context_json=json.dumps(context)))
+        should_generate_title = conversation.title == "New chat" and bool(settings.provider_api_key(settings.title_provider))
+        if conversation.title == "New chat":
+            conversation.title = request.question.strip()[:80]
+        db.commit()
+        return ChatStreamSetup(conversation.id, conversation.document_id, conversation.title, provider_name, conversation.model_id, api_key,
+                               conversation.system_prompt, paper_title, paper_context, context_mode, history, prior_sources, should_generate_title)
+
+
+def save_assistant_message(setup: ChatStreamSetup, content: str, web: dict, keep_web: bool) -> None:
+    with SessionLocal() as db:
+        db.add(Message(document_id=setup.document_id, conversation_id=setup.conversation_id, role="assistant", content=content, context_json=json.dumps({"web": web}) if keep_web else None))
+        stored = db.get(Conversation, setup.conversation_id)
+        if stored: stored.updated_at = datetime.now(timezone.utc)
+        db.commit()
+
+
+def save_generated_title(conversation_id: str, provisional_title: str, title: str) -> str | None:
+    with SessionLocal() as db:
+        stored = db.get(Conversation, conversation_id)
+        # Preserve a title the user changed while the answer streamed.
+        if stored and stored.title == provisional_title:
+            stored.title = title
+            db.commit()
+        return stored.title if stored else None
+
+
 @app.post("/api/conversations/{conversation_id}/messages/stream")
-async def chat_stream(conversation_id: str, request: ChatRequest, db: Session = Depends(get_db)) -> StreamingResponse:
-    conversation = db.get(Conversation, conversation_id)
-    if not conversation:
-        raise HTTPException(404, "Conversation not found.")
-    paper_title = Path(db.get(Document, conversation.document_id).original_name).stem
-    provider_name = conversation.provider
-    api_key = settings.provider_api_key(provider_name)
-    if not api_key:
-        raise HTTPException(503, f"No API key is configured for {provider_name}. Open Settings to enable chat.")
+async def chat_stream(conversation_id: str, request: ChatRequest) -> StreamingResponse:
+    setup = await run_in_threadpool(prepare_chat_stream, conversation_id, request)
+    provider_name, api_key, model, paper_title = setup.provider_name, setup.api_key, setup.model, setup.paper_title
 
-    if conversation.context_builder_version == "quick-ask-v1":
-        paper_context, context_mode = "", "quick_ask_history"
-    else:
-        paper_context, context_mode = build_paper_context(db, conversation, request.question, request.selected_text)
-    scope = "quick_ask_followup" if conversation.context_builder_version == "quick-ask-v1" else ("selection" if request.selected_text or request.images else "paper")
-    context = {"scope": scope, "page": request.page, "selected_text": request.selected_text, "images": [image.model_dump() for image in request.images], "anchors": [anchor.model_dump() for anchor in request.anchors], "context_mode": context_mode, "search_requested": request.allow_web_search}
-    user_message = Message(document_id=conversation.document_id, conversation_id=conversation.id, role="user", content=request.question, context_json=json.dumps(context))
-    db.add(user_message)
-    should_generate_title = conversation.title == "New chat" and bool(settings.provider_api_key(settings.title_provider))
-    if conversation.title == "New chat":
-        conversation.title = request.question.strip()[:80]
-    db.commit()
-
-    model = conversation.model_id
     async def events() -> AsyncIterator[str]:
         complete = ""
         try:
-            history_messages = list(db.scalars(select(Message).where(Message.conversation_id == conversation.id, Message.id != user_message.id).order_by(Message.created_at)))
-            history = []
-            pending = None
-            from .schemas import ChatTurnIn, ContextImageIn
-            for message in history_messages:
-                if message.role == "user":
-                    saved = json.loads(message.context_json or "{}")
-                    pending = (message, saved)
-                elif message.role == "assistant" and pending:
-                    prior, saved = pending
-                    history.append(ChatTurnIn(question=prior.content, answer=message.content, selected_text=saved.get("selected_text", ""), page=saved.get("page"), images=[ContextImageIn(**item) for item in saved.get("images", [])]))
-                    pending = None
-            yield sse({"type": "started", "provider": provider_name, "model": model, "context_mode": context_mode, "conversation_id": conversation.id, "title": conversation.title})
-            prior_sources = previous_sources(db, conversation.id)
+            yield sse({"type": "started", "provider": provider_name, "model": model, "context_mode": setup.context_mode, "conversation_id": setup.conversation_id, "title": setup.title})
+            prior_sources = setup.prior_sources
             fresh_sources = []
             search_query = None
             search_performed = False
@@ -645,33 +707,24 @@ async def chat_stream(conversation_id: str, request: ChatRequest, db: Session = 
             sources = (fresh_sources + [item for item in prior_sources if item["url"] not in {source["url"] for source in fresh_sources}])[:6]
             web = {"searched": search_performed, "query": search_query if search_performed else None, "reused": bool(prior_sources), "sources": sources}
             yield sse({"type": "web_sources", "web": web})
-            system_prompt = conversation.system_prompt + paper_context + web_context(sources)
+            system_prompt = setup.system_prompt + setup.paper_context + web_context(sources)
             provider = make_provider(provider_name, api_key, model, system_prompt)
-            async for delta in provider.stream_answer(request.question, request.selected_text, request.images, request.page, history[-20:]):
+            async for delta in provider.stream_answer(request.question, request.selected_text, request.images, request.page, setup.history[-20:]):
                 complete += delta
                 yield sse({"type": "delta", "text": delta})
-            with SessionLocal() as stream_db:
-                stream_db.add(Message(document_id=conversation.document_id, conversation_id=conversation.id, role="assistant", content=complete, context_json=json.dumps({"web": web}) if search_performed or sources else None))
-                stored = stream_db.get(Conversation, conversation.id)
-                if stored: stored.updated_at = datetime.now(timezone.utc)
-                stream_db.commit()
-            completed_title = conversation.title
-            if should_generate_title:
+            await run_in_threadpool(save_assistant_message, setup, complete, web, bool(search_performed or sources))
+            completed_title = setup.title
+            if setup.should_generate_title:
                 # Resolve vague questions from the answer instead of naming the request.
                 transcript = f"User: {request.question.strip()[:8000]}"
                 if request.selected_text:
                     transcript += f"\n\nSelected passage: {request.selected_text[:6000]}"
                 transcript += f"\n\nAssistant: {complete[:12000]}"
                 try:
-                    title = await generate_configured_title(transcript, conversation.title)
-                    with SessionLocal() as title_db:
-                        stored = title_db.get(Conversation, conversation.id)
-                        # Preserve a title the user changed while the answer streamed.
-                        if stored and stored.title == conversation.title:
-                            stored.title = title
-                            title_db.commit()
-                        if stored:
-                            completed_title = stored.title
+                    title = await generate_configured_title(transcript, setup.title)
+                    stored_title = await run_in_threadpool(save_generated_title, setup.conversation_id, setup.title, title)
+                    if stored_title is not None:
+                        completed_title = stored_title
                 except (httpx.HTTPError, ValueError, KeyError):
                     # A failed title must never turn a saved answer into a chat error.
                     pass
@@ -682,22 +735,28 @@ async def chat_stream(conversation_id: str, request: ChatRequest, db: Session = 
     return StreamingResponse(events(), media_type="text/event-stream", headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"})
 
 
+def prepare_quick_ask(conversation_id: str, request: QuickAskRequest) -> tuple[str, str, str, str]:
+    with SessionLocal() as db:
+        conversation = db.get(Conversation, conversation_id)
+        if not conversation:
+            raise HTTPException(404, "Conversation not found.")
+        history_has_selection = any(turn.selected_text or turn.images for turn in request.history)
+        if not request.selected_text and not request.images and not history_has_selection:
+            raise HTTPException(422, "Quick Ask requires selected text or a screenshot.")
+        api_key = settings.provider_api_key(conversation.provider)
+        if not api_key:
+            raise HTTPException(503, f"No API key is configured for {conversation.provider}. Open Settings to enable Quick Ask.")
+        paper_title = Path(db.get(Document, conversation.document_id).original_name).stem
+        return conversation.provider, conversation.model_id, api_key, paper_title
+
+
 @app.post("/api/conversations/{conversation_id}/quick-ask/stream")
-async def quick_ask_stream(conversation_id: str, request: QuickAskRequest, db: Session = Depends(get_db)) -> StreamingResponse:
-    conversation = db.get(Conversation, conversation_id)
-    if not conversation:
-        raise HTTPException(404, "Conversation not found.")
-    history_has_selection = any(turn.selected_text or turn.images for turn in request.history)
-    if not request.selected_text and not request.images and not history_has_selection:
-        raise HTTPException(422, "Quick Ask requires selected text or a screenshot.")
-    api_key = settings.provider_api_key(conversation.provider)
-    if not api_key:
-        raise HTTPException(503, f"No API key is configured for {conversation.provider}. Open Settings to enable Quick Ask.")
-    paper_title = Path(db.get(Document, conversation.document_id).original_name).stem
+async def quick_ask_stream(conversation_id: str, request: QuickAskRequest) -> StreamingResponse:
+    provider_name, model, api_key, paper_title = await run_in_threadpool(prepare_quick_ask, conversation_id, request)
 
     async def events() -> AsyncIterator[str]:
         try:
-            yield sse({"type": "started", "provider": conversation.provider, "model": conversation.model_id})
+            yield sse({"type": "started", "provider": provider_name, "model": model})
             prior_sources = []
             seen_urls = set()
             for turn in reversed(request.history):
@@ -715,7 +774,7 @@ async def quick_ask_stream(conversation_id: str, request: QuickAskRequest, db: S
             if request.allow_web_search:
                 yield sse({"type": "searching"})
                 try:
-                    planner = make_provider(conversation.provider, api_key, conversation.model_id, "")
+                    planner = make_provider(provider_name, api_key, model, "")
                     search_selection = request.selected_text or (request.history[0].selected_text if request.history else "")
                     search_query = await plan_search(planner, request.question, search_selection, paper_title)
                 except Exception:
@@ -734,7 +793,7 @@ async def quick_ask_stream(conversation_id: str, request: QuickAskRequest, db: S
             sources = (fresh_sources + [item for item in prior_sources if item["url"] not in {source["url"] for source in fresh_sources}])[:6]
             web = {"searched": search_performed, "query": search_query if search_performed else None, "reused": bool(prior_sources), "sources": sources}
             yield sse({"type": "web_sources", "web": web})
-            provider = make_provider(conversation.provider, api_key, conversation.model_id, settings.quick_ask_prompt + web_context(sources))
+            provider = make_provider(provider_name, api_key, model, settings.quick_ask_prompt + web_context(sources))
             async for delta in provider.stream_answer(request.question, request.selected_text, request.images, request.page, request.history):
                 yield sse({"type": "delta", "text": delta})
             yield sse({"type": "completed", "web": web})
