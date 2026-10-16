@@ -190,3 +190,24 @@
 .files-paper-colored .paper-preview{background:linear-gradient(var(--folder-tint),var(--folder-tint)),#fffefa;border-bottom-color:var(--folder-tint)}
 .files-paper-colored .files-paper-type>span,.files-list .files-paper-colored .files-list-icon{color:var(--folder-ink)}
 .files-paper-colored input[type=checkbox]{accent-color:var(--folder-ink)}
+
+/* Focus reading keeps the mounted paper and workspace state intact. */
+.focus-reading-button{display:flex;align-items:center;justify-content:center;gap:7px;height:34px;padding:0 10px;border:1px solid #cbd8cb;border-radius:8px;background:#edf3e9;color:var(--accent);font-size:11px;font-weight:650;white-space:nowrap;cursor:pointer;flex-shrink:0}
+.focus-reading-button:hover{background:#dfeadb;border-color:#9bb397}
+.focus-reading-button:focus-visible{outline:2px solid var(--accent);outline-offset:3px}
+.focus-reading-button kbd{padding:2px 4px;border:1px solid #cad5c5;border-radius:4px;font:9px inherit;color:#6e8264}
+.reader-shell.focus-reading{height:100dvh}
+.focus-reading .reader-header{height:54px;padding:0 22px;gap:20px;background:#f8f9f3}
+.focus-reading .reader-header>.brand-button,.focus-reading .note-view-button,.focus-reading .reader-delete-button,.focus-reading .reader-header-tools>.settings-button{display:none}
+.focus-reading .document-title{position:static;transform:none;max-width:none;min-width:0;text-align:left;flex:1}
+.focus-reading .document-title-button{justify-content:flex-start;padding-left:0}
+.focus-reading .document-title>span{padding-left:0}
+.focus-reading .reader-header-tools{margin-left:auto;flex-shrink:0}
+.focus-reading .reader-workspace{height:calc(100dvh - 54px);grid-template-columns:minmax(0,1fr)!important}
+.focus-reading .side-pane,.focus-reading .pane-resizer{display:none}
+.focus-reading .pdf-pane{padding:28px 24px;background:#e6e8e0}
+.focus-reading .paper-zoom>.control-label{display:none}
+.pdf-raster-surface{position:relative;background:var(--paper)}
+.pdf-displayed-canvas{display:block;pointer-events:none;user-select:none}
+.reader-shell:not(.focus-reading) .document-title{position:static;transform:none;flex:1;min-width:0;max-width:none;margin:0 16px}.reader-header-tools{flex-shrink:0}
+@media(max-width:640px){.reader-header{padding:0 10px}.reader-header-tools{gap:6px}.focus-reading-button{padding:0 8px}.focus-reading-button kbd{display:none}.reader-shell:not(.focus-reading) .focus-reading-button>span{display:none}.focus-reading .reader-header{padding:0 10px;gap:8px}.focus-reading .document-title{display:block}.focus-reading .document-title strong{font-size:11px}.focus-reading .focus-reading-button>span{display:none}.focus-reading .pdf-pane{padding:20px 12px}.focus-reading .reader-header-tools{gap:6px}}
