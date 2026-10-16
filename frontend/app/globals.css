@@ -681,13 +681,10 @@ kbd { display: inline-grid; place-items: center; min-width: 18px; height: 18px; 
 .color-swatch:hover { transform: scale(1.14) }
 .color-swatch kbd { position: absolute; right: -5px; bottom: -6px; min-width: 13px; height: 13px; padding: 0 2px; border: 0; border-radius: 4px; background: var(--surface); color: var(--ink); font-size: 8px }
 .toolbar-divider { width: 1px; height: 22px; margin: 0 4px; background: #2e665026}
-.toolbar-action { height: 32px; display: flex; align-items: center; gap: 6px; padding: 0 9px; border: 0; border-radius: 9px; background: transparent; color: var(--glass-ink); font-size: 13px; font-weight: 600 }
-.toolbar-action:hover:not(:disabled) { background: var(--glass-hover)}
-.toolbar-action.primary { background: #ffffffbf; color: var(--accent-ink)}
-.toolbar-action.primary:hover:not(:disabled) { background: #ffffffed}
+.toolbar-action { height: 32px; display: flex; align-items: center; gap: 6px; padding: 0 9px; border: 1px solid #ffffff99; border-radius: 9px; background: #ffffffbf; color: var(--accent-ink); font-size: 13px; font-weight: 600 }
+.toolbar-action:hover:not(:disabled) { background: #ffffffed; border-color: var(--accent-line) }
 .toolbar-action > span { opacity: .8 }
-.toolbar-action kbd { min-width: 16px; height: 16px; border-color: #2e665026; background: transparent; color: var(--glass-muted); font-size: 9px }
-.toolbar-action.primary kbd { border-color: var(--accent-line); color: var(--accent-ink)}
+.toolbar-action kbd { min-width: 16px; height: 16px; border-color: var(--accent-line); background: transparent; color: var(--accent-ink); font-size: 9px }
 .toolbar-action.quote-note-action > span { color: var(--accent); opacity: 1 }
 .toolbar-action:disabled { opacity: .4 }
 .screenshot-actions { z-index: 31 }
