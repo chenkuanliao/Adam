@@ -80,7 +80,7 @@ kbd { display: inline-grid; place-items: center; min-width: 18px; height: 18px; 
 .ui-icon { width: 17px; height: 17px; flex: none; fill: none; stroke: currentColor; stroke-width: 1.7; stroke-linecap: round; stroke-linejoin: round }
 .control-label { color: var(--faint); font: 600 10px/1 var(--font-mono); letter-spacing: .06em; text-transform: uppercase }
 
-.action-tooltip { position: fixed; z-index: 1000; max-width: 260px; padding: 7px 10px; border-radius: 8px; background: var(--ink); color: var(--surface); font-size: 12px; line-height: 1.45; text-align: center; box-shadow: var(--shadow-2); transform: translateX(-50%); pointer-events: none; animation: fade-in .12s ease-out }
+.action-tooltip { position: fixed; z-index: 1000; max-width: 260px; padding: 7px 10px; border-radius: 8px; background: var(--accent); color: var(--surface); font-size: 12px; line-height: 1.45; text-align: center; box-shadow: var(--shadow-2); transform: translateX(-50%); pointer-events: none; animation: fade-in .12s ease-out }
 .action-tooltip.above { transform: translate(-50%, -100%) }
 
 @keyframes fade-in { from { opacity: 0 } }
@@ -166,7 +166,7 @@ kbd { display: inline-grid; place-items: center; min-width: 18px; height: 18px; 
 .files-folder-card.files-folder-drop-target, .files-sidebar nav > button.files-folder-drop-target { background: var(--folder-tint, var(--accent-soft)); box-shadow: 0 0 0 2px var(--folder-ink, var(--accent)); transform: none }
 .files-folder-drop-target .files-folder-arrow { display: none }
 
-.files-selection-bar { position: fixed; left: calc(50% + 126px); bottom: 24px; z-index: 30; translate: -50% 0; display: flex; flex-wrap: wrap; align-items: center; gap: 6px; width: max-content; max-width: calc(100vw - 24px); margin: 0; padding: 6px 6px 6px 16px; border-radius: 14px; background: var(--ink); color: var(--surface); font-size: 13px; box-shadow: var(--shadow-3); animation: rise-in .16s ease-out }
+.files-selection-bar { position: fixed; left: calc(50% + 126px); bottom: 24px; z-index: 30; translate: -50% 0; display: flex; flex-wrap: wrap; align-items: center; gap: 6px; width: max-content; max-width: calc(100vw - 24px); margin: 0; padding: 6px 6px 6px 16px; border-radius: 14px; background: var(--accent); color: var(--surface); font-size: 13px; box-shadow: var(--shadow-3); animation: rise-in .16s ease-out }
 .files-selection-bar strong { margin-right: 10px; font-weight: 600 }
 .files-selection-bar button { height: 32px; display: flex; align-items: center; gap: 6px; padding: 0 12px; border: 0; border-radius: 9px; background: #ffffff14; color: var(--surface); font-size: 13px }
 .files-selection-bar button:hover:not(:disabled) { background: #ffffff26 }
@@ -370,19 +370,19 @@ kbd { display: inline-grid; place-items: center; min-width: 18px; height: 18px; 
 .viewer-message.error-banner { width: fit-content; margin: 60px auto; padding: 14px 18px; color: var(--danger) }
 
 /* Floating reading dock: pages, zoom, region capture, and shortcuts. */
-.reader-dock { position: absolute; z-index: 9; left: var(--dock-center, 34%); bottom: 18px; display: flex; align-items: center; gap: 4px; padding: 5px; border: 1px solid #ffffff1a; border-radius: 14px; background: #16181deb; color: var(--desk-ink); box-shadow: 0 16px 40px #0000005c; backdrop-filter: blur(12px); transform: translateX(-50%); white-space: nowrap }
+.reader-dock { position: absolute; z-index: 9; left: var(--dock-center, 34%); bottom: 18px; display: flex; align-items: center; gap: 4px; padding: 5px; border: 1px solid #ffffff1a; border-radius: 14px; background: var(--accent); color: var(--surface); box-shadow: 0 12px 32px #183e2e38; backdrop-filter: blur(12px); transform: translateX(-50%); white-space: nowrap }
 .dock-group { height: 32px; display: flex; align-items: center; padding: 0 2px; border-radius: 10px; background: #ffffff0f }
-.dock-group button, .dock-tool { height: 32px; min-width: 32px; display: inline-flex; align-items: center; justify-content: center; gap: 6px; padding: 0 8px; border: 0; border-radius: 9px; background: transparent; color: var(--desk-ink); font-size: 14px }
+.dock-group button, .dock-tool { height: 32px; min-width: 32px; display: inline-flex; align-items: center; justify-content: center; gap: 6px; padding: 0 8px; border: 0; border-radius: 9px; background: transparent; color: var(--surface); font-size: 14px }
 .dock-group button:hover:not(:disabled), .dock-tool:hover { background: #ffffff1f }
 .dock-group button:disabled { opacity: .35 }
 .dock-pages span { min-width: 58px; display: flex; align-items: baseline; justify-content: center; gap: 4px; font: 500 13px var(--font-mono); font-variant-numeric: tabular-nums }
-.dock-pages small { color: #ffffff80; font-size: 12px }
+.dock-pages small { color: #e0ece4; font-size: 12px }
 .dock-group .zoom-reset { min-width: 54px; font: 500 12px var(--font-mono); font-variant-numeric: tabular-nums }
 .dock-group .zoom-fit { font-size: 12px; font-weight: 600 }
 .dock-tool { font-size: 13px; font-weight: 600 }
-.dock-tool kbd { height: 17px; border-color: #ffffff2e; background: transparent; color: #ffffffa6 }
-.dock-tool.active { background: var(--marker); color: var(--ink) }
-.dock-tool.active kbd { border-color: #16181d40; color: var(--ink) }
+.dock-tool kbd { height: 17px; border-color: #ffffff2e; background: transparent; color: #e0ece4}
+.dock-tool.active { background: var(--accent-soft); color: var(--accent-ink)}
+.dock-tool.active kbd { border-color: var(--accent-line); color: var(--accent-ink)}
 .dock-help { width: 32px; padding: 0; font: 600 14px var(--font-mono) }
 .shortcut-sheet { position: absolute; right: 0; bottom: calc(100% + 10px); width: 330px; padding: 6px 0 12px; border: 1px solid var(--rule); border-radius: 14px; background: var(--surface); color: var(--ink); box-shadow: var(--shadow-3); white-space: normal; animation: rise-in .14s ease-out }
 .shortcut-sheet header { display: flex; align-items: center; justify-content: space-between; padding: 6px 8px 8px 16px; border-bottom: 1px solid var(--rule) }
@@ -668,32 +668,32 @@ kbd { display: inline-grid; place-items: center; min-width: 18px; height: 18px; 
 .paper-note-placeholder span { font-size: 12.5px; line-height: 1.5 }
 .paper-note-error { flex: none; padding: 10px 16px; border: 0; border-top: 1px solid #ecc8c1; background: var(--danger-soft); color: var(--danger); font-size: 12.5px; text-align: left }
 
-/* Selection toolbar: a dark ink capsule that floats above the page. */
-.selection-toolbar { position: fixed; z-index: 20; display: flex; align-items: center; gap: 2px; padding: 5px; border-radius: 13px; background: var(--ink); color: var(--desk-ink); box-shadow: 0 14px 40px #00000059; transform: translate(-50%, -100%); white-space: nowrap; animation: toolbar-in .12s ease-out }
+/* Selection toolbar: an Adam-green capsule that floats above the page. */
+.selection-toolbar { position: fixed; z-index: 20; display: flex; align-items: center; gap: 2px; padding: 5px; border-radius: 13px; background: var(--accent); color: var(--surface); box-shadow: 0 12px 32px #183e2e38; transform: translate(-50%, -100%); white-space: nowrap; animation: toolbar-in .12s ease-out }
 .highlight-colors { display: flex; align-items: center; gap: 6px; padding: 0 6px }
 .color-swatch { position: relative; width: 22px; height: 22px; padding: 0; border: 2px solid #ffffff2e; border-radius: 50%; transition: transform .12s }
 .color-swatch:hover { transform: scale(1.14) }
 .color-swatch kbd { position: absolute; right: -5px; bottom: -6px; min-width: 13px; height: 13px; padding: 0 2px; border: 0; border-radius: 4px; background: var(--surface); color: var(--ink); font-size: 8px }
 .toolbar-divider { width: 1px; height: 22px; margin: 0 4px; background: #ffffff26 }
-.toolbar-action { height: 32px; display: flex; align-items: center; gap: 6px; padding: 0 9px; border: 0; border-radius: 9px; background: transparent; color: var(--desk-ink); font-size: 13px; font-weight: 600 }
+.toolbar-action { height: 32px; display: flex; align-items: center; gap: 6px; padding: 0 9px; border: 0; border-radius: 9px; background: transparent; color: var(--surface); font-size: 13px; font-weight: 600 }
 .toolbar-action:hover:not(:disabled) { background: #ffffff1f }
-.toolbar-action.primary { background: var(--surface); color: var(--ink) }
-.toolbar-action.primary:hover:not(:disabled) { background: #fff }
+.toolbar-action.primary { background: var(--accent-soft); color: var(--accent-ink)}
+.toolbar-action.primary:hover:not(:disabled) { background: var(--accent-line)}
 .toolbar-action > span { opacity: .8 }
-.toolbar-action kbd { min-width: 16px; height: 16px; border-color: #ffffff33; background: transparent; color: #ffffffa6; font-size: 9px }
-.toolbar-action.primary kbd { border-color: var(--rule-strong); color: var(--muted) }
-.toolbar-action.quote-note-action > span { color: var(--marker); opacity: 1 }
+.toolbar-action kbd { min-width: 16px; height: 16px; border-color: #ffffff33; background: transparent; color: #e0ece4; font-size: 9px }
+.toolbar-action.primary kbd { border-color: var(--accent-line); color: var(--accent-ink)}
+.toolbar-action.quote-note-action > span { color: var(--accent-soft); opacity: 1 }
 .toolbar-action:disabled { opacity: .4 }
 .screenshot-actions { z-index: 31 }
-.screenshot-action-label { padding: 0 8px; color: var(--marker); font: 600 11px var(--font-mono); letter-spacing: .06em; text-transform: uppercase }
+.screenshot-action-label { padding: 0 8px; color: var(--accent-soft); font: 600 11px var(--font-mono); letter-spacing: .06em; text-transform: uppercase }
 @keyframes toolbar-in { from { opacity: 0; transform: translate(-50%, calc(-100% + 4px)) } to { opacity: 1; transform: translate(-50%, -100%) } }
 
 /* Region capture */
 .pdf-pane.screenshot-mode { cursor: crosshair; user-select: none }
 .pdf-pane.screenshot-mode * { cursor: crosshair !important }
 .pdf-pane.screenshot-mode .react-pdf__Page__textContent { pointer-events: none }
-.screenshot-hint { position: fixed; z-index: 30; left: 34%; top: 72px; padding: 8px 14px; border-radius: 999px; background: var(--marker); color: var(--ink); font-size: 13px; font-weight: 600; box-shadow: var(--shadow-2); transform: translateX(-50%); pointer-events: none }
-.screenshot-region { position: fixed; z-index: 29; border: 2px solid var(--marker); border-radius: 3px; background: #f0b93a24; box-shadow: 0 0 0 9999px #0000004d; pointer-events: none }
+.screenshot-hint { position: fixed; z-index: 30; left: 34%; top: 72px; padding: 8px 14px; border-radius: 999px; background: var(--accent-soft); color: var(--accent-ink); font-size: 13px; font-weight: 600; box-shadow: var(--shadow-2); transform: translateX(-50%); pointer-events: none }
+.screenshot-region { position: fixed; z-index: 29; border: 2px solid var(--accent); border-radius: 3px; background: #2e665024; box-shadow: 0 0 0 9999px #0000004d; pointer-events: none }
 
 /* Anchored notes and AI link markers */
 /* Margin markers live inside the zoomed page, so divide by --page-scale to keep them a constant on-screen size. */
@@ -743,9 +743,9 @@ kbd { display: inline-grid; place-items: center; min-width: 18px; height: 18px; 
 
 /* Quick Ask */
 .quick-ask-popover { position: fixed; z-index: 40; width: min(440px, calc(100vw - 24px)); max-height: min(620px, calc(100vh - 24px)); overflow: auto; border: 1px solid var(--rule); border-radius: 16px; background: var(--surface); box-shadow: var(--shadow-3); transform: translateX(-50%) }
-.quick-ask-head { position: sticky; top: 0; z-index: 1; display: flex; align-items: center; gap: 8px; padding: 10px 12px; border-bottom: 1px solid var(--rule); background: var(--ink); color: var(--desk-ink); font-size: 13px; font-weight: 600; cursor: grab; touch-action: none; user-select: none }
+.quick-ask-head { position: sticky; top: 0; z-index: 1; display: flex; align-items: center; gap: 8px; padding: 10px 12px; border-bottom: 1px solid var(--rule); background: var(--accent); color: var(--desk-ink); font-size: 13px; font-weight: 600; cursor: grab; touch-action: none; user-select: none }
 .quick-ask-head:active { cursor: grabbing }
-.quick-ask-head > span:nth-child(2) { color: var(--marker) }
+.quick-ask-head > span:nth-child(2) { color: var(--accent-soft)}
 .quick-ask-head small { min-width: 0; overflow: hidden; color: #ffffff8c; font: 500 11px var(--font-mono); text-overflow: ellipsis; white-space: nowrap }
 .quick-ask-head button { margin-left: auto; border: 0; background: none; color: #ffffffa6; font-size: 20px }
 .quick-ask-context { max-height: 110px; overflow: auto; border-left: 3px solid var(--marker); background: var(--surface-2) }
@@ -775,7 +775,7 @@ kbd { display: inline-grid; place-items: center; min-width: 18px; height: 18px; 
 /* Linked passage reveal */
 .linked-passage-target, .linked-passage-flash { position: absolute; z-index: 4; pointer-events: none }
 .linked-passage-flash { border-radius: 3px; background: #f0b93a59; mix-blend-mode: multiply; animation: linked-passage-highlight 3.8s ease-out forwards }
-.linked-passage-toast { position: absolute; z-index: 6; display: flex; align-items: center; gap: 10px; padding: 10px 14px; border-radius: 12px; background: var(--ink); color: var(--desk-ink); box-shadow: var(--shadow-3); transform: translateY(calc(-100% - 12px)) scale(calc(1 / var(--page-scale))); transform-origin: left bottom; pointer-events: none; animation: linked-passage-notice 3.8s ease-out forwards }
+.linked-passage-toast { position: absolute; z-index: 6; display: flex; align-items: center; gap: 10px; padding: 10px 14px; border-radius: 12px; background: var(--accent); color: var(--desk-ink); box-shadow: var(--shadow-3); transform: translateY(calc(-100% - 12px)) scale(calc(1 / var(--page-scale))); transform-origin: left bottom; pointer-events: none; animation: linked-passage-notice 3.8s ease-out forwards }
 .linked-passage-toast > span { width: 28px; height: 28px; display: grid; place-items: center; border-radius: 8px; background: #ffffff14; color: var(--marker); font-size: 15px }
 .linked-passage-toast strong, .linked-passage-toast small { display: block; white-space: nowrap }
 .linked-passage-toast strong { font-size: 13px; font-weight: 700 }
