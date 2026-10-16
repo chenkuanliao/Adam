@@ -1989,8 +1989,10 @@ function HighlightCanvas({ highlights, renderVersion }: { highlights: HighlightE
     const page = overlay?.closest<HTMLElement>('.react-pdf__Page');
     const source = page?.querySelector<HTMLCanvasElement>('.react-pdf__Page__canvas');
     if (!overlay || !source || !source.width || !source.height) return;
+    // Notes and linked passages draw underlines even when there are no plain
+    // highlights on this page. Only clear the canvas when all annotations leave.
+    if (highlights.length === 0) { overlay.width = 0; overlay.height = 0; return; }
     const markers = highlights.filter((highlight) => !highlight.note_text && !highlight.ai_links?.length);
-    if (markers.length === 0) { overlay.width = 0; overlay.height = 0; return; }
     overlay.width = source.width;
     overlay.height = source.height;
     const sourceContext = source.getContext('2d', { willReadFrequently: true });
