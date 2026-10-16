@@ -1988,7 +1988,7 @@ function HighlightCanvas({ highlights, renderVersion }: { highlights: HighlightE
     const overlay = overlayRef.current;
     const page = overlay?.closest<HTMLElement>('.react-pdf__Page');
     const source = page?.querySelector<HTMLCanvasElement>('.react-pdf__Page__canvas');
-    if (!overlay || !source || !source.width || !source.height) return;
+    if (!overlay || !page || !source || !source.width || !source.height) return;
     // Notes and linked passages draw underlines even when there are no plain
     // highlights on this page. Only clear the canvas when all annotations leave.
     if (highlights.length === 0) { overlay.width = 0; overlay.height = 0; return; }
@@ -2024,8 +2024,11 @@ function HighlightCanvas({ highlights, renderVersion }: { highlights: HighlightE
     });
     overlayContext.lineWidth = Math.max(2, source.width / 700);
     overlayContext.lineCap = 'round';
+    const linkedPassageColor = getComputedStyle(page).getPropertyValue('--accent').trim() || '#2e6650';
     highlights.filter((highlight) => Boolean(highlight.note_text) || Boolean(highlight.ai_links?.length)).forEach((highlight) => highlight.rects.forEach((rect) => {
-      overlayContext.strokeStyle = highlight.color;
+      // AI links use the same theme color as their PDF icon and Links tab.
+      // User-selected note colors remain specific to each note.
+      overlayContext.strokeStyle = highlight.ai_links?.length ? linkedPassageColor : highlight.color;
       const left = Math.max(0, rect.left * source.width);
       const right = Math.min(source.width, (rect.left + rect.width) * source.width);
       const bottom = Math.min(source.height - overlayContext.lineWidth, (rect.top + rect.height) * source.height - overlayContext.lineWidth / 2);

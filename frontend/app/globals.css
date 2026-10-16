@@ -417,7 +417,7 @@ kbd { display: inline-grid; place-items: center; min-width: 18px; height: 18px; 
 .tab-list > button:hover { color: var(--ink) }
 .tab-list > button.active { background: var(--surface); color: var(--ink); box-shadow: var(--shadow-1) }
 .tab-list > button span { min-width: 18px; padding: 0 5px; border-radius: 999px; background: #16181d12; color: var(--muted); font: 600 10.5px/1.6 var(--font-mono); text-align: center }
-.tab-list > button.links-tab.active span { background: var(--marker); color: var(--ink) }
+.tab-list > button.links-tab.active span { background: var(--accent-soft); color: var(--accent-ink) }
 .chat-text-controls { display: flex; align-items: center; gap: 6px }
 .chat-text-controls > div { height: 30px; display: flex; align-items: center; overflow: hidden; border: 1px solid var(--rule); border-radius: 8px }
 .chat-text-controls button { height: 100%; min-width: 30px; padding: 0 6px; border: 0; background: transparent; color: var(--ink-2); font-size: 12px; font-weight: 600 }
@@ -472,9 +472,9 @@ kbd { display: inline-grid; place-items: center; min-width: 18px; height: 18px; 
 .selection-card.image-context img { display: block; width: calc(100% - 20px); max-height: 220px; margin: 6px 10px 10px; object-fit: contain; border-radius: 6px; background: #fff }
 .quick-import-badge { width: fit-content; margin: 22px 0 6px; padding: 3px 8px; border-radius: 999px; background: var(--marker-soft); color: var(--marker-ink); font-size: 11px; font-weight: 600 }
 .turn-link-button { display: block; margin: 6px 0 0 auto; padding: 4px 10px; border: 1px solid var(--rule-strong); border-radius: 999px; background: var(--surface); color: var(--ink-2); font-size: 11.5px; font-weight: 600 }
-.turn-link-button:hover { border-color: var(--marker); color: var(--marker-ink) }
-.turn-link-button.linked { border-color: var(--marker); background: var(--marker); color: var(--ink) }
-.linked-turn { border-radius: 10px; outline: 2px solid var(--marker); outline-offset: 6px }
+.turn-link-button:hover { border-color: var(--accent); color: var(--accent-ink) }
+.turn-link-button.linked { border-color: var(--accent); background: var(--accent-soft); color: var(--accent-ink) }
+.linked-turn { border-radius: 10px; outline: 2px solid var(--accent); outline-offset: 6px }
 
 .user-message { width: fit-content; max-width: 88%; margin: 18px 0 4px auto; padding: 10px 14px; border-radius: 14px 14px 4px 14px; background: var(--ink); color: var(--surface) }
 .user-message span { display: none }
@@ -600,7 +600,7 @@ kbd { display: inline-grid; place-items: center; min-width: 18px; height: 18px; 
 /* Chat links */
 .chat-links-panel { flex: 1; min-height: 0; display: flex; flex-direction: column; background: var(--surface) }
 .chat-links-header { flex: none; padding: 20px 20px 16px; border-bottom: 1px solid var(--rule) }
-.chat-links-kicker { color: var(--marker-ink); font: 600 10.5px var(--font-mono); letter-spacing: .08em; text-transform: uppercase }
+.chat-links-kicker { color: var(--accent-ink); font: 600 10.5px var(--font-mono); letter-spacing: .08em; text-transform: uppercase }
 .chat-links-header h2 { margin: 6px 0 4px; font: 500 24px/1.2 var(--font-serif) }
 .chat-links-header p { margin: 0; color: var(--muted); font-size: 13px; line-height: 1.55 }
 .chat-links-search { display: flex; align-items: center; gap: 8px; margin-top: 14px; padding: 0 12px; border: 1px solid var(--rule-strong); border-radius: 10px; background: var(--surface); color: var(--faint) }
@@ -610,17 +610,17 @@ kbd { display: inline-grid; place-items: center; min-width: 18px; height: 18px; 
 .chat-links-page { margin: 18px 0 8px; color: var(--faint); font: 600 10.5px var(--font-mono); letter-spacing: .08em; text-transform: uppercase }
 .chat-link-card { display: block; width: 100%; margin-bottom: 8px; padding: 14px; border: 1px solid var(--rule); border-radius: 12px; background: var(--surface); text-align: left; transition: border-color .15s, box-shadow .15s }
 .chat-link-card:hover { border-color: var(--rule-strong); box-shadow: var(--shadow-1) }
-.chat-link-card.source-revealed { border-color: var(--marker); box-shadow: inset 3px 0 0 var(--marker) }
+.chat-link-card.source-revealed { border-color: var(--accent); box-shadow: inset 3px 0 0 var(--accent) }
 .chat-link-title { display: flex; align-items: center; gap: 8px; margin-bottom: 6px; color: var(--muted); font-size: 12px }
 .chat-link-title > span { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap }
-.chat-link-title small { flex: none; padding: 1px 7px; border-radius: 999px; background: var(--marker-soft); color: var(--marker-ink); font-size: 11px; font-weight: 600 }
+.chat-link-title small { flex: none; padding: 1px 7px; border-radius: 999px; background: var(--accent-soft); color: var(--accent-ink); font-size: 11px; font-weight: 600 }
 .chat-link-card > strong { display: block; color: var(--ink); font-size: 14px; font-weight: 600; line-height: 1.45; overflow-wrap: anywhere }
-.chat-link-card blockquote { display: -webkit-box; margin: 10px 0 12px; padding-left: 10px; overflow: hidden; border-left: 2px solid var(--marker); color: var(--muted); font: italic 13px/1.5 var(--font-serif); overflow-wrap: anywhere; -webkit-line-clamp: 2; -webkit-box-orient: vertical }
+.chat-link-card blockquote { display: -webkit-box; margin: 10px 0 12px; padding-left: 10px; overflow: hidden; border-left: 2px solid var(--accent); color: var(--muted); font: italic 13px/1.5 var(--font-serif); overflow-wrap: anywhere; -webkit-line-clamp: 2; -webkit-box-orient: vertical }
 .chat-link-actions { display: flex; align-items: center; justify-content: space-between; gap: 10px }
 .chat-link-actions button { height: 30px; display: inline-flex; align-items: center; gap: 6px; padding: 0 10px; border-radius: 8px; font-size: 12.5px; font-weight: 600 }
 .chat-link-actions button:disabled { cursor: wait; opacity: .6 }
 .show-link-in-pdf { border: 1px solid var(--rule-strong); background: var(--surface); color: var(--ink-2) }
-.show-link-in-pdf:hover, .show-link-in-pdf[aria-pressed="true"] { border-color: var(--marker); background: var(--marker-soft); color: var(--marker-ink) }
+.show-link-in-pdf:hover, .show-link-in-pdf[aria-pressed="true"] { border-color: var(--accent); background: var(--accent-soft); color: var(--accent-ink) }
 .open-linked-chat { border: 0; background: transparent; color: var(--accent) }
 .open-linked-chat:hover { background: var(--accent-soft) }
 .chat-links-footer { flex: none; padding: 10px 20px; border-top: 1px solid var(--rule); color: var(--faint); font-size: 12px }
@@ -739,7 +739,7 @@ kbd { display: inline-grid; place-items: center; min-width: 18px; height: 18px; 
 .ai-note-dialog > blockquote { margin: 0; padding: 12px 16px; border-bottom: 1px solid var(--rule); color: var(--muted); font: italic 14px/1.5 var(--font-serif) }
 .ai-note-dialog > div { display: grid; gap: 8px; padding: 12px }
 .ai-note-link { display: grid; gap: 4px; padding: 12px; border: 1px solid var(--rule); border-radius: 10px; background: var(--surface); text-align: left }
-.ai-note-link:hover { border-color: var(--marker); background: var(--marker-soft) }
+.ai-note-link:hover { border-color: var(--accent); background: var(--accent-soft) }
 .ai-note-link small { color: var(--muted); font-size: 12px }
 .ai-note-link strong { color: var(--ink); font-size: 14px; line-height: 1.4 }
 .ai-note-link span { color: var(--accent); font-size: 12.5px; font-weight: 600 }
@@ -777,7 +777,7 @@ kbd { display: inline-grid; place-items: center; min-width: 18px; height: 18px; 
 
 /* Linked passage reveal */
 .linked-passage-target, .linked-passage-flash { position: absolute; z-index: 4; pointer-events: none }
-.linked-passage-flash { border-radius: 3px; background: #f0b93a59; mix-blend-mode: multiply; animation: linked-passage-highlight 3.8s ease-out forwards }
+.linked-passage-flash { border-radius: 3px; background: #2e665038; mix-blend-mode: multiply; animation: linked-passage-highlight 3.8s ease-out forwards }
 .linked-passage-toast { position: absolute; z-index: 6; display: flex; align-items: center; gap: 10px; padding: 10px 14px; border-radius: 12px; background: var(--glass-bg); color: var(--glass-ink); box-shadow: var(--glass-shadow); transform: translateY(calc(-100% - 12px)) scale(calc(1 / var(--page-scale))); transform-origin: left bottom; pointer-events: none; animation: linked-passage-notice 3.8s ease-out forwards }
 .linked-passage-toast > span { width: 28px; height: 28px; display: grid; place-items: center; border-radius: 8px; background: var(--accent-soft); color: var(--accent); font-size: 15px }
 .linked-passage-toast strong, .linked-passage-toast small { display: block; white-space: nowrap }
