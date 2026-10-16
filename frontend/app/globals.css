@@ -443,7 +443,7 @@ kbd { display: inline-grid; place-items: center; min-width: 18px; height: 18px; 
 .chat-heading { display: flex; align-items: flex-start; gap: 12px; padding-bottom: 16px; border-bottom: 1px dashed var(--rule) }
 .chat-heading strong { font: 500 calc(17px * var(--chat-scale))/1.25 var(--font-serif) }
 .chat-heading p { margin: 4px 0 0; color: var(--muted); font-size: calc(11.5px * var(--chat-scale)); line-height: 1.5 }
-.spark { width: 32px; height: 32px; display: grid; place-items: center; flex: none; border-radius: 9px; background: var(--ink); color: var(--marker); font-size: 15px }
+.spark { width: 32px; height: 32px; display: grid; place-items: center; flex: none; border-radius: 9px; background: var(--accent-soft); color: var(--accent-ink); font-size: 15px }
 .no-key-notice { width: 100%; display: grid; gap: 3px; margin-top: 16px; padding: 12px 14px; border: 1px solid #ecd59a; border-radius: 10px; background: var(--marker-soft); color: var(--marker-ink); text-align: left }
 .no-key-notice strong { font-size: 13px }
 .no-key-notice span { font-size: 12.5px; line-height: 1.45 }
@@ -563,7 +563,7 @@ kbd { display: inline-grid; place-items: center; min-width: 18px; height: 18px; 
 .history-header button:hover { color: var(--ink) }
 .new-chat-card { width: 100%; display: flex; align-items: center; gap: 12px; padding: 12px; border: 1px dashed var(--rule-strong); border-radius: 12px; background: transparent; color: var(--ink); text-align: left }
 .new-chat-card:hover { border-color: var(--accent); background: var(--accent-soft) }
-.new-chat-card > span { width: 34px; height: 34px; display: grid; place-items: center; border-radius: 10px; background: var(--ink); color: var(--surface); font-size: 18px }
+.new-chat-card > span { width: 34px; height: 34px; display: grid; place-items: center; border-radius: 10px; background: var(--accent-soft); color: var(--accent-ink); font-size: 18px }
 .new-chat-card > div { flex: 1 }
 .new-chat-card strong, .new-chat-card small { display: block }
 .new-chat-card strong { font-size: 14px }
@@ -619,7 +619,7 @@ kbd { display: inline-grid; place-items: center; min-width: 18px; height: 18px; 
 .open-linked-chat:hover { background: var(--accent-soft) }
 .chat-links-footer { flex: none; padding: 10px 20px; border-top: 1px solid var(--rule); color: var(--faint); font-size: 12px }
 .chat-links-empty { padding: 48px 12px; color: var(--muted); text-align: center }
-.chat-links-empty > span { width: 44px; height: 44px; display: grid; place-items: center; margin: auto; border-radius: 12px; background: var(--ink); color: var(--marker); font-size: 20px }
+.chat-links-empty > span { width: 44px; height: 44px; display: grid; place-items: center; margin: auto; border-radius: 12px; background: var(--accent-soft); color: var(--accent-ink); font-size: 20px }
 .chat-links-empty h3 { margin: 16px 0 6px; color: var(--ink); font: 500 19px var(--font-serif) }
 .chat-links-empty p { max-width: 300px; margin: 0 auto; font-size: 13px; line-height: 1.6 }
 .chat-links-empty button { margin-top: 14px; padding: 7px 12px; border: 1px solid var(--rule-strong); border-radius: 8px; background: var(--surface); color: var(--ink-2) }
@@ -697,9 +697,9 @@ kbd { display: inline-grid; place-items: center; min-width: 18px; height: 18px; 
 /* Margin markers live inside the zoomed page, so divide by --page-scale to keep them a constant on-screen size. */
 .note-anchor, .ai-note-anchor { --u: calc(1px / var(--page-scale, 1)); position: absolute; z-index: 5; right: calc(-30 * var(--u)); width: calc(28 * var(--u)); min-width: calc(28 * var(--u)); height: calc(24 * var(--u)); display: flex; align-items: center; justify-content: center; gap: calc(2 * var(--u)); padding: 0; border: calc(2 * var(--u)) solid #fff; border-radius: 0 calc(8 * var(--u)) calc(8 * var(--u)) 0; box-shadow: calc(2 * var(--u)) calc(2 * var(--u)) calc(8 * var(--u)) #0000004d }
 .note-anchor { border-color: var(--note-color); background: color-mix(in srgb, var(--note-color) 22%, #fff); color: var(--note-color); font-size: calc(10 * var(--u)) }
-.ai-note-anchor { background: var(--ink); color: var(--marker); font-size: calc(11 * var(--u)) }
-.ai-note-anchor small { color: var(--desk-ink); font: 700 calc(8 * var(--u)) var(--font-mono) }
-.ai-note-anchor:hover { background: #000 }
+.ai-note-anchor { background: var(--accent-soft); color: var(--accent-ink); font-size: calc(11 * var(--u)) }
+.ai-note-anchor small { color: var(--accent-ink); font: 700 calc(8 * var(--u)) var(--font-mono) }
+.ai-note-anchor:hover { background: var(--accent-line) }
 .page-notes { position: relative; width: 250px; min-height: 100%; align-self: stretch }
 .page-note-card { position: absolute; left: 0; width: 100%; height: 96px; overflow: hidden; padding: 11px 12px; border: 1px solid color-mix(in srgb, var(--note-color) 55%, #ddd); border-left: 4px solid var(--note-color); border-radius: 8px; background: color-mix(in srgb, var(--note-color) 10%, #fff); color: var(--ink); text-align: left; box-shadow: 0 6px 18px #00000040 }
 .page-note-card span { color: var(--note-color); font: 700 9px var(--font-mono); letter-spacing: .08em; text-transform: uppercase }
@@ -1011,9 +1011,9 @@ kbd { display: inline-grid; place-items: center; min-width: 18px; height: 18px; 
 .page-label { color:var(--muted) }
 .focus-reading .reader-header { background:var(--surface) }
 .focus-reading .reader-header-start { display:none }
-.focus-reading-button { background:var(--accent-soft); color:var(--accent-ink); border-color:var(--accent-line) }
-.focus-reading-button:hover { background:#dce3fc; border-color:var(--accent) }
-.focus-reading-button kbd { border-color:var(--accent-line); color:var(--accent-ink) }
+.focus-reading-button { background:var(--surface); color:var(--ink-2); border-color:var(--rule) }
+.focus-reading-button:hover { background:var(--sunken); border-color:var(--rule-strong) }
+.focus-reading-button kbd { background:var(--surface-2); border-color:var(--rule); color:var(--muted) }
 .focus-reading .reader-dock { left:50%; bottom:18px }
 .focus-reading .pdf-pane { padding-bottom:100px }
 .focus-reading .side-pane { display:none }
