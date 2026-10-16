@@ -1,6 +1,6 @@
 'use client';
 
-import type { CSSProperties } from 'react';
+import { useState, type CSSProperties } from 'react';
 
 export const DEFAULT_FOLDER_COLOR = '#8c9d65';
 const PRESETS = [
@@ -30,6 +30,12 @@ export default function FolderColorPicker({ value, onChange, disabled }: { value
     <div className="folder-color-swatches" role="group" aria-label="Default folder colors">
       {PRESETS.map((preset) => <button key={preset.name} type="button" aria-label={`${preset.name} folder color`} aria-pressed={value === preset.color} data-tooltip={preset.name} className="folder-color-swatch" style={{ backgroundColor: preset.color }} onClick={() => onChange(preset.color)}>{value === preset.color && <svg viewBox="0 0 24 24" width="17" height="17" fill="none" stroke="white" strokeWidth="2.5" aria-hidden="true"><path d="m5 12 4 4L19 6" /></svg>}</button>)}
     </div>
-    <div className="folder-custom-color"><label className="folder-custom-color-control"><input type="color" aria-label="Custom folder color" data-tooltip="Choose any custom folder color" value={value} onChange={(event) => onChange(event.target.value.toLowerCase())} /><span>Custom color</span></label><output aria-live="polite">{selectedName}<span>{value.toUpperCase()}</span></output></div>
+    <div className="folder-custom-color"><label className="folder-custom-color-control"><span className="custom-color-swatch" style={{ background: value }} aria-hidden="true" /><CustomColorInput key={value} value={value} onChange={onChange} /><span>Custom color</span></label><output aria-live="polite">{selectedName}<span>{value.toUpperCase()}</span></output></div>
   </fieldset>;
+}
+
+function CustomColorInput({ value, onChange }: { value: string; onChange: (color: string) => void }) {
+  const [draft, setDraft] = useState(value);
+  const valid = /^#[0-9a-f]{6}$/i.test(draft);
+  return <input type="text" aria-label="Custom folder color" className="custom-color-hex" aria-invalid={!valid} value={draft} maxLength={7} spellCheck={false} placeholder="#618fbd" onChange={(event) => setDraft(event.target.value)} onBlur={() => { if (valid) onChange(draft.toLowerCase()); else setDraft(value); }} onKeyDown={(event) => { if (event.key === 'Enter') { event.preventDefault(); if (valid) onChange(draft.toLowerCase()); } }} />;
 }

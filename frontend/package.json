@@ -9,7 +9,8 @@
     "dev": "vinext dev",
     "build": "vinext build",
     "start": "vinext start",
-    "lint": "eslint . --ignore-pattern dist --ignore-pattern .next"
+    "lint": "eslint . --ignore-pattern dist --ignore-pattern .next",
+    "test:reader-controls": "node --test tests/reader-controls.test.mjs"
   },
   "dependencies": {
     "katex": "^0.18.7",
