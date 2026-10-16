@@ -3,7 +3,7 @@
 
 import { FormEvent, memo, useCallback, useEffect, useLayoutEffect, useRef, useState, type CSSProperties } from 'react';
 import { Document as PdfDocument, Page, pdfjs } from 'react-pdf';
-import type { PDFPageProxy, TextContent } from 'pdfjs-dist/types/src/display/api';
+import type { PDFDocumentProxy, PDFPageProxy, TextContent } from 'pdfjs-dist/types/src/display/api';
 import ReactMarkdown from 'react-markdown';
 import remarkGfm from 'remark-gfm';
 import remarkMath from 'remark-math';
@@ -16,6 +16,7 @@ import { readingHistory, saveReadingPosition, forgetReadingPosition, type Readin
 import ActionTooltips from './action-tooltips';
 import LibrarySpotlight from './library-spotlight';
 import LibraryDashboard, { type LibraryPaper } from './library-dashboard';
+import { isPageMounted, mountedPageWindow, pageAspects, rasterScale, sameWindow, visiblePageRange, type PageWindow } from './page-window';
 import 'katex/dist/katex.min.css';
 import 'react-pdf/dist/Page/AnnotationLayer.css';
 import 'react-pdf/dist/Page/TextLayer.css';
@@ -163,6 +164,16 @@ export default function Home() {
   const [sheetOpen, setSheetOpen] = useState(false);
   const pendingReadingRef = useRef<ReadingPosition | null>(null);
   const readyPagesRef = useRef(new Set<number>());
+  // Page aspect ratios (height / width), filled as PDF.js reports each page.
+  // Pages outside `pageWindow` render as placeholders of the same size.
+  const [pdfDocument, setPdfDocument] = useState<PDFDocumentProxy | null>(null);
+  const [pageSizes, setPageSizes] = useState<Array<number | undefined>>([]);
+  const [pageWindow, setPageWindow] = useState<PageWindow | null>(null);
+  const pageWindowRef = useRef<PageWindow | null>(null);
+  const pendingPageSizesRef = useRef(new Map<number, number>());
+  const pageSizeFrameRef = useRef<number | null>(null);
+  const pageSizeAnchorRef = useRef<{ page: number; offset: number } | null>(null);
+  const screenshotDraggingRef = useRef(false);
   const readingSaveTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const pageTrackFrameRef = useRef<number | null>(null);
   const viewerRef = useRef<HTMLDivElement>(null);
@@ -229,8 +240,10 @@ export default function Home() {
     return () => window.clearTimeout(timer);
   }, [zoom, persistReading]);
 
-  const pageReady = useCallback((page: number) => {
-    readyPagesRef.current.add(page);
+  // A page is ready once its size is known, so its placeholder already has the
+  // final height. Restore waits for every earlier page, not for their rendering.
+  const pageReady = useCallback((pages: Iterable<number>) => {
+    for (const page of pages) readyPagesRef.current.add(page);
     const saved = pendingReadingRef.current;
     if (!saved || !Array.from({ length: saved.page }, (_, index) => index + 1).every((item) => readyPagesRef.current.has(item))) return;
     window.requestAnimationFrame(() => {
@@ -245,6 +258,101 @@ export default function Home() {
       setCurrentPage(saved.page);
     });
   }, []);
+
+  const updatePageWindow = useCallback(() => {
+    const viewer = viewerRef.current;
+    if (!viewer) return;
+    const stages = viewer.querySelectorAll<HTMLElement>('.pdf-page-stage');
+    const viewerRect = viewer.getBoundingClientRect();
+    const visible = visiblePageRange(stages.length, (index) => stages[index].getBoundingClientRect(), viewerRect.top, viewerRect.bottom);
+    // Never unmount pages holding a live text selection, or pages under an
+    // in-progress region capture, so both can still read their DOM and canvas.
+    const previous = pageWindowRef.current;
+    const next = mountedPageWindow(visible, stages.length, { extend: screenshotDraggingRef.current ? previous : null, pinned: selectionPages(viewer) });
+    if (sameWindow(previous, next)) return;
+    pageWindowRef.current = next;
+    setPageWindow(next);
+  }, []);
+
+  const recordPageSize = useCallback((page: number, aspect: number) => {
+    if (!(aspect > 0)) return;
+    pendingPageSizesRef.current.set(page, aspect);
+    if (pageSizeFrameRef.current !== null) return;
+    pageSizeFrameRef.current = window.requestAnimationFrame(() => {
+      pageSizeFrameRef.current = null;
+      const updates = pendingPageSizesRef.current;
+      if (!updates.size) return;
+      pendingPageSizesRef.current = new Map();
+      // Estimated placeholders above the reading line may change height; keep
+      // the page under that line in place once the real sizes arrive.
+      const viewer = viewerRef.current;
+      pageSizeAnchorRef.current = null;
+      if (viewer && !pendingReadingRef.current) {
+        const top = viewer.getBoundingClientRect().top + 12;
+        const stages = viewer.querySelectorAll<HTMLElement>('.pdf-page-stage');
+        const range = visiblePageRange(stages.length, (index) => stages[index].getBoundingClientRect(), top, top + 1);
+        if (range) {
+          const rect = stages[range.start - 1].getBoundingClientRect();
+          pageSizeAnchorRef.current = { page: range.start, offset: (top - rect.top) / Math.max(1, rect.height) };
+        }
+      }
+      setPageSizes((current) => {
+        if (Array.from(updates).every(([page, aspect]) => current[page - 1] === aspect)) return current;
+        const next = current.slice();
+        updates.forEach((aspect, page) => { next[page - 1] = aspect; });
+        return next;
+      });
+    });
+  }, []);
+
+  useLayoutEffect(() => {
+    const anchor = pageSizeAnchorRef.current;
+    pageSizeAnchorRef.current = null;
+    const viewer = viewerRef.current;
+    const stage = anchor ? viewer?.querySelector<HTMLElement>(`[data-page-number="${anchor.page}"]`) : null;
+    if (viewer && anchor && stage) {
+      const rect = stage.getBoundingClientRect();
+      viewer.scrollTop += rect.top + anchor.offset * rect.height - viewer.getBoundingClientRect().top - 12;
+    }
+    pageReady(pageSizes.flatMap((aspect, index) => aspect === undefined ? [] : [index + 1]));
+    updatePageWindow();
+  }, [pageSizes, pageReady, updatePageWindow]);
+
+  // Read page sizes without rendering so every placeholder gets its final
+  // height. PDF.js caches the page proxies that mounted pages reuse later.
+  useEffect(() => {
+    if (!pdfDocument) return;
+    let cancelled = false;
+    let nextPage = 1;
+    const readSizes = async () => {
+      while (!cancelled && nextPage <= pdfDocument.numPages) {
+        const pageNumber = nextPage++;
+        try {
+          const page = await pdfDocument.getPage(pageNumber);
+          if (cancelled) return;
+          const viewport = page.getViewport({ scale: 1 });
+          recordPageSize(pageNumber, viewport.height / viewport.width);
+        } catch {
+          // Keep the estimate rather than blocking a saved position forever.
+          if (!cancelled) pageReady([pageNumber]);
+        }
+      }
+    };
+    for (let worker = 0; worker < 4; worker++) void readSizes();
+    return () => { cancelled = true; };
+  }, [pdfDocument, recordPageSize, pageReady]);
+
+  useEffect(() => { screenshotDraggingRef.current = isScreenshotDragging; }, [isScreenshotDragging]);
+
+  useEffect(() => {
+    const viewer = viewerRef.current;
+    if (!viewer || !active) return;
+    const observer = new ResizeObserver(() => updatePageWindow());
+    observer.observe(viewer);
+    return () => observer.disconnect();
+  }, [active, updatePageWindow]);
+
+  useEffect(() => () => { if (pageSizeFrameRef.current !== null) window.cancelAnimationFrame(pageSizeFrameRef.current); }, []);
 
   const loadPapers = useCallback(async () => {
     try {
@@ -457,6 +565,9 @@ export default function Home() {
     viewer.scrollLeft += pageRect.left + focus.x * pageRect.width - (viewerRect.left + focus.viewportX);
     pendingZoomRef.current = null;
   }, [zoom]);
+
+  // Zoom, page count, and note/focus layout all move pages without scrolling.
+  useLayoutEffect(() => updatePageWindow(), [pages, zoom, notesVisible, focusReading, updatePageWindow]);
 
   useLayoutEffect(() => {
     if (!focusComposerAfterContextRef.current || contextSelections.length === 0) return;
@@ -742,6 +853,11 @@ export default function Home() {
     setSelectedAiNote(null);
     changeReadingMode(false);
     setPages(0);
+    setPdfDocument(null);
+    setPageSizes([]);
+    pendingPageSizesRef.current = new Map();
+    pageWindowRef.current = null;
+    setPageWindow(null);
     setCurrentPage(1);
     setShortcutsOpen(false);
     setContextSelections([]);
@@ -1110,7 +1226,8 @@ export default function Home() {
 
   function showLinkInPdf(entry: HighlightEntry) {
     const viewer = viewerRef.current;
-    const page = viewer?.querySelector<HTMLElement>(`[data-page-number="${entry.page}"] .react-pdf__Page`);
+    // Placeholders share the rendered page geometry, so distant links can scroll before mounting.
+    const page = viewer?.querySelector<HTMLElement>(`[data-page-number="${entry.page}"] .pdf-raster-surface`);
     if (!viewer || !page) {
       setError('The linked PDF page is still loading. Please try again in a moment.');
       return;
@@ -1227,6 +1344,7 @@ export default function Home() {
       pageTrackFrameRef.current = null;
       const viewer = viewerRef.current;
       if (!viewer) return;
+      updatePageWindow();
       // Match the saved reading anchor, including when several pages fit onscreen.
       const readingLine = viewer.getBoundingClientRect().top + 12;
       const stages = Array.from(viewer.querySelectorAll<HTMLElement>('[data-page-number]'));
@@ -1303,7 +1421,7 @@ export default function Home() {
     }).filter((item) => item.right > selectionLeft && item.left < selectionRight && item.bottom > selectionTop && item.top < selectionBottom);
     if (!intersectingPages.length) return;
     const firstCanvas = intersectingPages[0].element.querySelector<HTMLCanvasElement>('.react-pdf__Page__canvas');
-    if (!firstCanvas) return;
+    if (!firstCanvas?.width) return;
     const nativeScale = firstCanvas.width / intersectingPages[0].rect.width;
     const outputScale = Math.min(nativeScale, 4096 / Math.max(selectionWidth, selectionHeight));
     const output = document.createElement('canvas');
@@ -1315,7 +1433,7 @@ export default function Home() {
     outputContext.fillRect(0, 0, output.width, output.height);
     intersectingPages.forEach(({ element, rect, left, top, right, bottom }) => {
       const source = element.querySelector<HTMLCanvasElement>('.react-pdf__Page__canvas');
-      if (!source) return;
+      if (!source?.width || !source.height) return;
       const cropLeft = Math.max(selectionLeft, left);
       const cropTop = Math.max(selectionTop, top);
       const cropRight = Math.min(selectionRight, right);
@@ -1675,6 +1793,7 @@ export default function Home() {
     {paperSearchOpen && <LibrarySpotlight onBrowseFolder={(folderId) => { window.localStorage.setItem('adam.libraryLocation', folderId); setLibraryNavigation((value) => value + 1); setPaperSearchOpen(false); returnToLibrary(); }} papers={papers} onClose={() => setPaperSearchOpen(false)} onOpen={(paper) => { setPaperSearchOpen(false); openPaper(paper); }} />}
   </>);
 
+  const aspects = pageAspects(pageSizes, pages);
   return (
     <main className={`reader-shell${focusReading ? ' focus-reading' : ''}`}>
       <ActionTooltips />
@@ -1682,8 +1801,8 @@ export default function Home() {
       <header className="reader-header"><div className="reader-header-start"><button className="brand-button reader-back" onClick={returnToLibrary} aria-label="Back to library" data-tooltip="Back to your library"><UiIcon kind="back" /><span className="brand-mark" aria-hidden="true">A</span><span className="reader-back-label">Library</span></button></div><div className="document-title">{renaming ? <form onSubmit={(event) => void renamePaper(event)}><input autoFocus aria-label="PDF filename" value={renameValue} maxLength={512} onChange={(event) => setRenameValue(event.target.value)} onKeyDown={(event) => { if (event.key === 'Escape') setRenaming(false); }} disabled={renameSaving} /><button type="submit" disabled={!renameValue.trim() || renameSaving}>{renameSaving ? 'Saving…' : 'Save'}</button></form> : <button type="button" className="document-title-button" title="Rename PDF" onClick={() => { setRenameValue(active.original_name.replace(/\.pdf$/i, '')); setRenaming(true); }}><strong>{active.original_name.replace(/\.pdf$/i, '')}</strong><span aria-hidden="true">✎</span></button>}<span>{pages || active.page_count} pages · stored locally</span></div><div className="reader-header-tools"><button type="button" ref={focusButtonRef} className="focus-reading-button" aria-pressed={focusReading} aria-keyshortcuts="F" title={focusReading ? 'Exit focus reading · Esc' : 'Focus reading · F'} onClick={() => changeReadingMode(!focusReading)}><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.7" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true"><path d={focusReading ? 'M4 9h5V4m11 5h-5V4M4 15h5v5m11-5h-5v5' : 'M9 4H4v5m11-5h5v5M4 15v5h5m11-5v5h-5'} /></svg><span>{focusReading ? 'Exit focus' : 'Focus reading'}</span><kbd>{focusReading ? 'Esc' : 'F'}</kbd></button><button type="button" className={`note-view-button${notesVisible ? ' active' : ''}`} onClick={toggleNotes} data-tooltip={notesVisible ? 'Hide anchored notes beside the pages' : 'Show anchored notes beside the pages'} aria-pressed={notesVisible}><UiIcon kind="note" /><span className="note-view-label">{notesVisible ? 'Hide notes' : 'Notes'}</span><strong>{highlightEntries.filter((entry) => entry.note_text).length}</strong></button><button type="button" className="reader-delete-button" aria-label="Delete paper" data-tooltip="Permanently delete this paper" onClick={() => void deletePaper(active)}><TrashIcon /></button><SettingsButton compact onClick={() => setSettingsOpen(true)} /></div></header>
       <div className={`reader-workspace${notesVisible && !focusReading ? ' notes-mode' : ''}`} ref={workspaceRef} style={{ gridTemplateColumns: `minmax(0, ${paperPercent}fr) minmax(340px, ${100 - paperPercent}fr)` }}>
         <section className={`pdf-pane${screenshotMode ? ' screenshot-mode' : ''}`} ref={viewerRef} onScroll={trackCurrentPage} onMouseUp={() => { if (!screenshotMode) captureSelection(); }} onPointerDown={beginScreenshot} onPointerMove={moveScreenshot} onPointerUp={finishScreenshot} onPointerCancel={() => { screenshotPointerRef.current = null; setScreenshotDrag(null); setScreenshotMode(false); }}>
-          <PdfDocument key={active.id} file={`${API_BASE}/api/documents/${active.id}/file`} onLoadSuccess={({ numPages }) => setPages(numPages)} loading={<div className="viewer-message">Rendering paper…</div>} error={<div className="viewer-message error-banner">Could not render this PDF.</div>}>
-            {Array.from({ length: pages }, (_, index) => { const pageEntries = highlightEntries.filter((entry) => entry.page === index + 1); const pageNotes = pageEntries.filter((entry) => entry.note_text).sort(compareNotePosition); const aiNotes = pageEntries.filter((entry) => entry.ai_links?.length).sort(compareNotePosition); const markers = pageEntries.filter((entry) => entry.note_text || entry.ai_links?.length).sort(compareNotePosition); const pageScale = zoom / BASE_RENDER_SCALE; return <div className="pdf-page-stage" data-page-number={index + 1} key={index + 1}><div className="pdf-page-wrap" style={{ zoom: pageScale, '--page-scale': pageScale } as CSSProperties}><PdfPageWithHighlights pageNumber={index + 1} highlights={pageEntries} zoom={rasterZoom} onReady={pageReady} />{pageEntries.filter((entry) => entry.id === revealedLinkId).map((entry) => <LinkedPassageReveal key={`${entry.id}-${linkRevealVersion}`} entry={entry} viewerRef={viewerRef} />)}{aiNotes.map((note) => <button type="button" className="ai-note-anchor" style={{ top: `${noteMarkerTop(markers, markers.indexOf(note)) * 100}%` }} title={`${note.ai_links!.length} linked AI ${note.ai_links!.length === 1 ? 'note' : 'notes'}`} aria-label="Open linked AI notes" onClick={() => { changeReadingMode(false); setPaneMode('links'); setSelectedAiNote(note); }} key={`ai-${note.id}`}>✦<small>{note.ai_links!.length}</small></button>)}{(!notesVisible || focusReading) && pageNotes.map((note) => <button type="button" className="note-anchor" style={{ top: `${noteMarkerTop(markers, markers.indexOf(note)) * 100}%`, '--note-color': note.color } as CSSProperties} title="Open note" aria-label="Open note" onClick={() => openSavedNote(note)} key={note.id}>▰</button>)}{notesVisible && !focusReading && <aside className="page-notes" aria-label={`Notes for page ${index + 1}`}>{pageNotes.map((note, noteIndex) => <button type="button" className="page-note-card" style={{ top: `${noteCardTop(pageNotes, noteIndex) * 100}%`, '--note-color': note.color } as CSSProperties} onClick={() => openSavedNote(note)} key={note.id}><span>Page {index + 1}</span><p>{note.note_text}</p><small>{note.text}</small></button>)}</aside>}<span className="page-label">{index + 1}</span></div></div>; })}
+          <PdfDocument key={active.id} file={`${API_BASE}/api/documents/${active.id}/file`} onLoadSuccess={(pdf) => { setPdfDocument(pdf); setPages(pdf.numPages); }} loading={<div className="viewer-message">Rendering paper…</div>} error={<div className="viewer-message error-banner">Could not render this PDF.</div>}>
+            {Array.from({ length: pages }, (_, index) => { const pageEntries = highlightEntries.filter((entry) => entry.page === index + 1); const pageNotes = pageEntries.filter((entry) => entry.note_text).sort(compareNotePosition); const aiNotes = pageEntries.filter((entry) => entry.ai_links?.length).sort(compareNotePosition); const markers = pageEntries.filter((entry) => entry.note_text || entry.ai_links?.length).sort(compareNotePosition); const pageScale = zoom / BASE_RENDER_SCALE; const surfaceHeight = BASE_PAGE_WIDTH * BASE_RENDER_SCALE * aspects[index]; const mounted = isPageMounted(pageWindow, index + 1); return <div className="pdf-page-stage" data-page-number={index + 1} key={index + 1}><div className="pdf-page-wrap" style={{ zoom: pageScale, '--page-scale': pageScale } as CSSProperties}>{mounted ? <PdfPageWithHighlights pageNumber={index + 1} highlights={pageEntries} zoom={rasterZoom} height={surfaceHeight} onSize={recordPageSize} /> : <div className="pdf-raster-surface pdf-page-placeholder" style={{ width: BASE_PAGE_WIDTH * BASE_RENDER_SCALE, height: surfaceHeight }} aria-hidden="true" />}{pageEntries.filter((entry) => entry.id === revealedLinkId).map((entry) => <LinkedPassageReveal key={`${entry.id}-${linkRevealVersion}`} entry={entry} viewerRef={viewerRef} />)}{aiNotes.map((note) => <button type="button" className="ai-note-anchor" style={{ top: `${noteMarkerTop(markers, markers.indexOf(note)) * 100}%` }} title={`${note.ai_links!.length} linked AI ${note.ai_links!.length === 1 ? 'note' : 'notes'}`} aria-label="Open linked AI notes" onClick={() => { changeReadingMode(false); setPaneMode('links'); setSelectedAiNote(note); }} key={`ai-${note.id}`}>✦<small>{note.ai_links!.length}</small></button>)}{(!notesVisible || focusReading) && pageNotes.map((note) => <button type="button" className="note-anchor" style={{ top: `${noteMarkerTop(markers, markers.indexOf(note)) * 100}%`, '--note-color': note.color } as CSSProperties} title="Open note" aria-label="Open note" onClick={() => openSavedNote(note)} key={note.id}>▰</button>)}{notesVisible && !focusReading && <aside className="page-notes" aria-label={`Notes for page ${index + 1}`}>{pageNotes.map((note, noteIndex) => <button type="button" className="page-note-card" style={{ top: `${noteCardTop(pageNotes, noteIndex) * 100}%`, '--note-color': note.color } as CSSProperties} onClick={() => openSavedNote(note)} key={note.id}><span>Page {index + 1}</span><p>{note.note_text}</p><small>{note.text}</small></button>)}</aside>}<span className="page-label">{index + 1}</span></div></div>; })}
           </PdfDocument>
           {screenshotMode && !screenshotDrag && <div className="screenshot-hint">Drag over the PDF to ask about it · Esc to cancel</div>}
           {screenshotDrag && <div className="screenshot-region" style={{ left: screenshotDrag.overlayLeft, top: screenshotDrag.overlayTop, width: screenshotDrag.overlayWidth, height: screenshotDrag.overlayHeight }} />}
@@ -1887,13 +2006,26 @@ function ContextList({ selections, onRemove }: { selections: ContextSelection[];
   return <div className="context-list"><div className="context-list-heading"><span>Context</span><small>{selections.length} {selections.length === 1 ? 'item' : 'items'}</small></div>{selections.map((selection, index) => <div className={`selection-card${selection.imageDataUrl ? ' image-context' : ''}`} key={selection.id}><div><span>{selection.imageDataUrl ? 'Screenshot' : 'Excerpt'} {index + 1}{selection.page ? ` · ${selection.pageEnd && selection.pageEnd !== selection.page ? `pages ${selection.page}–${selection.pageEnd}` : `page ${selection.page}`}` : ''}</span>{onRemove && <button type="button" aria-label={`Remove context item ${index + 1}`} onClick={() => onRemove(selection.id)}>×</button>}</div>{selection.imageDataUrl ? <img src={selection.imageDataUrl} alt={`Selected area from page ${selection.page ?? ''}`} /> : <blockquote>{selection.text}</blockquote>}</div>)}</div>;
 }
 
-const PdfPageWithHighlights = memo(function PdfPageWithHighlights({ pageNumber, highlights, zoom, onReady }: { pageNumber: number; highlights: HighlightEntry[]; zoom: number; onReady: (page: number) => void }) {
+// Pages holding the live text selection's endpoints, so scrolling never
+// removes the nodes its range is anchored to.
+function selectionPages(viewer: HTMLElement): number[] {
+  const selection = window.getSelection();
+  if (!selection || selection.isCollapsed || !selection.rangeCount) return [];
+  const pageOf = (node: Node | null) => {
+    const element = node?.nodeType === Node.ELEMENT_NODE ? node as Element : node?.parentElement;
+    return viewer.contains(element ?? null) ? Number(element?.closest<HTMLElement>('[data-page-number]')?.dataset.pageNumber) || null : null;
+  };
+  return [pageOf(selection.anchorNode), pageOf(selection.focusNode)].filter((page): page is number => page !== null);
+}
+
+const PdfPageWithHighlights = memo(function PdfPageWithHighlights({ pageNumber, highlights, zoom, height, onSize }: { pageNumber: number; highlights: HighlightEntry[]; zoom: number; height: number; onSize: (page: number, aspect: number) => void }) {
   const [visible, setVisible] = useState(false);
-  const [pageHeight, setPageHeight] = useState<number>();
-  useLayoutEffect(() => { if (pageHeight) onReady(pageNumber); }, [pageHeight, onReady, pageNumber]);
   const [renderVersion, setRenderVersion] = useState(0);
   const pageElementRef = useRef<HTMLDivElement>(null);
   const [rasterPage, setRasterPage] = useState<PDFPageProxy | null>(null);
+  // Release decoded images and operator lists when this page leaves the
+  // mounted window. PDF.js defers this until any active render settles.
+  useEffect(() => { if (rasterPage) return () => { rasterPage.cleanup(); }; }, [rasterPage]);
   // Upgrade only pages near the viewport; cap raster size even at extreme zoom.
   // CSS zoom keeps the page, text, annotations, and note geometry in sync.
   useEffect(() => {
@@ -1905,7 +2037,7 @@ const PdfPageWithHighlights = memo(function PdfPageWithHighlights({ pageNumber, 
     observer.observe(element);
     return () => observer.disconnect();
   }, []);
-  const renderScale = visible ? Math.max(BASE_RENDER_SCALE, Math.min(zoom, 4)) : BASE_RENDER_SCALE;
+  const renderScale = rasterPage ? rasterScale({ zoom, baseScale: BASE_RENDER_SCALE, baseWidth: BASE_PAGE_WIDTH, aspect: height / (BASE_PAGE_WIDTH * BASE_RENDER_SCALE), devicePixelRatio: window.devicePixelRatio, visible }) : 0;
   const pdfPageRef = useRef<PDFPageProxy | null>(null);
   const textContentRef = useRef<TextContent | null>(null);
   const handleRenderSuccess = useCallback(() => setRenderVersion((version) => version + 1), []);
@@ -1939,12 +2071,13 @@ const PdfPageWithHighlights = memo(function PdfPageWithHighlights({ pageNumber, 
     // every text run when the sharper text layer arrives after zooming.
     corrections.forEach(({ span, transform }) => { span.style.transform = transform; });
   }, []);
-  return <div className="pdf-raster-surface" style={{ width: BASE_PAGE_WIDTH * BASE_RENDER_SCALE, height: pageHeight }}><Page inputRef={pageElementRef} pageNumber={pageNumber} width={BASE_PAGE_WIDTH * BASE_RENDER_SCALE} renderMode="none" renderAnnotationLayer renderTextLayer onLoadSuccess={(page) => { pdfPageRef.current = page; setRasterPage(page); const viewport = page.getViewport({ scale: 1 }); setPageHeight(BASE_PAGE_WIDTH * BASE_RENDER_SCALE * viewport.height / viewport.width); }} onGetTextSuccess={(content) => { textContentRef.current = content; }} onRenderTextLayerSuccess={alignTextLayer}><PdfRasterCanvas page={rasterPage} renderScale={renderScale} onRenderSuccess={handleRenderSuccess} /><HighlightCanvas highlights={highlights} renderVersion={renderVersion} /></Page></div>;
+  return <div className="pdf-raster-surface" style={{ width: BASE_PAGE_WIDTH * BASE_RENDER_SCALE, height }}><Page inputRef={pageElementRef} pageNumber={pageNumber} width={BASE_PAGE_WIDTH * BASE_RENDER_SCALE} renderMode="none" renderAnnotationLayer renderTextLayer onLoadSuccess={(page) => { pdfPageRef.current = page; setRasterPage(page); const viewport = page.getViewport({ scale: 1 }); onSize(pageNumber, viewport.height / viewport.width); }} onGetTextSuccess={(content) => { textContentRef.current = content; }} onRenderTextLayerSuccess={alignTextLayer}><PdfRasterCanvas page={rasterPage} renderScale={renderScale} onRenderSuccess={handleRenderSuccess} /><HighlightCanvas highlights={highlights} renderVersion={renderVersion} /></Page></div>;
 
-}, (previous, next) => previous.pageNumber === next.pageNumber && previous.zoom === next.zoom && previous.highlights.length === next.highlights.length && previous.highlights.every((entry, index) => entry === next.highlights[index]));
+}, (previous, next) => previous.pageNumber === next.pageNumber && previous.zoom === next.zoom && previous.height === next.height && previous.onSize === next.onSize && previous.highlights.length === next.highlights.length && previous.highlights.every((entry, index) => entry === next.highlights[index]));
 
 // Keep the interactive Page/text layer at a fixed scale. Only the offscreen
 // raster changes resolution; completed images replace the displayed pixels.
+// `renderScale` is device pixels per base layout unit (see rasterScale).
 function PdfRasterCanvas({ page, renderScale, onRenderSuccess }: { page: PDFPageProxy | null; renderScale: number; onRenderSuccess: () => void }) {
   const canvasRef = useRef<HTMLCanvasElement>(null);
   const [error, setError] = useState('');
@@ -1953,10 +2086,9 @@ function PdfRasterCanvas({ page, renderScale, onRenderSuccess }: { page: PDFPage
   const height = baseViewport ? width * baseViewport.height / baseViewport.width : undefined;
 
   useEffect(() => {
-    if (!page) return;
+    if (!page || renderScale <= 0) return;
     const base = page.getViewport({ scale: 1 });
-    const pixelRatio = Math.min(window.devicePixelRatio || 1, 4 / renderScale);
-    const viewport = page.getViewport({ scale: BASE_PAGE_WIDTH * renderScale * pixelRatio / base.width });
+    const viewport = page.getViewport({ scale: BASE_PAGE_WIDTH * renderScale / base.width });
     const buffer = document.createElement('canvas');
     buffer.width = Math.floor(viewport.width);
     buffer.height = Math.floor(viewport.height);
@@ -1978,6 +2110,11 @@ function PdfRasterCanvas({ page, renderScale, onRenderSuccess }: { page: PDFPage
     }).finally(() => { buffer.width = 0; buffer.height = 0; });
     return () => { cancelled = true; task.cancel(); };
   }, [page, renderScale, onRenderSuccess]);
+  // Free the displayed backing store as soon as the page unmounts.
+  useEffect(() => {
+    const canvas = canvasRef.current;
+    return () => { if (canvas) { canvas.width = 0; canvas.height = 0; } };
+  }, []);
 
   return <><canvas ref={canvasRef} className="react-pdf__Page__canvas pdf-displayed-canvas" style={{ width, height }} aria-hidden="true" />{error && <div className="viewer-message error-banner" role="alert">{error}</div>}</>;
 }
@@ -2038,6 +2175,10 @@ function HighlightCanvas({ highlights, renderVersion }: { highlights: HighlightE
       overlayContext.stroke();
     }));
   }, [highlights, renderVersion]);
+  useEffect(() => {
+    const overlay = overlayRef.current;
+    return () => { if (overlay) { overlay.width = 0; overlay.height = 0; } };
+  }, []);
   return <canvas className="pdf-highlight-canvas" ref={overlayRef} aria-hidden="true" />;
 }
 
