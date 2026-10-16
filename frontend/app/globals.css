@@ -2,7 +2,7 @@
 
 /*
  * Folio — Adam's reading-desk design system.
- * Ivory paper surfaces, near-black ink, one ultramarine accent for actions,
+ * Ivory paper surfaces, near-black ink, Adam’s original green accent for actions,
  * and a highlighter amber reserved for AI and annotations. The reviewed reader
  * uses a quiet neutral desk, with dark controls kept in the floating dock.
  */
@@ -17,10 +17,10 @@
   --faint: #8b8e96;
   --rule: #e5e1d8;
   --rule-strong: #d2cdc2;
-  --accent: #2f49c9;
-  --accent-ink: #2238a6;
-  --accent-soft: #eaeefc;
-  --accent-line: #c3cdf4;
+  --accent: #2e6650;
+  --accent-ink: #24513f;
+  --accent-soft: #e7f0e9;
+  --accent-line: #bfd3c4;
   --marker: #f0b93a;
   --marker-soft: #fdf3d6;
   --marker-ink: #87580a;
@@ -57,15 +57,15 @@ button:disabled { cursor: default }
 button, label { -webkit-tap-highlight-color: transparent }
 :focus-visible { outline: 2px solid var(--accent); outline-offset: 2px }
 kbd { display: inline-grid; place-items: center; min-width: 18px; height: 18px; padding: 0 5px; border: 1px solid var(--rule-strong); border-bottom-width: 2px; border-radius: 5px; background: var(--surface); color: var(--muted); font: 600 10px/1 var(--font-mono); white-space: nowrap }
-::selection { background: #2f49c933 }
+::selection { background: #2e665033 }
 
 /* ---------- Shared controls ---------- */
 .brand { display: flex; align-items: center; gap: 10px; color: var(--ink) }
 .brand strong { font: 600 21px/1 var(--font-serif); letter-spacing: -.01em }
 .brand-mark { display: grid; place-items: center; width: 30px; height: 30px; border-radius: 8px; background: var(--ink); color: var(--surface); font: 600 18px/1 var(--font-serif); box-shadow: inset 0 -2px 0 var(--marker) }
 .eyebrow { margin: 0 0 8px; color: var(--accent); font: 600 11px/1.2 var(--font-mono); letter-spacing: .08em; text-transform: uppercase }
-.primary-button { display: inline-flex; align-items: center; justify-content: center; gap: 6px; height: 38px; padding: 0 16px; border: 0; border-radius: 10px; background: var(--ink); color: var(--surface); font-size: 14px; font-weight: 600; white-space: nowrap; box-shadow: var(--shadow-1); transition: background .15s, transform .15s }
-.primary-button:hover:not(:disabled) { background: var(--accent) }
+.primary-button { display: inline-flex; align-items: center; justify-content: center; gap: 6px; height: 38px; padding: 0 16px; border: 0; border-radius: 10px; background: var(--accent); color: var(--surface); font-size: 14px; font-weight: 600; white-space: nowrap; box-shadow: var(--shadow-1); transition: background .15s, transform .15s }
+.primary-button:hover:not(:disabled) { background: var(--accent-ink) }
 .primary-button:disabled { opacity: .5 }
 .secondary-button { height: 38px; padding: 0 14px; border: 1px solid var(--rule-strong); border-radius: 10px; background: var(--surface); color: var(--ink-2); font-size: 13px; font-weight: 600; white-space: nowrap }
 .secondary-button:hover:not(:disabled) { border-color: var(--ink-2); color: var(--ink) }
@@ -244,8 +244,8 @@ kbd { display: inline-grid; place-items: center; min-width: 18px; height: 18px; 
 .files-empty > small { margin-top: 16px; color: var(--faint); font-size: 12px }
 .files-notice { display: flex; align-items: center; justify-content: space-between; gap: 12px; margin: 0 0 14px; padding: 10px 10px 10px 14px; border: 1px solid var(--accent-line); border-radius: 10px; background: var(--accent-soft); color: var(--accent-ink); font-size: 13px }
 .files-notice button { width: 26px; height: 26px; border: 0; border-radius: 6px; background: transparent; color: inherit; font-size: 18px }
-.files-notice button:hover { background: #2f49c91a }
-.files-drop-active::after { content: 'Drop your PDF to add it here'; position: absolute; inset: 12px; z-index: 15; display: grid; place-items: center; border: 2px dashed var(--accent); border-radius: 18px; background: #eaeefcf2; color: var(--accent-ink); font: 500 30px var(--font-serif); pointer-events: none }
+.files-notice button:hover { background: #2e66501a }
+.files-drop-active::after { content: 'Drop your PDF to add it here'; position: absolute; inset: 12px; z-index: 15; display: grid; place-items: center; border: 2px dashed var(--accent); border-radius: 18px; background: #e7f0e9f2; color: var(--accent-ink); font: 500 30px var(--font-serif); pointer-events: none }
 
 .files-drag-preview { position: fixed; left: -100px; top: 0; width: 44px; height: 44px; display: grid; place-items: center; border-radius: 10px; background: var(--ink); color: var(--surface); pointer-events: none }
 .files-drag-preview > svg { width: 24px; height: 24px }
@@ -341,7 +341,7 @@ kbd { display: inline-grid; place-items: center; min-width: 18px; height: 18px; 
 .document-title > span { display: block; margin-top: 1px; overflow: hidden; color: var(--faint); font: 500 11px var(--font-mono); text-overflow: ellipsis; white-space: nowrap }
 .document-title form { display: flex; align-items: center; gap: 6px }
 .document-title input { width: min(360px, 36vw); height: 32px; padding: 0 10px; border: 1px solid var(--accent); border-radius: 8px; outline: none; background: var(--surface); font: 500 15px var(--font-serif); box-shadow: 0 0 0 3px var(--accent-soft) }
-.document-title form button { height: 32px; padding: 0 12px; border: 0; border-radius: 8px; background: var(--ink); color: var(--surface); font-size: 12px; font-weight: 600 }
+.document-title form button { height: 32px; padding: 0 12px; border: 0; border-radius: 8px; background: var(--accent); color: var(--surface); font-size: 12px; font-weight: 600 }
 .document-title form button:disabled { opacity: .5 }
 .reader-header-tools { display: flex; align-items: center; justify-content: flex-end; gap: 6px }
 .note-view-button { position: relative; height: 36px; display: flex; align-items: center; gap: 7px; padding: 0 10px; border: 1px solid var(--rule); border-radius: 10px; background: var(--surface); color: var(--ink-2); font-size: 13px; font-weight: 600 }
@@ -435,7 +435,7 @@ kbd { display: inline-grid; place-items: center; min-width: 18px; height: 18px; 
 .chat-title-button:hover span { opacity: 1; color: var(--accent) }
 .chat-title-form { display: flex; align-items: center; gap: 6px }
 .chat-title-form input { width: 100%; min-width: 0; height: 30px; padding: 0 9px; border: 1px solid var(--accent); border-radius: 8px; outline: none; background: var(--surface); font-size: 13px; font-weight: 600 }
-.chat-title-form button { height: 30px; padding: 0 10px; border: 0; border-radius: 8px; background: var(--ink); color: var(--surface); font-size: 12px; font-weight: 600 }
+.chat-title-form button { height: 30px; padding: 0 10px; border: 0; border-radius: 8px; background: var(--accent); color: var(--surface); font-size: 12px; font-weight: 600 }
 .chat-title-form button:disabled { opacity: .5 }
 
 .chat-body { flex: 1 1 auto; min-height: 0; overflow-y: auto; overscroll-behavior: contain; overflow-anchor: none; scrollbar-gutter: stable; padding: 22px 20px 18px }
@@ -549,7 +549,7 @@ kbd { display: inline-grid; place-items: center; min-width: 18px; height: 18px; 
 .composer-search-toggle .ui-icon { width: 15px; height: 15px }
 .composer-search-toggle:hover { border-color: var(--rule-strong); color: var(--ink) }
 .composer-search-toggle.active { border-color: var(--accent); background: var(--accent-soft); color: var(--accent-ink) }
-.composer button[type=submit] { width: 34px; height: 34px; display: grid; place-items: center; flex: none; border: 0; border-radius: 50%; background: var(--ink); color: var(--surface) }
+.composer button[type=submit] { width: 34px; height: 34px; display: grid; place-items: center; flex: none; border: 0; border-radius: 50%; background: var(--accent); color: var(--surface) }
 .composer button[type=submit]:hover:not(:disabled) { background: var(--accent) }
 .composer button[type=submit]:disabled { background: var(--sunken); color: var(--faint) }
 
@@ -760,14 +760,14 @@ kbd { display: inline-grid; place-items: center; min-width: 18px; height: 18px; 
 .quick-ask-entry { display: flex; gap: 8px; padding: 12px }
 .quick-ask-entry input { flex: 1; min-width: 0; padding: 10px 12px; border: 1px solid var(--rule-strong); border-radius: 10px; outline: none; font-size: 14px }
 .quick-ask-entry input:focus { border-color: var(--ink-2); box-shadow: 0 0 0 3px var(--accent-soft) }
-.quick-ask-entry button { width: 40px; border: 0; border-radius: 10px; background: var(--ink); color: var(--surface); font-size: 17px }
+.quick-ask-entry button { width: 40px; border: 0; border-radius: 10px; background: var(--accent); color: var(--surface); font-size: 17px }
 .quick-ask-entry button:disabled { background: var(--sunken); color: var(--faint) }
 .quick-ask-search-row { padding: 0 12px 10px }
 .quick-ask-error { margin: 0; padding: 8px 14px; color: var(--danger); font-size: 13px }
 .quick-ask-footer { display: flex; align-items: center; justify-content: space-between; gap: 10px; padding: 9px 12px; border-top: 1px solid var(--rule); background: var(--surface-2); color: var(--faint); font-size: 11.5px }
 .quick-ask-footer > div { display: flex; align-items: center; gap: 5px }
 .quick-ask-footer button { border: 0; background: none; color: var(--accent); font-size: 12px; font-weight: 600 }
-.quick-ask-footer .move-to-chat { height: 30px; padding: 0 12px; border-radius: 8px; background: var(--ink); color: var(--surface) }
+.quick-ask-footer .move-to-chat { height: 30px; padding: 0 12px; border-radius: 8px; background: var(--accent); color: var(--surface) }
 .quick-ask-footer .move-to-chat:disabled { background: var(--sunken); color: var(--faint) }
 
 /* Linked passage reveal */
@@ -916,7 +916,7 @@ kbd { display: inline-grid; place-items: center; min-width: 18px; height: 18px; 
   .files-sidebar > .files-nav-label, .files-folder-heading, .files-local-note, .files-sidebar-hint { display: none }
   .files-sidebar nav { display: flex; gap: 6px; overflow-x: auto; scrollbar-width: none }
   .files-sidebar nav > button { width: auto; flex: none; margin: 0; padding: 7px 11px; border: 1px solid var(--rule); border-radius: 999px; font-size: 13px; white-space: nowrap }
-  .files-sidebar nav > button.active { box-shadow: none; border-color: var(--ink); background: var(--ink); color: var(--surface) }
+  .files-sidebar nav > button.active { box-shadow: none; border-color: var(--accent-line); background: var(--accent-soft); color: var(--accent-ink) }
   .files-sidebar nav > button.active svg, .files-sidebar nav > button.active > span:last-child:not(.files-folder-name) { color: inherit }
   .files-sidebar nav > button.files-new-folder { order: 99; margin: 0 }
   .files-folder-name { max-width: 150px }
@@ -1006,7 +1006,7 @@ kbd { display: inline-grid; place-items: center; min-width: 18px; height: 18px; 
 .files-sidebar nav > button.files-new-folder { border:0; justify-content:center; gap:8px; text-align:center; width:100% }
 .files-sidebar nav > button.files-new-folder > span { margin-left:0 }
 .files-selection-bar > kbd { padding:4px 6px; border:1px solid #ffffff30; border-radius:5px; color:#ffffffa6; font:11px var(--font-mono) }
-.pdf-pane, .focus-reading .pdf-pane { background:radial-gradient(ellipse at 50% 0%,#f2f0eb 0%,#e7e5df 85%); scrollbar-color:#bbb7ae transparent }
+.pdf-pane, .focus-reading .pdf-pane { background:radial-gradient(ellipse at 50% 0%,#f0f2ed 0%,#e4e8df 85%); scrollbar-color:#bbb7ae transparent }
 .pdf-page-wrap { box-shadow:0 2px 5px #3a393315,0 12px 38px #3a393318 }
 .page-label { color:var(--muted) }
 .focus-reading .reader-header { background:var(--surface) }
@@ -1081,3 +1081,5 @@ kbd { display: inline-grid; place-items: center; min-width: 18px; height: 18px; 
 .folder-custom-color-control .custom-color-hex { width:92px; height:32px; margin:0; padding:0 8px; border:1px solid var(--rule-strong); border-radius:7px; background:var(--surface); color:var(--ink-2); font:12px var(--font-mono); appearance:none }
 .folder-custom-color-control .custom-color-hex[aria-invalid=true] { border-color:var(--danger) }
 .custom-color-swatch { display:inline-block; width:20px; height:20px; border:1px solid #00000014; border-radius:5px }
+
+.files-sidebar nav > button.active:not(.files-colored-folder) { background:var(--accent-soft); color:var(--accent-ink); box-shadow:none }
