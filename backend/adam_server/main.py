@@ -3,11 +3,12 @@ import json
 import logging
 import os
 from collections.abc import AsyncIterator
+from contextlib import asynccontextmanager
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
 
-from fastapi import Depends, FastAPI, HTTPException, Query, Response, UploadFile
+from fastapi import Depends, FastAPI, HTTPException, Query, Request, Response, UploadFile
 from fastapi.concurrency import run_in_threadpool
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse, StreamingResponse
@@ -22,6 +23,7 @@ from .schemas import AiNoteCreate, AiNoteUnlink, AnnotationIn, AnnotationOut, An
 from .schemas import ChatTurnIn, ContextImageIn
 from .services.context import build_paper_context
 from .services.documents import document_file_path, ingest_pdf
+from .services.thumbnails import THUMBNAIL_MEDIA_TYPE, THUMBNAIL_WIDTHS, ThumbnailBusy, ensure_thumbnail, remove_thumbnails, shutdown_thumbnail_workers, thumbnail_etag
 from .services.llm import AnthropicProvider, GoogleProvider, OpenAICompatibleProvider, OpenAIResponsesProvider, TITLE_SYSTEM_PROMPT, clean_title, generate_zen_title, sse
 from .services.web_search import asks_for_citing_papers, plan_search, previous_sources, search_citing_papers, search_web, web_context
 from .schemas import PaperCandidate, PaperImportIn, PaperSearchOut
@@ -31,7 +33,15 @@ settings = get_settings()
 run_migrations()
 logger = logging.getLogger(__name__)
 
-app = FastAPI(title="Adam API", version="0.1.0")
+
+@asynccontextmanager
+async def lifespan(_app: FastAPI) -> AsyncIterator[None]:
+    yield
+    # Stop thumbnail worker processes with the server instead of leaving them to interpreter exit.
+    await run_in_threadpool(shutdown_thumbnail_workers)
+
+
+app = FastAPI(title="Adam API", version="0.1.0", lifespan=lifespan)
 app.add_middleware(
     CORSMiddleware,
     allow_origins=[origin.strip() for origin in settings.cors_origins.split(",")],
@@ -384,6 +394,7 @@ def delete_document(document_id: str, db: Session = Depends(get_db), app_setting
         raise HTTPException(404, "Document not found.")
     source = document_file_path(document.storage_path, app_settings)
     document_root = (app_settings.data_dir / "documents").resolve()
+    sha256 = document.sha256
     staged: Path | None = None
     if source.exists():
         if not source.is_file() or not source.is_relative_to(document_root):
@@ -404,18 +415,74 @@ def delete_document(document_id: str, db: Session = Depends(get_db), app_setting
             source.parent.rmdir()
         except OSError:
             pass
+    remove_thumbnails(app_settings.data_dir, sha256)
     return Response(status_code=204)
 
 
-@app.get("/api/documents/{document_id}/file")
-def get_document_file(document_id: str, db: Session = Depends(get_db), app_settings: Settings = Depends(get_settings)) -> FileResponse:
-    document = db.get(Document, document_id)
+# A document id always names the same bytes (its SHA-256), so browsers may keep the PDF.
+# "private" keeps shared proxies from storing a user's papers.
+DOCUMENT_FILE_CACHE_CONTROL = "private, max-age=31536000, immutable"
+# Thumbnail URLs do not carry the renderer version, so they revalidate weekly instead.
+THUMBNAIL_CACHE_CONTROL = "private, max-age=604800"
+
+
+def etag_matches(if_none_match: str | None, etag: str) -> bool:
+    """Weak If-None-Match comparison, as RFC 9110 requires for GET."""
+    if not if_none_match:
+        return False
+    if if_none_match.strip() == "*":
+        return True
+    return any(candidate.strip().removeprefix("W/") == etag for candidate in if_none_match.split(","))
+
+
+def managed_document_source(document: Document | None, app_settings: Settings) -> Path:
     if not document:
         raise HTTPException(404, "Document file not found.")
     source = document_file_path(document.storage_path, app_settings)
     if not source.is_relative_to((app_settings.data_dir / "documents").resolve()) or not source.is_file():
         raise HTTPException(404, "Document file not found.")
-    return FileResponse(source, media_type="application/pdf", filename=document.original_name, content_disposition_type="inline")
+    return source
+
+
+@app.get("/api/documents/{document_id}/file")
+def get_document_file(document_id: str, request: Request, db: Session = Depends(get_db), app_settings: Settings = Depends(get_settings)) -> Response:
+    document = db.get(Document, document_id)
+    source = managed_document_source(document, app_settings)
+    # The ETag is the content hash, so it stays stable across renames and Docker/local path changes.
+    # Tradeoff: a browser holding the immutable copy keeps the filename from Content-Disposition
+    # that was current when it cached the PDF; the in-app reader does not use that filename.
+    headers = {"ETag": f'"{document.sha256}"', "Cache-Control": DOCUMENT_FILE_CACHE_CONTROL}
+    if etag_matches(request.headers.get("if-none-match"), headers["ETag"]):
+        return Response(status_code=304, headers=headers)
+    # FileResponse keeps handling Range and If-Range (compared against this strong ETag).
+    return FileResponse(source, media_type="application/pdf", filename=document.original_name, content_disposition_type="inline", headers=headers)
+
+
+@app.get("/api/documents/{document_id}/thumbnail")
+async def get_document_thumbnail(document_id: str, request: Request, width: int = THUMBNAIL_WIDTHS[0], db: Session = Depends(get_db), app_settings: Settings = Depends(get_settings)) -> Response:
+    if width not in THUMBNAIL_WIDTHS:
+        raise HTTPException(422, f"Thumbnail width must be one of {', '.join(map(str, THUMBNAIL_WIDTHS))}.")
+    document = db.get(Document, document_id)
+    source = managed_document_source(document, app_settings)
+    sha256 = document.sha256
+    # Release the connection before waiting on a render.
+    db.close()
+    headers = {"ETag": thumbnail_etag(sha256, width), "Cache-Control": THUMBNAIL_CACHE_CONTROL}
+    if etag_matches(request.headers.get("if-none-match"), headers["ETag"]):
+        return Response(status_code=304, headers=headers)
+    try:
+        path = await ensure_thumbnail(app_settings.data_dir, sha256, source, width)
+    except ThumbnailBusy:
+        raise HTTPException(503, "Previews are busy; try again shortly.", headers={"Retry-After": "2"})
+    except Exception as exc:
+        if not source.is_file():
+            raise HTTPException(404, "Document file not found.") from exc
+        raise HTTPException(422, "This PDF could not be rendered as a preview.") from exc
+    if not source.is_file():
+        # The paper was deleted while rendering; do not leave its thumbnail behind.
+        remove_thumbnails(app_settings.data_dir, sha256)
+        raise HTTPException(404, "Document file not found.")
+    return FileResponse(path, media_type=THUMBNAIL_MEDIA_TYPE, headers=headers)
 
 
 @app.get("/api/documents/{document_id}/pages/{page_number}/text", response_model=PageTextOut)

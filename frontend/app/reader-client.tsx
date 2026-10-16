@@ -2663,6 +2663,9 @@ function WebEvidence({ web }: { web?: WebInfo | null }) {
 }
 
 
+// Library cards show a server-rendered, cached first-page image instead of downloading each PDF.
 function PaperPreview({ paper }: { paper: Paper }) {
-  return <span className="paper-preview" aria-hidden="true"><PdfDocument file={`${API_BASE}/api/documents/${paper.id}/file`} loading={<span className="preview-loading">PDF</span>} error={<span className="preview-loading">PDF</span>}><Page pageNumber={1} width={270} renderTextLayer={false} renderAnnotationLayer={false} /></PdfDocument><span className="preview-shade" /><span className="preview-open">Open paper <b>→</b></span></span>;
+  const [failed, setFailed] = useState(false);
+  const thumbnail = `${API_BASE}/api/documents/${paper.id}/thumbnail`;
+  return <span className="paper-preview" aria-hidden="true">{failed ? <span className="preview-loading">PDF</span> : <img className="preview-thumbnail" src={`${thumbnail}?width=270`} srcSet={`${thumbnail}?width=270 1x, ${thumbnail}?width=540 2x`} width={270} alt="" loading="lazy" decoding="async" draggable={false} onError={() => setFailed(true)} />}<span className="preview-shade" /><span className="preview-open">Open paper <b>→</b></span></span>;
 }

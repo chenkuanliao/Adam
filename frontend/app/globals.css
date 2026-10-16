@@ -194,10 +194,8 @@ kbd { display: inline-grid; place-items: center; min-width: 18px; height: 18px; 
 .files-paper-open[draggable=true] .paper-preview, .files-paper-open[draggable=true] .files-paper-body, .files-paper-open[draggable=true] .files-list-icon { pointer-events: none }
 .paper-preview { position: relative; display: block; height: 196px; overflow: hidden; border-bottom: 1px solid var(--rule); background: radial-gradient(120% 80% at 50% 0%, #fffdf9 0%, var(--sunken) 100%) }
 .files-paper-colored .paper-preview { background: radial-gradient(120% 80% at 50% 0%, #fffdf9 0%, var(--folder-tint) 100%), var(--sunken) }
-.paper-preview .react-pdf__Document { display: block; width: 270px; min-width: 0; margin: 22px 0 0 calc(50% - 135px); transform: scale(.82); transform-origin: top center; box-shadow: 0 6px 20px #16181d26, 0 0 0 1px #16181d0f; transition: transform .2s }
-.files-paper:hover .paper-preview .react-pdf__Document { transform: scale(.84) translateY(-3px) }
-.paper-preview .react-pdf__Page { background: #fff }
-.paper-preview canvas { display: block !important; width: 270px !important; height: auto !important }
+.paper-preview .preview-thumbnail { display: block; width: 270px; max-width: none; height: auto; min-height: 160px; margin: 22px 0 0 calc(50% - 135px); background: #fff; transform: scale(.82); transform-origin: top center; box-shadow: 0 6px 20px #16181d26, 0 0 0 1px #16181d0f; transition: transform .2s }
+.files-paper:hover .paper-preview .preview-thumbnail { transform: scale(.84) translateY(-3px) }
 .preview-loading { height: 160px; display: grid; place-items: center; color: var(--faint); font: 600 11px var(--font-mono); letter-spacing: .12em }
 .preview-shade, .preview-open { display: none }
 .files-paper-select { position: absolute; left: 10px; top: 10px; z-index: 2; width: 28px; height: 28px; display: grid; place-items: center; border-radius: 8px; background: #fffdf9f0; box-shadow: var(--shadow-1); opacity: 0; transition: opacity .15s }
@@ -941,8 +939,8 @@ kbd { display: inline-grid; place-items: center; min-width: 18px; height: 18px; 
   .files-folder-arrow { right: 8px }
   .files-papers.files-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 10px }
   .paper-preview { height: 140px }
-  .paper-preview .react-pdf__Document { transform: scale(.58) }
-  .files-paper:hover .paper-preview .react-pdf__Document { transform: scale(.58) }
+  .paper-preview .preview-thumbnail { transform: scale(.58) }
+  .files-paper:hover .paper-preview .preview-thumbnail { transform: scale(.58) }
   .files-paper-body { min-height: 110px; padding: 11px 12px }
   .files-paper-body > strong { min-height: 40px; font-size: 15.5px }
   .files-paper-type > span { max-width: 70%; font-size: 10.5px }
