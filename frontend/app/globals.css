@@ -105,21 +105,21 @@ kbd { display: inline-grid; place-items: center; min-width: 18px; height: 18px; 
 .files-workspace { display: grid; grid-template-columns: 252px minmax(0, 1fr); min-height: calc(100vh - 64px) }
 .files-sidebar { position: sticky; top: 64px; height: calc(100vh - 64px); overflow-y: auto; display: flex; flex-direction: column; padding: 26px 14px 20px; border-right: 1px solid var(--rule) }
 .files-nav-label { margin: 0 10px 8px; color: var(--faint); font: 600 10.5px/1 var(--font-mono); letter-spacing: .1em }
-.files-sidebar nav > button { width: 100%; display: flex; align-items: center; gap: 10px; margin: 1px 0; padding: 8px 10px; border: 0; border-radius: 8px; background: transparent; color: var(--ink-2); font-size: 14px; text-align: left; transition: background .15s, box-shadow .15s }
-.files-sidebar nav > button:hover { background: #16181d0a }
-.files-sidebar nav > button.active { background: var(--surface); color: var(--ink); font-weight: 600; box-shadow: var(--shadow-1), inset 0 0 0 1px var(--rule) }
-.files-sidebar nav > button > span:last-child:not(.files-folder-name) { margin-left: auto; color: var(--faint); font: 500 12px var(--font-mono) }
+:is(.files-sidebar nav > button, .files-folder-row > .files-folder-link) { width: 100%; display: flex; align-items: center; gap: 10px; margin: 1px 0; padding: 8px 10px; border: 0; border-radius: 8px; background: transparent; color: var(--ink-2); font-size: 14px; text-align: left; transition: background .15s, box-shadow .15s }
+:is(.files-sidebar nav > button, .files-folder-row > .files-folder-link):hover { background: #16181d0a }
+:is(.files-sidebar nav > button, .files-folder-row > .files-folder-link).active { background: var(--surface); color: var(--ink); font-weight: 600; box-shadow: var(--shadow-1), inset 0 0 0 1px var(--rule) }
+:is(.files-sidebar nav > button, .files-folder-row > .files-folder-link) > span:last-child:not(.files-folder-name) { margin-left: auto; color: var(--faint); font: 500 12px var(--font-mono) }
 .files-sidebar svg { width: 17px; height: 17px; flex: none; color: var(--muted) }
 .files-folder-name { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap }
 .files-folder-heading { margin-top: 26px }
 .files-sidebar-hint { margin: 4px 10px; color: var(--faint); font-size: 13px; line-height: 1.5 }
-.files-sidebar nav > button.files-new-folder { margin-top: 8px; border: 1px dashed var(--rule-strong); color: var(--muted); font-size: 13px; justify-content: center }
-.files-sidebar nav > button.files-new-folder:hover { border-color: var(--accent); background: var(--accent-soft); color: var(--accent-ink) }
+:is(.files-sidebar nav > button, .files-folder-row > .files-folder-link).files-new-folder { margin-top: 8px; border: 1px dashed var(--rule-strong); color: var(--muted); font-size: 13px; justify-content: center }
+:is(.files-sidebar nav > button, .files-folder-row > .files-folder-link).files-new-folder:hover { border-color: var(--accent); background: var(--accent-soft); color: var(--accent-ink) }
 .files-local-note { margin-top: auto; padding: 14px 10px 0; border-top: 1px solid var(--rule); color: var(--ink-2); font-size: 12.5px; font-weight: 600 }
 .files-local-dot { display: inline-block; width: 7px; height: 7px; margin-right: 7px; border-radius: 50%; background: var(--success); box-shadow: 0 0 0 3px #2f7a5222 }
 .files-local-note p { margin: 6px 0 0; color: var(--faint); font-size: 12px; font-weight: 400; line-height: 1.5 }
-.files-sidebar nav > button.files-colored-folder > svg { color: var(--folder-ink) }
-.files-sidebar nav > button.files-colored-folder.active { background: var(--surface); box-shadow: var(--shadow-1), inset 3px 0 0 var(--folder-color), inset 0 0 0 1px var(--rule) }
+:is(.files-sidebar nav > button, .files-folder-row > .files-folder-link).files-colored-folder > svg { color: var(--folder-ink) }
+:is(.files-sidebar nav > button, .files-folder-row > .files-folder-link).files-colored-folder.active { background: var(--surface); box-shadow: var(--shadow-1), inset 3px 0 0 var(--folder-color), inset 0 0 0 1px var(--rule) }
 
 .files-content { position: relative; width: 100%; max-width: 1480px; min-width: 0; margin: 0 auto; padding: 26px 40px 96px }
 .files-breadcrumb { display: flex; align-items: center; gap: 8px; min-width: 0; color: var(--faint); font: 500 12px var(--font-mono) }
@@ -169,7 +169,7 @@ kbd { display: inline-grid; place-items: center; min-width: 18px; height: 18px; 
 .files-folder-card small { color: var(--muted); font: 500 12px var(--font-mono) }
 .files-folder-arrow { position: absolute; right: 14px; top: 50%; color: var(--faint); transform: translateY(-50%); transition: color .15s, transform .15s }
 .files-folder-card:hover .files-folder-arrow { color: var(--ink); transform: translate(2px, -50%) }
-.files-folder-card.files-folder-drop-target, .files-sidebar nav > button.files-folder-drop-target { background: var(--folder-tint, var(--accent-soft)); box-shadow: 0 0 0 2px var(--folder-ink, var(--accent)); transform: none }
+.files-folder-card.files-folder-drop-target, :is(.files-sidebar nav > button, .files-folder-row > .files-folder-link).files-folder-drop-target { background: var(--folder-tint, var(--accent-soft)); box-shadow: 0 0 0 2px var(--folder-ink, var(--accent)); transform: none }
 .files-folder-drop-target .files-folder-arrow { display: none }
 
 .files-selection-bar { position: fixed; left: calc(50% + 126px); bottom: 24px; z-index: 30; translate: -50% 0; display: flex; flex-wrap: wrap; align-items: center; gap: 6px; width: max-content; max-width: calc(100vw - 24px); margin: 0; padding: 6px 6px 6px 16px; border-radius: 14px; background: var(--glass-bg); color: var(--glass-ink); font-size: 13px; box-shadow: var(--glass-shadow); animation: rise-in .16s ease-out }
@@ -922,10 +922,10 @@ kbd { display: inline-grid; place-items: center; min-width: 18px; height: 18px; 
   .files-sidebar { position: static; height: auto; padding: 10px 12px; border-right: 0; border-bottom: 1px solid var(--rule) }
   .files-sidebar > .files-nav-label, .files-folder-heading, .files-local-note, .files-sidebar-hint { display: none }
   .files-sidebar nav { display: flex; gap: 6px; overflow-x: auto; scrollbar-width: none }
-  .files-sidebar nav > button { width: auto; flex: none; margin: 0; padding: 7px 11px; border: 1px solid var(--rule); border-radius: 999px; font-size: 13px; white-space: nowrap }
-  .files-sidebar nav > button.active { box-shadow: none; border-color: var(--accent-line); background: var(--accent-soft); color: var(--accent-ink) }
-  .files-sidebar nav > button.active svg, .files-sidebar nav > button.active > span:last-child:not(.files-folder-name) { color: inherit }
-  .files-sidebar nav > button.files-new-folder { order: 99; margin: 0 }
+  :is(.files-sidebar nav > button, .files-folder-row > .files-folder-link) { width: auto; flex: none; margin: 0; padding: 7px 11px; border: 1px solid var(--rule); border-radius: 999px; font-size: 13px; white-space: nowrap }
+  :is(.files-sidebar nav > button, .files-folder-row > .files-folder-link).active { box-shadow: none; border-color: var(--accent-line); background: var(--accent-soft); color: var(--accent-ink) }
+  :is(.files-sidebar nav > button, .files-folder-row > .files-folder-link).active svg, :is(.files-sidebar nav > button, .files-folder-row > .files-folder-link).active > span:last-child:not(.files-folder-name) { color: inherit }
+  :is(.files-sidebar nav > button, .files-folder-row > .files-folder-link).files-new-folder { order: 99; margin: 0 }
   .files-folder-name { max-width: 150px }
   .files-content { padding: 16px 14px 96px }
   .files-heading { margin: 14px 0 16px }
@@ -1012,8 +1012,8 @@ kbd { display: inline-grid; place-items: center; min-width: 18px; height: 18px; 
 .brand-mark { width:31px; height:31px; border-radius:9px; background:#2e6650; color:#fff; font:700 17px Georgia,serif; box-shadow:none }
 .brand strong { font:700 21px Georgia,serif }
 .reader-back .brand-mark { width:31px; height:31px; border-radius:9px; font-size:17px }
-.files-sidebar nav > button.files-new-folder { border:0; justify-content:center; gap:8px; text-align:center; width:100% }
-.files-sidebar nav > button.files-new-folder > span { margin-left:0 }
+:is(.files-sidebar nav > button, .files-folder-row > .files-folder-link).files-new-folder { border:0; justify-content:center; gap:8px; text-align:center; width:100% }
+:is(.files-sidebar nav > button, .files-folder-row > .files-folder-link).files-new-folder > span { margin-left:0 }
 .files-selection-bar > kbd { padding:4px 6px; border:1px solid #2e665026; border-radius:5px; color:var(--glass-muted); font:11px var(--font-mono) }
 .pdf-pane, .focus-reading .pdf-pane { background:radial-gradient(ellipse at 50% 0%,#f0f2ed 0%,#e4e8df 85%); scrollbar-color:#bbb7ae transparent }
 .pdf-page-wrap { box-shadow:0 2px 5px #3a393315,0 12px 38px #3a393318 }
@@ -1085,13 +1085,13 @@ kbd { display: inline-grid; place-items: center; min-width: 18px; height: 18px; 
 @media(max-width:1050px) { .continue-grid { grid-template-columns:repeat(2,minmax(0,1fr)) } .continue-card:last-child { display:none } }
 @media(max-width:700px) { .continue-grid { grid-template-columns:1fr } .continue-card:last-child { display:grid } .files-toolbar > .app-select { margin-left:auto } }
 @media(max-width:430px) { .reader-dock { gap:1px; padding:4px; max-width:calc(100% - 16px) } .reader-dock .dock-group { gap:0 } .reader-dock .dock-group button { min-width:25px; padding-inline:5px } .reader-dock .dock-tool { padding:0 7px } .reader-dock kbd { display:none } .reader-dock .dock-tool>span { display:none } .continue-card { padding:14px } }
-.files-sidebar nav > button.files-new-folder > span:last-child { margin-left:0; color:inherit }
+:is(.files-sidebar nav > button, .files-folder-row > .files-folder-link).files-new-folder > span:last-child { margin-left:0; color:inherit }
 .folder-custom-color-control { flex-wrap:wrap; gap:8px }
 .folder-custom-color-control .custom-color-hex { width:92px; height:32px; margin:0; padding:0 8px; border:1px solid var(--rule-strong); border-radius:7px; background:var(--surface); color:var(--ink-2); font:12px var(--font-mono); appearance:none }
 .folder-custom-color-control .custom-color-hex[aria-invalid=true] { border-color:var(--danger) }
 .custom-color-swatch { display:inline-block; width:20px; height:20px; border:1px solid #00000014; border-radius:5px }
 
-.files-sidebar nav > button.active:not(.files-colored-folder) { background:var(--accent-soft); color:var(--accent-ink); box-shadow:none }
+:is(.files-sidebar nav > button, .files-folder-row > .files-folder-link).active:not(.files-colored-folder) { background:var(--accent-soft); color:var(--accent-ink); box-shadow:none }
 
 /* Floating surfaces share a light green tint; keep labels opaque and legible. */
 .reader-dock, .selection-toolbar, .files-selection-bar, .action-tooltip, .linked-passage-toast {
@@ -1111,6 +1111,21 @@ kbd { display: inline-grid; place-items: center; min-width: 18px; height: 18px; 
 @media (prefers-reduced-transparency: reduce) {
   .reader-dock, .selection-toolbar, .files-selection-bar, .action-tooltip, .linked-passage-toast, .quick-ask-head { background:#f1f6f1; -webkit-backdrop-filter:none; backdrop-filter:none }
   .side-pane .mode-tabs, .side-pane .conversation-header, .composer { background:var(--surface); -webkit-backdrop-filter:none; backdrop-filter:none }
+}
+
+/* Keep nested paths and folder actions readable on narrow screens. */
+.files-breadcrumb { flex-wrap: wrap; row-gap: 5px }
+.files-breadcrumb > span:last-child { white-space: normal; overflow-wrap: anywhere }
+.files-heading { flex-wrap: wrap }
+.files-heading > div:first-child { flex: 1 1 300px }
+.files-heading-actions { flex-wrap: wrap }
+
+/* The disclosure chevron is part of the folder row’s single click target. */
+.files-folder-row { position: relative; min-width: 0 }
+.files-folder-chevron { position: absolute; top: 50%; display: grid; place-items: center; width: 24px; height: 28px; color: var(--muted); transform: translateY(-50%); pointer-events: none }
+.files-folder-chevron svg { width: 14px; height: 14px; color: inherit }
+@media (max-width: 640px) {
+  .files-folder-row { flex: none }
 }
 
 .folder-icon-picker { min-width: 0; margin: 20px 0 0; padding: 0; border: 0 }

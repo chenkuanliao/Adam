@@ -226,8 +226,16 @@ FolderIcon = Literal["folder", "book", "bookmark", "star", "heart", "lightbulb",
 
 
 class FolderIn(BaseModel):
+    parent_id: str | None = None
     name: str = Field(min_length=1, max_length=80)
     color: str | None = Field(default=None, pattern=r"^#[0-9a-fA-F]{6}$")
+    icon: FolderIcon | None = None
+
+
+class FolderUpdate(BaseModel):
+    name: str | None = Field(default=None, min_length=1, max_length=80)
+    color: str | None = Field(default=None, pattern=r"^#[0-9a-fA-F]{6}$")
+    parent_id: str | None = None
     icon: FolderIcon | None = None
 
 
@@ -235,6 +243,7 @@ class FolderOut(BaseModel):
     model_config = ConfigDict(from_attributes=True)
     id: str
     name: str
+    parent_id: str | None
     color: str
     icon: FolderIcon
     created_at: datetime

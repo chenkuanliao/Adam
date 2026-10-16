@@ -22,7 +22,7 @@ export default function LibrarySpotlight({ papers, onClose, onOpen, onBrowseFold
   const inputRef = useRef<HTMLInputElement>(null);
   const resultsRef = useRef<HTMLDivElement>(null);
   const term = query.trim().toLocaleLowerCase();
-  const matchingFolders = scope ? [] : folders.filter((folder) => folder.name.toLocaleLowerCase().includes(term));
+  const matchingFolders = folders.filter((folder) => (!scope || folder.parent_id === scope.id) && folder.name.toLocaleLowerCase().includes(term));
   const matchingPapers = papers.filter((paper) => (!scope || paper.folder_id === scope.id) && paper.original_name.toLocaleLowerCase().includes(term));
   const results: Result[] = [...matchingFolders.map((folder): Result => ({ kind: 'folder', folder })), ...matchingPapers.map((paper): Result => ({ kind: 'paper', paper }))];
   const activeIndex = Math.min(selected, Math.max(0, results.length - 1));

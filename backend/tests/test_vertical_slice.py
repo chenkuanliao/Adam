@@ -571,9 +571,10 @@ def test_folder_migration_preserves_existing_papers_and_children(tmp_path) -> No
     subprocess.run([sys.executable, '-m', 'alembic', 'upgrade', '0009_folders'], cwd=backend_root, env=env, check=True, capture_output=True)
     with sqlite3.connect(path) as db:
         db.execute("INSERT INTO folders (id, name, created_at) VALUES ('old-folder', 'Existing folder', CURRENT_TIMESTAMP)")
+        db.execute("UPDATE documents SET folder_id = 'old-folder' WHERE id = 'existing'")
     subprocess.run([sys.executable, '-m', 'alembic', 'upgrade', 'head'], cwd=backend_root, env=env, check=True, capture_output=True)
     with sqlite3.connect(path) as db:
-        assert db.execute('SELECT id, folder_id FROM documents').fetchall() == [('existing', None)]
+        assert db.execute('SELECT id, folder_id FROM documents').fetchall() == [('existing', 'old-folder')]
         for table in ['pages', 'paper_notes', 'conversations', 'messages', 'annotations']:
             assert db.execute(f'SELECT COUNT(*) FROM {table}').fetchone()[0] == 1
         assert db.execute('SELECT color, icon FROM folders WHERE id = ?', ('old-folder',)).fetchone() == ('#8c9d65', 'folder')
@@ -636,6 +637,43 @@ def test_auto_title_uses_answer_and_preserves_chat_on_title_failure(monkeypatch)
         assert detail["title"] == ("What does this do?" if mode == "failure" else "My residual connection notes")
 
 
+def test_nested_folders_inherit_colors_move_safely_and_keep_contents() -> None:
+    root = client.post('/api/folders', json={'name': 'Nested root', 'color': '#123456'}).json()
+    other = client.post('/api/folders', json={'name': 'Other root', 'color': '#654321'}).json()
+    child = client.post('/api/folders', json={'name': 'Child', 'parent_id': root['id'], 'color': '#ffffff', 'icon': 'book'}).json()
+    leaf = client.post('/api/folders', json={'name': 'Leaf', 'parent_id': child['id']}).json()
+    assert child['color'] == leaf['color'] == root['color']
+    assert client.post('/api/folders', json={'name': 'child', 'parent_id': root['id']}).status_code == 409
+    twin = client.post('/api/folders', json={'name': 'Child', 'parent_id': other['id']})
+    assert twin.status_code == 201
+    assert client.patch(f"/api/folders/{root['id']}", json={'parent_id': leaf['id']}).status_code == 422
+    assert client.patch(f"/api/folders/{child['id']}", json={'parent_id': child['id']}).status_code == 422
+    assert client.patch(f"/api/folders/{child['id']}", json={'parent_id': 'missing'}).status_code == 404
+    # Conflicting moves leave the whole branch unchanged.
+    assert client.patch(f"/api/folders/{child['id']}", json={'parent_id': other['id']}).status_code == 409
+    client.delete(f"/api/folders/{twin.json()['id']}")
+    moved = client.patch(f"/api/folders/{child['id']}", json={'parent_id': other['id']})
+    assert moved.json()['color'] == other['color']
+    assert moved.json()['icon'] == 'book'
+    icon_update = client.patch(f"/api/folders/{child['id']}", json={'icon': 'star'})
+    assert icon_update.json()['icon'] == 'star'
+    assert icon_update.json()['parent_id'] == other['id']
+    assert icon_update.json()['color'] == other['color']
+    client.patch(f"/api/folders/{other['id']}", json={'color': '#abcdef'})
+    folders = {folder['id']: folder for folder in client.get('/api/folders').json()}
+    assert folders[leaf['id']]['color'] == '#abcdef'
+    detached = client.patch(f"/api/folders/{child['id']}", json={'parent_id': None}).json()
+    assert detached['parent_id'] is None and detached['color'] != '#abcdef'
+    paper = client.post('/api/documents', files={'file': ('nested.pdf', BytesIO(sample_pdf('Nested contents survive.')), 'application/pdf')}).json()
+    assert client.post('/api/document-moves', json={'document_ids': [paper['id']], 'folder_id': leaf['id']}).status_code == 200
+    # Reopening reads the persisted hierarchy; removing a parent keeps its children and papers.
+    assert client.delete(f"/api/folders/{child['id']}").status_code == 204
+    folders = {folder['id']: folder for folder in client.get('/api/folders').json()}
+    assert folders[leaf['id']]['parent_id'] is None
+    assert client.get(f"/api/documents/{paper['id']}").json()['folder_id'] == leaf['id']
+    for folder in [root, other, leaf]:
+        client.delete(f"/api/folders/{folder['id']}")
+
 def test_folder_icons_are_validated_and_persist_across_updates() -> None:
     folder = client.post('/api/folders', json={'name': 'Icon lifecycle'}).json()
     assert folder['icon'] == 'folder'
@@ -657,3 +695,31 @@ def test_folder_icons_are_validated_and_persist_across_updates() -> None:
     assert custom.status_code == 201
     assert custom.json()['icon'] == 'book'
     client.delete(f"/api/folders/{custom.json()['id']}")
+
+
+def test_folder_migration_upgrades_both_feature_branches(tmp_path) -> None:
+    import sqlite3
+    import subprocess
+    import sys
+    from pathlib import Path
+
+    backend_root = Path(__file__).resolve().parents[1]
+    for revision in ['0011_folder_icons', '0011_nested_folders']:
+        data_dir = tmp_path / revision
+        env = {**os.environ, 'ADAM_DATA_DIR': str(data_dir)}
+        def upgrade(target):
+            subprocess.run([sys.executable, '-m', 'alembic', 'upgrade', target], cwd=backend_root, env=env, check=True, capture_output=True)
+        upgrade(revision)
+        path = data_dir / 'database' / 'adam.sqlite3'
+        with sqlite3.connect(path) as db:
+            db.execute("INSERT INTO folders (id, name, color, created_at) VALUES ('root', 'Root', '#123456', CURRENT_TIMESTAMP)")
+            if revision == '0011_folder_icons':
+                db.execute("UPDATE folders SET icon = 'book' WHERE id = 'root'")
+            else:
+                db.execute("INSERT INTO folders (id, name, color, parent_id, created_at) VALUES ('child', 'Child', '#123456', 'root', CURRENT_TIMESTAMP)")
+        upgrade('head')
+        with sqlite3.connect(path) as db:
+            assert db.execute("SELECT color, icon, parent_id FROM folders WHERE id = 'root'").fetchone() == ('#123456', 'book' if revision == '0011_folder_icons' else 'folder', None)
+            if revision == '0011_nested_folders':
+                assert db.execute("SELECT parent_id, icon FROM folders WHERE id = 'child'").fetchone() == ('root', 'folder')
+            assert db.execute('PRAGMA foreign_key_check').fetchall() == []
