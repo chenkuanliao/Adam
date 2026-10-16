@@ -7,6 +7,8 @@ The current vertical slice supports:
 - persistent local PDF upload and library
 - optional folders with bulk paper moves, folder-scoped uploads and search, and grid/list views; removing a folder keeps its papers, notes, and chats
 - in-browser PDF rendering and native text selection
+- a floating reader dock with editable page and zoom controls, plus a matching editable chat text percentage
+- Continue reading with browser-local saved page, zoom, and reading position
 - full-window focus reading: click **Focus reading** or press `F` to hide the sidebar and anchored note cards while keeping note and chat-link icons available; use **Exit focus** or `Esc` to restore your workspace, zoom, and reading position
 - local native-text extraction with PyMuPDF
 - durable per-paper chat histories with create, switch, delete, and reload restoration
@@ -67,3 +69,27 @@ docker compose up --build -d
 Stop the application before copying `./data` as a simple consistent backup.
 
 See [ARCHITECTURE.md](./ARCHITECTURE.md) for design decisions and the incremental roadmap.
+
+## Isolated UI review
+
+The combined reviewed design runs separately from the original explorations:
+
+```sh
+source ~/Documents/Projects/mainenv/bin/activate
+ADAM_DATA_DIR="$PWD/data/review-demo" ADAM_SEARCH_BASE_URL=http://127.0.0.1:1 PYTHONPATH="$PWD/backend" uvicorn adam_server.main:app --host 127.0.0.1 --port 8414
+```
+
+In another terminal, seed the local review backend with six clearly labeled synthetic PDFs and three folders (safe to rerun without duplicates):
+
+```sh
+source ~/Documents/Projects/mainenv/bin/activate
+python scripts/seed-review-demo.py --api-base http://127.0.0.1:8414
+cd frontend
+ADAM_INTERNAL_API_BASE=http://127.0.0.1:8414 ADAM_INSPECTOR_PORT=9414 npm run dev -- --port 7414 --strictPort
+```
+
+Open <http://localhost:7414>. The original reference previews on 7411–7413 use other checkouts and are left running. No Docker changes are required. Demo chat needs a configured provider key for live AI; the PDF, folder, settings, selection, and saved-reading interactions work without one.
+
+Click a page number or percentage to edit it; Enter applies a valid value, and Escape or leaving the field cancels the edit. Page numbers must be whole numbers within the paper. Paper zoom accepts 10–3200%; chat text accepts 100–200%. Invalid input stays in the field with a message. Escape clears bulk selection when no dialog or text entry is active. Continue reading appears after opening papers and stores progress in this browser; it resumes the page, position within the page, horizontal scroll, and zoom.
+
+Checks: `npm run lint`, `npm run build`, and `npm run test:reader-controls` from `frontend/`. The existing global Cloudflare/browser type collisions remain in the default TypeScript configuration; `npx tsc --noEmit --types node --incremental false` checks the browser code without those conflicting ambient globals.

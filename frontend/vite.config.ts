@@ -9,12 +9,17 @@ const SITE_CREATOR_PLACEHOLDER_DATABASE_ID =
 
 const { d1, r2 } = hostingConfig;
 
+// Optional local-preview overrides; unset values keep the default behavior.
+const devApiBase = process.env.ADAM_INTERNAL_API_BASE;
+const inspectorPort = process.env.ADAM_INSPECTOR_PORT;
+
 // macOS Seatbelt blocks FSEvents, so Codex previews need polling for HMR.
 const isCodexSeatbeltSandbox = process.env.CODEX_SANDBOX === 'seatbelt';
 
 const localBindingConfig = {
   main: 'vinext/server/app-router-entry',
   compatibility_flags: ['nodejs_compat'],
+  ...(devApiBase ? { vars: { ADAM_INTERNAL_API_BASE: devApiBase } } : {}),
   d1_databases: d1
     ? [
         {
@@ -55,6 +60,7 @@ export default defineConfig(async () => {
       cloudflare({
         viteEnvironment: { name: 'rsc', childEnvironments: ['ssr'] },
         config: localBindingConfig,
+        ...(inspectorPort ? { inspectorPort: inspectorPort === 'false' ? false : Number(inspectorPort) } : {}),
       }),
     ],
   };

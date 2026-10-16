@@ -8,6 +8,11 @@ import ReactMarkdown from 'react-markdown';
 import remarkGfm from 'remark-gfm';
 import remarkMath from 'remark-math';
 import rehypeKatex from 'rehype-katex';
+import AppSelect from './app-select';
+import { sameHighlightLocation } from './highlight-location';
+import EditableNumber from './editable-number';
+import AppDialogs, { requestAppDialog } from './app-dialog';
+import { readingHistory, saveReadingPosition, forgetReadingPosition, type ReadingPosition } from './reading-history';
 import ActionTooltips from './action-tooltips';
 import LibrarySpotlight from './library-spotlight';
 import LibraryDashboard, { type LibraryPaper } from './library-dashboard';
@@ -68,6 +73,19 @@ const HIGHLIGHT_COLORS = [
   { color: '#bcdcf4', label: 'Blue', key: '3' },
   { color: '#e6c8ed', label: 'Purple', key: '4' },
 ] as const;
+const PROMPT_SUGGESTIONS = ['Summarize the main contribution', 'Explain the method step by step', 'What are the key limitations?'];
+const SHORTCUTS: Array<[string, string]> = [
+  ['1 – 4', 'Highlight a selection'],
+  ['C', 'Add selection to chat context'],
+  ['A', 'Quick Ask about a selection'],
+  ['N', 'Attach a note to a selection'],
+  ['Q', 'Quote selection in paper note'],
+  ['R', 'Capture a region of the page'],
+  ['⌘ / Ctrl Z', 'Undo highlight (⇧ to redo)'],
+  ['⌘ / Ctrl K', 'Search your library'],
+  ['⌘ / Ctrl ,', 'Open settings'],
+  ['⌘ / Ctrl scroll', 'Zoom the paper'],
+];
 const NOTE_COLORS = [
   { color: '#d6a629', label: 'Gold' },
   { color: '#5b9b72', label: 'Green' },
@@ -140,6 +158,13 @@ export default function Home() {
   const [chatConfigured, setChatConfigured] = useState<boolean | null>(null);
   const [paneMode, setPaneMode] = useState<PaneMode>('chat');
   const [pendingNoteQuote, setPendingNoteQuote] = useState<ContextSelection | null>(null);
+  const [currentPage, setCurrentPage] = useState(1);
+  const [shortcutsOpen, setShortcutsOpen] = useState(false);
+  const [sheetOpen, setSheetOpen] = useState(false);
+  const pendingReadingRef = useRef<ReadingPosition | null>(null);
+  const readyPagesRef = useRef(new Set<number>());
+  const readingSaveTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const pageTrackFrameRef = useRef<number | null>(null);
   const viewerRef = useRef<HTMLDivElement>(null);
   const workspaceRef = useRef<HTMLDivElement>(null);
   const resizingRef = useRef(false);
@@ -179,6 +204,47 @@ export default function Home() {
     const timer = window.setTimeout(() => setRasterZoom(zoom), 200);
     return () => window.clearTimeout(timer);
   }, [zoom]);
+
+  const persistReading = useCallback(() => {
+    const id = activePaperIdRef.current;
+    const viewer = viewerRef.current;
+    if (!id || !viewer || pendingReadingRef.current || !readyPagesRef.current.size) return;
+    const top = viewer.getBoundingClientRect().top + 12;
+    const stages = Array.from(viewer.querySelectorAll<HTMLElement>('[data-page-number]'));
+    const stage = stages.find((element) => element.getBoundingClientRect().bottom > top) ?? stages.at(-1);
+    if (!stage) return;
+    const rect = stage.getBoundingClientRect();
+    saveReadingPosition({ id, page: Number(stage.dataset.pageNumber), offset: Math.max(0, Math.min(1, (top - rect.top) / rect.height)), horizontal: viewer.scrollLeft / Math.max(1, viewer.scrollWidth - viewer.clientWidth), zoom: zoomRef.current, fit: fitZoomRef.current, readAt: Date.now() });
+  }, []);
+
+  useEffect(() => {
+    const save = () => persistReading();
+    window.addEventListener('pagehide', save);
+    document.addEventListener('visibilitychange', save);
+    return () => { window.removeEventListener('pagehide', save); document.removeEventListener('visibilitychange', save); if (readingSaveTimerRef.current) clearTimeout(readingSaveTimerRef.current); persistReading(); };
+  }, [persistReading]);
+
+  useEffect(() => {
+    const timer = window.setTimeout(persistReading, 300);
+    return () => window.clearTimeout(timer);
+  }, [zoom, persistReading]);
+
+  const pageReady = useCallback((page: number) => {
+    readyPagesRef.current.add(page);
+    const saved = pendingReadingRef.current;
+    if (!saved || !Array.from({ length: saved.page }, (_, index) => index + 1).every((item) => readyPagesRef.current.has(item))) return;
+    window.requestAnimationFrame(() => {
+      if (pendingReadingRef.current !== saved) return;
+      const viewer = viewerRef.current;
+      const stage = viewer?.querySelector<HTMLElement>(`[data-page-number="${saved.page}"]`);
+      if (!stage || !viewer) return;
+      const rect = stage.getBoundingClientRect();
+      viewer.scrollTop += rect.top + saved.offset * rect.height - viewer.getBoundingClientRect().top - 12;
+      viewer.scrollLeft = saved.horizontal * Math.max(0, viewer.scrollWidth - viewer.clientWidth);
+      pendingReadingRef.current = null;
+      setCurrentPage(saved.page);
+    });
+  }, []);
 
   const loadPapers = useCallback(async () => {
     try {
@@ -290,7 +356,7 @@ export default function Home() {
         event.preventDefault();
         if (target && target === focusButtonRef.current) target.blur();
         changeReadingMode(!focusReading);
-      } else if (event.key === 'Escape' && focusReading && !pendingSelection && !quickAskTarget && !noteEditor && !selectedAiNote && !screenshotMode && !screenshotSelection) {
+      } else if (event.key === 'Escape' && focusReading && !pendingSelection && !quickAskTarget && !noteEditor && !selectedAiNote && !screenshotMode && !screenshotSelection && !shortcutsOpen) {
         event.preventDefault();
         if (target && target === focusButtonRef.current) target.blur();
         changeReadingMode(false);
@@ -298,7 +364,7 @@ export default function Home() {
     };
     if (active) window.addEventListener('keydown', handleReadingKey);
     return () => window.removeEventListener('keydown', handleReadingKey);
-  }, [active, focusReading, changeReadingMode, pendingSelection, quickAskTarget, noteEditor, selectedAiNote, screenshotMode, screenshotSelection]);
+  }, [active, focusReading, changeReadingMode, pendingSelection, quickAskTarget, noteEditor, selectedAiNote, screenshotMode, screenshotSelection, shortcutsOpen]);
 
   function toggleNotes() {
     const opening = !notesVisibleRef.current;
@@ -355,7 +421,7 @@ export default function Home() {
   useLayoutEffect(() => {
     const viewer = viewerRef.current;
     if (!viewer || !active) return;
-    fitPaperToPane();
+    if (fitZoomRef.current) fitPaperToPane();
     const observer = new ResizeObserver(() => { if (fitZoomRef.current) fitPaperToPane(); });
     observer.observe(viewer);
     return () => observer.disconnect();
@@ -495,6 +561,7 @@ export default function Home() {
   const revealNewContext = useCallback(() => {
     changeReadingMode(false);
     setPaneMode('chat');
+    setSheetOpen(true);
     followOutputRef.current = true;
     focusComposerAfterContextRef.current = true;
   }, [changeReadingMode]);
@@ -566,7 +633,7 @@ export default function Home() {
   }
 
   async function deletePaper(paper: Paper) {
-    const confirmed = window.confirm(`Permanently delete “${paper.original_name}”?\n\nThis will remove the PDF, all chats, messages, highlights, and other data associated with this paper. This cannot be undone.`);
+    const confirmed = await requestAppDialog({ title: `Delete “${paper.original_name}”?`, message: 'This permanently removes the PDF and all its chats, highlights, and notes. This cannot be undone.', confirm: 'Delete paper', destructive: true });
     if (!confirmed) return;
     try {
       const response = await fetch(`${API_BASE}/api/documents/${paper.id}`, { method: 'DELETE' });
@@ -574,6 +641,7 @@ export default function Home() {
         const payload = await response.json().catch(() => ({}));
         throw new Error(payload.detail ?? 'Could not delete this paper.');
       }
+      forgetReadingPosition(paper.id);
       setPapers((current) => current.filter((item) => item.id !== paper.id));
       window.localStorage.removeItem(`adam.conversation.${paper.id}`);
       if (active?.id === paper.id) {
@@ -656,6 +724,12 @@ export default function Home() {
   }
 
   function openPaper(paper: Paper) {
+    persistReading();
+    const saved = readingHistory().find((item) => item.id === paper.id);
+    pendingReadingRef.current = saved ? { ...saved, page: Math.min(saved.page, Math.max(1, paper.page_count)) } : null;
+    readyPagesRef.current.clear();
+    fitZoomRef.current = saved?.fit ?? true;
+    saveReadingPosition(saved ? { ...saved, readAt: Date.now() } : { id: paper.id, page: 1, offset: 0, horizontal: 0, zoom: DEFAULT_ZOOM, fit: true, readAt: Date.now() });
     activePaperIdRef.current = paper.id;
     activeConversationIdRef.current = null;
     const loadId = ++paperLoadRef.current;
@@ -668,6 +742,8 @@ export default function Home() {
     setSelectedAiNote(null);
     changeReadingMode(false);
     setPages(0);
+    setCurrentPage(1);
+    setShortcutsOpen(false);
     setContextSelections([]);
     setPendingSelection(null);
     setNoteEditor(null);
@@ -691,14 +767,17 @@ export default function Home() {
     setActiveConversation(null);
     setHistoryOpen(false);
     setStreamStatus('idle');
-    zoomRef.current = DEFAULT_ZOOM;
-    setZoom(DEFAULT_ZOOM);
+    zoomRef.current = saved?.zoom ?? DEFAULT_ZOOM;
+    setZoom(zoomRef.current);
+    setRasterZoom(zoomRef.current);
     setError('');
     void loadAnnotations(paper.id);
     void loadConversations(paper.id, loadId);
   }
 
   function returnToLibrary() {
+    persistReading();
+    pendingReadingRef.current = null;
     changeReadingMode(false);
     activePaperIdRef.current = null;
     activeConversationIdRef.current = null;
@@ -766,7 +845,7 @@ export default function Home() {
   }
 
   async function deleteConversation(conversation: Conversation) {
-    if (!window.confirm(`Delete “${conversation.title}”?`)) return;
+    if (!await requestAppDialog({ title: `Delete “${conversation.title}”?`, message: 'This conversation will be permanently removed.', confirm: 'Delete chat', destructive: true })) return;
     const response = await fetch(`${API_BASE}/api/conversations/${conversation.id}`, { method: 'DELETE' });
     if (!response.ok) { setError('Could not delete this chat.'); return; }
     setSelectedAiNote(null);
@@ -826,7 +905,7 @@ export default function Home() {
   }, [papers]);
 
 
-  function captureSelection(event: React.MouseEvent<HTMLDivElement>) {
+  function captureSelection() {
     const domSelection = window.getSelection();
     const text = domSelection?.toString().trim();
     if (!text || !viewerRef.current?.contains(domSelection?.anchorNode ?? null)) {
@@ -835,11 +914,13 @@ export default function Home() {
     }
     const range = domSelection!.getRangeAt(0).cloneRange();
     const rect = range.getBoundingClientRect();
-    const pageElement = (event.target as HTMLElement).closest<HTMLElement>('[data-page-number]');
-    const page = pageElement ? Number(pageElement.dataset.pageNumber) : null;
-    // Selecting an existing plain highlight toggles it off. Notes and linked AI
-    // anchors are persistent records and must never be deleted by selection.
-    const existing = highlightEntriesRef.current.find((item) => !item.note_text && !item.ai_links?.length && item.page === page && (item.text === text || (item.range && item.range.startContainer === range.startContainer && item.range.startOffset === range.startOffset && item.range.endContainer === range.endContainer && item.range.endOffset === range.endOffset)));
+    const anchor = range.startContainer.nodeType === Node.ELEMENT_NODE ? range.startContainer as Element : range.startContainer.parentElement;
+    const pageElement = anchor?.closest<HTMLElement>('.react-pdf__Page');
+    const page = Number(pageElement?.closest<HTMLElement>('[data-page-number]')?.dataset.pageNumber) || null;
+    const selected = { page, text, rects: pageElement ? getHighlightRects(range, pageElement) : [] };
+    // Toggle only the same passage location, including after a reload. Equal
+    // words elsewhere are separate highlights; notes and links are never toggled.
+    const existing = highlightEntriesRef.current.find((item) => !item.note_text && !item.ai_links?.length && sameHighlightLocation(item, selected));
     if (existing) {
       commitHighlights(highlightEntriesRef.current.filter((item) => item.id !== existing.id));
       clearBrowserSelection();
@@ -852,6 +933,20 @@ export default function Home() {
     window.getSelection()?.removeAllRanges();
     setPendingSelection(null);
   }
+
+  useEffect(() => {
+    if (!pendingSelection && !screenshotSelection) return;
+    const dismissSelection = (event: PointerEvent) => {
+      if (event.target instanceof Element && event.target.closest('.selection-toolbar')) return;
+      // Dismiss before the browser handles the next click, even if it lands
+      // inside the selected text. Do not prevent a new drag selection or action.
+      window.getSelection()?.removeAllRanges();
+      setPendingSelection(null);
+      setScreenshotSelection(null);
+    };
+    document.addEventListener('pointerdown', dismissSelection, true);
+    return () => document.removeEventListener('pointerdown', dismissSelection, true);
+  }, [pendingSelection, screenshotSelection]);
 
   async function addSelectionToContext() {
     if (!pendingSelection) return;
@@ -1097,14 +1192,10 @@ export default function Home() {
   useEffect(() => {
     const handleScreenshotHotkey = (event: KeyboardEvent) => {
       const target = event.target as HTMLElement | null;
-      if (event.repeat || event.metaKey || event.ctrlKey || event.altKey || target?.isContentEditable || target?.matches('input, textarea, select')) return;
+      if (event.defaultPrevented || event.repeat || event.metaKey || event.ctrlKey || event.altKey || target?.isContentEditable || target?.matches('input, textarea, select')) return;
       if (event.key.toLowerCase() === 'r') {
         event.preventDefault();
-        clearBrowserSelection();
-        setScreenshotSelection(null);
-        setScreenshotDrag(null);
-        screenshotPointerRef.current = null;
-        setScreenshotMode(true);
+        startScreenshotMode();
       } else if (event.key === 'Escape' && screenshotMode) {
         event.preventDefault();
         setScreenshotDrag(null);
@@ -1115,6 +1206,49 @@ export default function Home() {
     window.addEventListener('keydown', handleScreenshotHotkey);
     return () => window.removeEventListener('keydown', handleScreenshotHotkey);
   });
+
+  function startScreenshotMode() {
+    clearBrowserSelection();
+    setScreenshotSelection(null);
+    setScreenshotDrag(null);
+    screenshotPointerRef.current = null;
+    setScreenshotMode(true);
+  }
+
+  function cancelScreenshotMode() {
+    setScreenshotDrag(null);
+    screenshotPointerRef.current = null;
+    setScreenshotMode(false);
+  }
+
+  function trackCurrentPage() {
+    if (pageTrackFrameRef.current !== null) return;
+    pageTrackFrameRef.current = window.requestAnimationFrame(() => {
+      pageTrackFrameRef.current = null;
+      const viewer = viewerRef.current;
+      if (!viewer) return;
+      // Match the saved reading anchor, including when several pages fit onscreen.
+      const readingLine = viewer.getBoundingClientRect().top + 12;
+      const stages = Array.from(viewer.querySelectorAll<HTMLElement>('[data-page-number]'));
+      const stage = stages.find((item) => item.getBoundingClientRect().bottom > readingLine) ?? stages.at(-1);
+      const page = Number(stage?.dataset.pageNumber ?? 1);
+      if (!pendingReadingRef.current) {
+        setCurrentPage(page);
+        if (readingSaveTimerRef.current) clearTimeout(readingSaveTimerRef.current);
+        readingSaveTimerRef.current = setTimeout(persistReading, 250);
+      }
+    });
+  }
+
+  function goToPage(page: number) {
+    const viewer = viewerRef.current;
+    if (!viewer || !Number.isInteger(page) || page < 1 || page > pages) return;
+    const target = viewer.querySelector<HTMLElement>(`[data-page-number="${page}"]`);
+    if (!target) return;
+    viewer.scrollTop += target.getBoundingClientRect().top - viewer.getBoundingClientRect().top - 12;
+    setCurrentPage(page);
+    persistReading();
+  }
 
   function beginScreenshot(event: React.PointerEvent<HTMLElement>) {
     if (!screenshotMode || event.button !== 0) return;
@@ -1226,7 +1360,7 @@ export default function Home() {
     if (!screenshotSelection) return;
     const handleScreenshotSelectionHotkey = (event: KeyboardEvent) => {
       const target = event.target as HTMLElement | null;
-      if (event.repeat || event.metaKey || event.ctrlKey || event.altKey || target?.isContentEditable || target?.matches('input, textarea, select')) return;
+      if (event.defaultPrevented || event.repeat || event.metaKey || event.ctrlKey || event.altKey || target?.isContentEditable || target?.matches('input, textarea, select')) return;
       if (event.key.toLowerCase() === 'c') {
         event.preventDefault();
         addScreenshotToContext();
@@ -1314,7 +1448,7 @@ export default function Home() {
     if (!active || !noteEditor || noteSaving) return;
     const existing = highlightEntriesRef.current.some((item) => item.id === noteEditor.entry.id);
     if (!existing) { setNoteEditor(null); return; }
-    if (!window.confirm('Delete this note?')) return;
+    if (!await requestAppDialog({ title: 'Delete this note?', confirm: 'Delete note', destructive: true })) return;
     setNoteSaving(true);
     try {
       const response = await fetch(`${API_BASE}/api/documents/${active.id}/annotations/${noteEditor.entry.id}`, { method: 'DELETE' });
@@ -1414,7 +1548,7 @@ export default function Home() {
     if (!pendingSelection) return;
     const handleSelectionHotkey = (event: KeyboardEvent) => {
       const target = event.target as HTMLElement | null;
-      if (event.repeat || event.metaKey || event.ctrlKey || event.altKey || target?.isContentEditable || target?.matches('input, textarea, select')) return;
+      if (event.defaultPrevented || event.repeat || event.metaKey || event.ctrlKey || event.altKey || target?.isContentEditable || target?.matches('input, textarea, select')) return;
       const highlight = HIGHLIGHT_COLORS.find((item) => item.key === event.key);
       if (highlight) {
         event.preventDefault();
@@ -1535,6 +1669,7 @@ export default function Home() {
   const canAsk = chatConfigured !== false && Boolean(activeConversation);
   if (!active) return (<>
     <ActionTooltips />
+    <AppDialogs />
     <LibraryDashboard key={libraryNavigation} onSearch={() => setPaperSearchOpen(true)} papers={papers} loading={libraryLoading} uploading={uploading} error={error} brand={<Brand />} settings={<SettingsButton onClick={() => setSettingsOpen(true)} />} preview={(paper) => <PaperPreview paper={paper} />} onOpen={(paper) => openPaper(paper)} onUpload={upload} onDelete={(paper) => deletePaper(paper)} onUpdate={(updated) => setPapers((current) => current.map((paper) => updated.find((item) => item.id === paper.id) ?? paper))} />
     {settingsOpen && <SettingsDialog onClose={closeSettings} />}
     {paperSearchOpen && <LibrarySpotlight onBrowseFolder={(folderId) => { window.localStorage.setItem('adam.libraryLocation', folderId); setLibraryNavigation((value) => value + 1); setPaperSearchOpen(false); returnToLibrary(); }} papers={papers} onClose={() => setPaperSearchOpen(false)} onOpen={(paper) => { setPaperSearchOpen(false); openPaper(paper); }} />}
@@ -1543,31 +1678,33 @@ export default function Home() {
   return (
     <main className={`reader-shell${focusReading ? ' focus-reading' : ''}`}>
       <ActionTooltips />
-      <header className="reader-header"><button className="brand-button" onClick={returnToLibrary} aria-label="Back to library"><Brand /></button><div className="document-title">{renaming ? <form onSubmit={(event) => void renamePaper(event)}><input autoFocus aria-label="PDF filename" value={renameValue} maxLength={512} onChange={(event) => setRenameValue(event.target.value)} onKeyDown={(event) => { if (event.key === 'Escape') setRenaming(false); }} disabled={renameSaving} /><button type="submit" disabled={!renameValue.trim() || renameSaving}>{renameSaving ? 'Saving…' : 'Save'}</button></form> : <button type="button" className="document-title-button" title="Rename PDF" onClick={() => { setRenameValue(active.original_name.replace(/\.pdf$/i, '')); setRenaming(true); }}><strong>{active.original_name.replace(/\.pdf$/i, '')}</strong><span aria-hidden="true">✎</span></button>}<span>{pages || active.page_count} pages · local</span></div><div className="reader-header-tools"><button type="button" ref={focusButtonRef} className="focus-reading-button" aria-pressed={focusReading} aria-keyshortcuts="F" title={focusReading ? 'Exit focus reading · Esc' : 'Focus reading · F'} onClick={() => changeReadingMode(!focusReading)}><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.7" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true"><path d={focusReading ? 'M4 9h5V4m11 5h-5V4M4 15h5v5m11-5h-5v5' : 'M9 4H4v5m11-5h5v5M4 15v5h5m11-5v5h-5'} /></svg><span>{focusReading ? 'Exit focus' : 'Focus reading'}</span><kbd>{focusReading ? 'Esc' : 'F'}</kbd></button><button type="button" className={`note-view-button${notesVisible ? ' active' : ''}`} onClick={toggleNotes} title={notesVisible ? 'Hide anchored notes' : 'View anchored notes'}><span>▰</span>{notesVisible ? 'Hide notes' : 'View notes'}<strong>{highlightEntries.filter((entry) => entry.note_text).length}</strong></button><div className="paper-zoom"><span className="control-label">Paper</span><div className="header-actions" role="group" aria-label="Paper zoom"><button title="Zoom paper out" aria-label="Zoom paper out" disabled={zoom <= MIN_ZOOM} onClick={() => changeZoom(zoom * (1 / 1.2 - 1))}>−</button><button className="zoom-reset" title="Reset paper zoom to 100%" aria-label="Reset paper zoom to 100%" onClick={() => changeZoom(1 - zoomRef.current)}>{Math.round(zoom * 100)}%</button><button title="Zoom paper in" aria-label="Zoom paper in" disabled={zoom >= MAX_ZOOM} onClick={() => changeZoom(zoom * .2)}>+</button><button className="zoom-fit" title="Fit paper to pane" aria-label="Fit paper to pane" onClick={fitPaperToPane}>Fit</button></div></div><button type="button" className="reader-delete-button" aria-label="Delete paper" title="Delete paper" onClick={() => void deletePaper(active)}><TrashIcon /></button><SettingsButton compact onClick={() => setSettingsOpen(true)} /></div></header>
+      <AppDialogs />
+      <header className="reader-header"><div className="reader-header-start"><button className="brand-button reader-back" onClick={returnToLibrary} aria-label="Back to library" data-tooltip="Back to your library"><UiIcon kind="back" /><span className="brand-mark" aria-hidden="true">A</span><span className="reader-back-label">Library</span></button></div><div className="document-title">{renaming ? <form onSubmit={(event) => void renamePaper(event)}><input autoFocus aria-label="PDF filename" value={renameValue} maxLength={512} onChange={(event) => setRenameValue(event.target.value)} onKeyDown={(event) => { if (event.key === 'Escape') setRenaming(false); }} disabled={renameSaving} /><button type="submit" disabled={!renameValue.trim() || renameSaving}>{renameSaving ? 'Saving…' : 'Save'}</button></form> : <button type="button" className="document-title-button" title="Rename PDF" onClick={() => { setRenameValue(active.original_name.replace(/\.pdf$/i, '')); setRenaming(true); }}><strong>{active.original_name.replace(/\.pdf$/i, '')}</strong><span aria-hidden="true">✎</span></button>}<span>{pages || active.page_count} pages · stored locally</span></div><div className="reader-header-tools"><button type="button" ref={focusButtonRef} className="focus-reading-button" aria-pressed={focusReading} aria-keyshortcuts="F" title={focusReading ? 'Exit focus reading · Esc' : 'Focus reading · F'} onClick={() => changeReadingMode(!focusReading)}><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.7" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true"><path d={focusReading ? 'M4 9h5V4m11 5h-5V4M4 15h5v5m11-5h-5v5' : 'M9 4H4v5m11-5h5v5M4 15v5h5m11-5v5h-5'} /></svg><span>{focusReading ? 'Exit focus' : 'Focus reading'}</span><kbd>{focusReading ? 'Esc' : 'F'}</kbd></button><button type="button" className={`note-view-button${notesVisible ? ' active' : ''}`} onClick={toggleNotes} data-tooltip={notesVisible ? 'Hide anchored notes beside the pages' : 'Show anchored notes beside the pages'} aria-pressed={notesVisible}><UiIcon kind="note" /><span className="note-view-label">{notesVisible ? 'Hide notes' : 'Notes'}</span><strong>{highlightEntries.filter((entry) => entry.note_text).length}</strong></button><button type="button" className="reader-delete-button" aria-label="Delete paper" data-tooltip="Permanently delete this paper" onClick={() => void deletePaper(active)}><TrashIcon /></button><SettingsButton compact onClick={() => setSettingsOpen(true)} /></div></header>
       <div className={`reader-workspace${notesVisible && !focusReading ? ' notes-mode' : ''}`} ref={workspaceRef} style={{ gridTemplateColumns: `minmax(0, ${paperPercent}fr) minmax(340px, ${100 - paperPercent}fr)` }}>
-        <section className={`pdf-pane${screenshotMode ? ' screenshot-mode' : ''}`} ref={viewerRef} onMouseUp={(event) => { if (!screenshotMode) captureSelection(event); }} onPointerDown={beginScreenshot} onPointerMove={moveScreenshot} onPointerUp={finishScreenshot} onPointerCancel={() => { screenshotPointerRef.current = null; setScreenshotDrag(null); setScreenshotMode(false); }}>
-          <PdfDocument file={`${API_BASE}/api/documents/${active.id}/file`} onLoadSuccess={({ numPages }) => setPages(numPages)} loading={<div className="viewer-message">Rendering paper…</div>} error={<div className="viewer-message error-banner">Could not render this PDF.</div>}>
-            {Array.from({ length: pages }, (_, index) => { const pageEntries = highlightEntries.filter((entry) => entry.page === index + 1); const pageNotes = pageEntries.filter((entry) => entry.note_text).sort(compareNotePosition); const aiNotes = pageEntries.filter((entry) => entry.ai_links?.length).sort(compareNotePosition); const markers = pageEntries.filter((entry) => entry.note_text || entry.ai_links?.length).sort(compareNotePosition); const pageScale = zoom / BASE_RENDER_SCALE; return <div className="pdf-page-stage" data-page-number={index + 1} key={index + 1}><div className="pdf-page-wrap" style={{ zoom: pageScale, '--page-scale': pageScale } as CSSProperties}><PdfPageWithHighlights pageNumber={index + 1} highlights={pageEntries} zoom={rasterZoom} />{pageEntries.filter((entry) => entry.id === revealedLinkId).map((entry) => <LinkedPassageReveal key={`${entry.id}-${linkRevealVersion}`} entry={entry} viewerRef={viewerRef} />)}{aiNotes.map((note) => <button type="button" className="ai-note-anchor" style={{ top: `${noteMarkerTop(markers, markers.indexOf(note)) * 100}%` }} title={`${note.ai_links!.length} linked AI ${note.ai_links!.length === 1 ? 'note' : 'notes'}`} aria-label="Open linked AI notes" onClick={() => { changeReadingMode(false); setPaneMode('links'); setSelectedAiNote(note); }} key={`ai-${note.id}`}>✦<small>{note.ai_links!.length}</small></button>)}{(!notesVisible || focusReading) && pageNotes.map((note) => <button type="button" className="note-anchor" style={{ top: `${noteMarkerTop(markers, markers.indexOf(note)) * 100}%`, '--note-color': note.color } as CSSProperties} title="Open note" aria-label="Open note" onClick={() => openSavedNote(note)} key={note.id}>▰</button>)}{notesVisible && !focusReading && <aside className="page-notes" aria-label={`Notes for page ${index + 1}`}>{pageNotes.map((note, noteIndex) => <button type="button" className="page-note-card" style={{ top: `${noteCardTop(pageNotes, noteIndex) * 100}%`, '--note-color': note.color } as CSSProperties} onClick={() => openSavedNote(note)} key={note.id}><span>Page {index + 1}</span><p>{note.note_text}</p><small>{note.text}</small></button>)}</aside>}<span className="page-label">{index + 1}</span></div></div>; })}
+        <section className={`pdf-pane${screenshotMode ? ' screenshot-mode' : ''}`} ref={viewerRef} onScroll={trackCurrentPage} onMouseUp={() => { if (!screenshotMode) captureSelection(); }} onPointerDown={beginScreenshot} onPointerMove={moveScreenshot} onPointerUp={finishScreenshot} onPointerCancel={() => { screenshotPointerRef.current = null; setScreenshotDrag(null); setScreenshotMode(false); }}>
+          <PdfDocument key={active.id} file={`${API_BASE}/api/documents/${active.id}/file`} onLoadSuccess={({ numPages }) => setPages(numPages)} loading={<div className="viewer-message">Rendering paper…</div>} error={<div className="viewer-message error-banner">Could not render this PDF.</div>}>
+            {Array.from({ length: pages }, (_, index) => { const pageEntries = highlightEntries.filter((entry) => entry.page === index + 1); const pageNotes = pageEntries.filter((entry) => entry.note_text).sort(compareNotePosition); const aiNotes = pageEntries.filter((entry) => entry.ai_links?.length).sort(compareNotePosition); const markers = pageEntries.filter((entry) => entry.note_text || entry.ai_links?.length).sort(compareNotePosition); const pageScale = zoom / BASE_RENDER_SCALE; return <div className="pdf-page-stage" data-page-number={index + 1} key={index + 1}><div className="pdf-page-wrap" style={{ zoom: pageScale, '--page-scale': pageScale } as CSSProperties}><PdfPageWithHighlights pageNumber={index + 1} highlights={pageEntries} zoom={rasterZoom} onReady={pageReady} />{pageEntries.filter((entry) => entry.id === revealedLinkId).map((entry) => <LinkedPassageReveal key={`${entry.id}-${linkRevealVersion}`} entry={entry} viewerRef={viewerRef} />)}{aiNotes.map((note) => <button type="button" className="ai-note-anchor" style={{ top: `${noteMarkerTop(markers, markers.indexOf(note)) * 100}%` }} title={`${note.ai_links!.length} linked AI ${note.ai_links!.length === 1 ? 'note' : 'notes'}`} aria-label="Open linked AI notes" onClick={() => { changeReadingMode(false); setPaneMode('links'); setSelectedAiNote(note); }} key={`ai-${note.id}`}>✦<small>{note.ai_links!.length}</small></button>)}{(!notesVisible || focusReading) && pageNotes.map((note) => <button type="button" className="note-anchor" style={{ top: `${noteMarkerTop(markers, markers.indexOf(note)) * 100}%`, '--note-color': note.color } as CSSProperties} title="Open note" aria-label="Open note" onClick={() => openSavedNote(note)} key={note.id}>▰</button>)}{notesVisible && !focusReading && <aside className="page-notes" aria-label={`Notes for page ${index + 1}`}>{pageNotes.map((note, noteIndex) => <button type="button" className="page-note-card" style={{ top: `${noteCardTop(pageNotes, noteIndex) * 100}%`, '--note-color': note.color } as CSSProperties} onClick={() => openSavedNote(note)} key={note.id}><span>Page {index + 1}</span><p>{note.note_text}</p><small>{note.text}</small></button>)}</aside>}<span className="page-label">{index + 1}</span></div></div>; })}
           </PdfDocument>
           {screenshotMode && !screenshotDrag && <div className="screenshot-hint">Drag over the PDF to ask about it · Esc to cancel</div>}
           {screenshotDrag && <div className="screenshot-region" style={{ left: screenshotDrag.overlayLeft, top: screenshotDrag.overlayTop, width: screenshotDrag.overlayWidth, height: screenshotDrag.overlayHeight }} />}
         </section>
+        <div className="reader-dock" style={{ '--dock-center': `${focusReading ? 50 : paperPercent / 2}%` } as CSSProperties} role="toolbar" aria-label="Reading controls"><div className="dock-group dock-pages"><button type="button" aria-label="Previous page" data-tooltip="Previous page" disabled={currentPage <= 1} onClick={() => goToPage(currentPage - 1)}>‹</button><span><EditableNumber label="Page number" value={currentPage} min={1} max={pages || active.page_count} integer disabled={!pages} onChange={goToPage} /><small>/ {pages || active.page_count}</small></span><button type="button" aria-label="Next page" data-tooltip="Next page" disabled={!pages || currentPage >= pages} onClick={() => goToPage(currentPage + 1)}>›</button></div><div className="dock-group header-actions" role="group" aria-label="Paper zoom"><button data-tooltip="Zoom paper out" aria-label="Zoom paper out" disabled={zoom <= MIN_ZOOM} onClick={() => changeZoom(zoom * (1 / 1.2 - 1))}>−</button><EditableNumber label="Paper zoom percentage" value={Math.round(zoom * 100)} min={MIN_ZOOM * 100} max={MAX_ZOOM * 100} suffix="%" onChange={(value) => { changeZoom(value / 100 - zoomRef.current); requestAnimationFrame(persistReading); }} /><button data-tooltip="Zoom paper in" aria-label="Zoom paper in" disabled={zoom >= MAX_ZOOM} onClick={() => changeZoom(zoom * .2)}>+</button><button className="zoom-fit" data-tooltip="Fit paper to pane" aria-label="Fit paper to pane" onClick={fitPaperToPane}>Fit</button></div><button type="button" className={`dock-tool${screenshotMode ? ' active' : ''}`} aria-pressed={screenshotMode} data-tooltip={screenshotMode ? 'Cancel region capture (Esc)' : 'Drag over a figure or equation to ask about it (R)'} onClick={() => screenshotMode ? cancelScreenshotMode() : startScreenshotMode()}><UiIcon kind="region" /><span>Region</span><kbd>R</kbd></button><button type="button" className={`dock-tool dock-help${shortcutsOpen ? ' active' : ''}`} aria-label="Keyboard shortcuts" aria-expanded={shortcutsOpen} data-tooltip="Keyboard shortcuts" onClick={() => setShortcutsOpen((open) => !open)}>?</button>{shortcutsOpen && <ShortcutSheet onClose={() => setShortcutsOpen(false)} />}</div>
         <div className="pane-resizer" hidden={focusReading} style={{ left: `${paperPercent}%` }} role="separator" aria-label="Resize paper and chat panes" aria-orientation="vertical" aria-valuemin={MIN_PAPER_PERCENT} aria-valuemax={80} aria-valuenow={Math.round(paperPercent)} tabIndex={0} onPointerDown={beginWorkspaceResize} onPointerMove={moveWorkspaceResize} onPointerUp={finishWorkspaceResize} onPointerCancel={() => { resizingRef.current = false; }} onDoubleClick={resetWorkspaceResize}><span /></div>
-        <aside className="side-pane" inert={focusReading} aria-hidden={focusReading} style={{ '--chat-scale': chatScale } as CSSProperties}>
-          <div className="mode-tabs"><div className="tab-list"><button type="button" className={paneMode === 'chat' ? 'active' : ''} onClick={() => setPaneMode('chat')}>Chat</button><button type="button" className={paneMode === 'notes' ? 'active' : ''} onClick={() => setPaneMode('notes')}>Notes</button><button type="button" className={paneMode === 'links' ? 'active links-tab' : 'links-tab'} aria-pressed={paneMode === 'links'} onClick={() => setPaneMode('links')}>Chat links<span>{highlightEntries.reduce((count, entry) => count + (entry.ai_links?.length ?? 0), 0)}</span></button></div>{paneMode === 'chat' && <div className="chat-text-controls" role="group" aria-label="Chat text size"><span className="control-label">Text size</span><div><button type="button" aria-label="Decrease chat text size" title="Decrease chat text size" disabled={chatScale <= MIN_CHAT_SCALE} onClick={() => changeChatScale(-CHAT_SCALE_STEP)}>A−</button><output aria-live="polite" aria-label={`Chat text size ${Math.round(chatScale * 100)} percent`}>{Math.round(chatScale * 100)}%</output><button type="button" aria-label="Increase chat text size" title="Increase chat text size" disabled={chatScale >= MAX_CHAT_SCALE} onClick={() => changeChatScale(CHAT_SCALE_STEP)}>A+</button></div></div>}</div>
+        <aside className={`side-pane${sheetOpen ? ' sheet-open' : ''}`} inert={focusReading} aria-hidden={focusReading} style={{ '--chat-scale': chatScale } as CSSProperties}>
+          <div className="mode-tabs"><button type="button" className="sheet-toggle" aria-expanded={sheetOpen} aria-label={sheetOpen ? 'Collapse assistant panel' : 'Expand assistant panel'} onClick={() => setSheetOpen((open) => !open)}><i aria-hidden="true" /></button><div className="tab-list"><button type="button" className={paneMode === 'chat' ? 'active' : ''} onClick={() => { setPaneMode('chat'); setSheetOpen(true); }}><UiIcon kind="chat" />Chat</button><button type="button" className={paneMode === 'notes' ? 'active' : ''} onClick={() => { setPaneMode('notes'); setSheetOpen(true); }}><UiIcon kind="pen" />Notes</button><button type="button" className={paneMode === 'links' ? 'active links-tab' : 'links-tab'} aria-pressed={paneMode === 'links'} onClick={() => { setPaneMode('links'); setSheetOpen(true); }}><UiIcon kind="link" />Links<span>{highlightEntries.reduce((count, entry) => count + (entry.ai_links?.length ?? 0), 0)}</span></button></div>{paneMode === 'chat' && <div className="chat-text-controls" role="group" aria-label="Chat text size"><span className="control-label">Text</span><div><button type="button" aria-label="Decrease chat text size" title="Decrease chat text size" disabled={chatScale <= MIN_CHAT_SCALE} onClick={() => changeChatScale(-CHAT_SCALE_STEP)}>A−</button><EditableNumber label="Text zoom percentage" value={Math.round(chatScale * 100)} min={MIN_CHAT_SCALE * 100} max={MAX_CHAT_SCALE * 100} suffix="%" onChange={(value) => setChatScale(value / 100)} /><button type="button" aria-label="Increase chat text size" title="Increase chat text size" disabled={chatScale >= MAX_CHAT_SCALE} onClick={() => changeChatScale(CHAT_SCALE_STEP)}>A+</button></div></div>}</div>
           {paneMode === 'links' ? <ChatLinksPanel key={active.id} entries={highlightEntries} conversations={conversations} activeConversationId={activeConversation?.id} revealedLinkId={revealedLinkId} onShowInPdf={showLinkInPdf} onOpen={openAiConversation} /> : paneMode === 'notes' ? <PaperNoteEditor documentId={active.id} paperName={active.original_name.replace(/\.pdf$/i, '')} pendingQuote={pendingNoteQuote} onQuoteConsumed={() => setPendingNoteQuote(null)} /> : historyOpen ? <section className="history-view">
             <div className="history-header"><div><p>Conversations</p><h2>Chat history</h2><span>{conversations.length} saved for this paper</span></div><button type="button" onClick={() => setHistoryOpen(false)} aria-label="Close chat history">×</button></div>
             <button type="button" className="new-chat-card" onClick={() => void createNewConversation()}><span>＋</span><div><strong>Start a new chat</strong><small>Uses your current default model</small></div><i>→</i></button>
             <div className="history-list">{conversations.map((item) => <article className={`history-card${item.id === activeConversation?.id ? ' current' : ''}`} key={item.id}>{renamingChatId === item.id ? <form className="chat-title-form history-title-form" onSubmit={(event) => void renameConversation(event, item)}><input autoFocus value={chatTitleValue} maxLength={200} aria-label="Chat title" onChange={(event) => setChatTitleValue(event.target.value)} onKeyDown={(event) => { if (event.key === 'Escape') setRenamingChatId(null); }} /><button type="submit" disabled={!chatTitleValue.trim() || titleSaving}>Save</button><button type="button" onClick={() => setRenamingChatId(null)}>Cancel</button></form> : <button type="button" className="history-card-main" onClick={() => void openConversation(item)}><div className="history-card-top"><span className="history-model-mark">✦</span><time>{formatConversationDate(item.updated_at)}</time></div><strong>{item.title}</strong><p>{item.provider} · {item.model_id}</p><div className="history-card-meta"><span>{Math.ceil(item.message_count / 2)} {Math.ceil(item.message_count / 2) === 1 ? 'exchange' : 'exchanges'}</span><span>{item.context_builder_version === 'quick-ask-v1' ? 'Selection only' : 'Full paper'}</span>{item.id === activeConversation?.id && <em>Current</em>}</div></button>}<div className="history-card-actions"><button type="button" aria-label={`Rename ${item.title}`} title="Rename chat" onClick={() => beginChatRename(item)}>✎</button>{item.message_count > 0 && <button type="button" aria-label={`Regenerate title for ${item.title}`} title="Regenerate title with the model selected in Settings" disabled={titleSaving} onClick={() => void regenerateConversationTitle(item)}>↻</button>}<button type="button" className="history-delete" aria-label={`Delete ${item.title}`} title="Delete chat" onClick={() => void deleteConversation(item)}><TrashIcon /></button></div></article>)}</div>
           </section> : <>
-            <div className="conversation-header"><div>{activeConversation && renamingChatId === activeConversation.id ? <form className="chat-title-form" onSubmit={(event) => void renameConversation(event, activeConversation)}><input autoFocus value={chatTitleValue} maxLength={200} aria-label="Chat title" onChange={(event) => setChatTitleValue(event.target.value)} onKeyDown={(event) => { if (event.key === 'Escape') setRenamingChatId(null); }} /><button type="submit" disabled={!chatTitleValue.trim() || titleSaving}>Save</button></form> : <button type="button" className="chat-title-button" title="Rename chat" onClick={() => activeConversation && beginChatRename(activeConversation)}><strong>{activeConversation?.title ?? 'Loading chat…'}</strong><span>✎</span></button>}<small>{activeConversation ? `${activeConversation.provider} · ${activeConversation.model_id}` : 'Preparing paper context'}</small></div><div className="conversation-actions">{activeConversation && activeConversation.message_count > 0 && <button type="button" disabled={titleSaving} onClick={() => void regenerateConversationTitle(activeConversation)} title="Regenerate title with the model selected in Settings"><span>↻</span> Title</button>}<button type="button" onClick={() => void createNewConversation()} title="Start a new chat"><span>＋</span> New</button><button type="button" onClick={() => setHistoryOpen(true)}><span>☰</span> History</button></div></div>
+            <div className="conversation-header"><div>{activeConversation && renamingChatId === activeConversation.id ? <form className="chat-title-form" onSubmit={(event) => void renameConversation(event, activeConversation)}><input autoFocus value={chatTitleValue} maxLength={200} aria-label="Chat title" onChange={(event) => setChatTitleValue(event.target.value)} onKeyDown={(event) => { if (event.key === 'Escape') setRenamingChatId(null); }} /><button type="submit" disabled={!chatTitleValue.trim() || titleSaving}>Save</button></form> : <button type="button" className="chat-title-button" title="Rename chat" onClick={() => activeConversation && beginChatRename(activeConversation)}><strong>{activeConversation?.title ?? 'Loading chat…'}</strong><span>✎</span></button>}<small>{activeConversation ? `${activeConversation.provider} · ${activeConversation.model_id}` : 'Preparing paper context'}</small></div><div className="conversation-actions">{activeConversation && activeConversation.message_count > 0 && <button type="button" disabled={titleSaving} onClick={() => void regenerateConversationTitle(activeConversation)} title="Regenerate title with the model selected in Settings"><UiIcon kind="refresh" /><span>Title</span></button>}<button type="button" onClick={() => void createNewConversation()} title="Start a new chat"><UiIcon kind="plus" /><span>New</span></button><button type="button" onClick={() => setHistoryOpen(true)} title="Browse chats for this paper"><UiIcon kind="history" /><span>History</span></button></div></div>
             <div className="chat-body" ref={chatBodyRef} onWheelCapture={(event) => { if (event.deltaY < 0) pauseChatFollow(); }} onTouchMove={pauseChatFollow} onPointerDown={(event) => { if (event.target === event.currentTarget) pauseChatFollow(); }} onScroll={(event) => { const element = event.currentTarget; followOutputRef.current = element.scrollHeight - element.scrollTop - element.clientHeight < 40; }}><div className="chat-heading"><span className="spark">✦</span><div><strong>{activeConversation?.context_builder_version === 'quick-ask-v1' ? 'Saved Quick Ask' : 'Ask about this paper'}</strong><p>{activeConversation?.context_builder_version === 'quick-ask-v1' ? 'This saved thread uses only its original selection and Quick Ask prompt.' : 'The full paper is available automatically. Select text only when you want to focus the answer.'}</p></div></div>{chatConfigured === false && <button type="button" className="no-key-notice" onClick={() => setSettingsOpen(true)}><strong>No API key configured</strong><span>Choose a provider and add a key in Settings to enable chat.</span></button>}
               {chatHistory.map((turn) => <div className={`chat-turn${linkedTurn?.conversationId === activeConversation?.id && linkedTurn?.question === turn.question ? ' linked-turn' : ''}`} data-question={turn.question} tabIndex={-1} key={turn.id}>{turn.importedQuickAsk && <div className="quick-import-badge">✦ Saved Quick Ask · selection only</div>}<ContextList selections={turn.context} />{activeConversation && turn.context.some((item) => item.rects?.length) && <button type="button" className={`turn-link-button${isAiLinked(activeConversation.id, turn.question) ? ' linked' : ''}`} onClick={() => void toggleAiLink(activeConversation, turn.question, turn.context)}>{isAiLinked(activeConversation.id, turn.question) ? '✦ Linked to PDF · click to unlink' : '✦ Link reference to PDF'}</button>}<div className="user-message"><span>You</span><p>{turn.question}</p></div><div className="answer-card complete"><div className="answer-meta"><span>Adam</span><span className="stream-state">Done</span></div><MarkdownAnswer web={turn.web}>{turn.answer}</MarkdownAnswer><WebEvidence web={turn.web} /></div></div>)}
               {submittedQuestion && <><ContextList selections={submittedContext} />{activeConversation && streamStatus === 'complete' && submittedContext.some((item) => item.rects?.length) && <button type="button" className={`turn-link-button${isAiLinked(activeConversation.id, submittedQuestion) ? ' linked' : ''}`} onClick={() => void toggleAiLink(activeConversation, submittedQuestion, submittedContext)}>{isAiLinked(activeConversation.id, submittedQuestion) ? '✦ Linked to PDF · click to unlink' : '✦ Link reference to PDF'}</button>}<div className="user-message"><span>You</span><p>{submittedQuestion}</p></div></>}
               {streamStatus !== 'idle' && streamStatus !== 'error' && <div className={`answer-card ${streamStatus}`} aria-live="polite"><div className="answer-meta"><span>Adam</span><span className="stream-state">{streamStatus === 'connecting' ? <>Thinking<span className="thinking-dots"><i /><i /><i /></span></> : streamStatus === 'streaming' ? 'Responding…' : 'Done'}</span></div>{searchNotice && <p className="search-notice" role="status">{searchNotice}</p>}{answer ? <MarkdownAnswer web={answerWeb} streaming={streamStatus === 'streaming'}>{answer}</MarkdownAnswer> : <div className="answer-skeleton"><i /><i /><i /></div>}<WebEvidence web={answerWeb} /></div>}{error && <p className="error-banner compact">{error}</p>}
-              {contextSelections.length > 0 ? <ContextList selections={contextSelections} onRemove={(id) => setContextSelections((current) => current.filter((item) => item.id !== id))} /> : !submittedQuestion && chatHistory.length === 0 && <div className="empty-context"><span>✦</span><p>Ask anything about the paper, or select a passage for precise focus.</p></div>}
+              {contextSelections.length > 0 ? <ContextList selections={contextSelections} onRemove={(id) => setContextSelections((current) => current.filter((item) => item.id !== id))} /> : !submittedQuestion && chatHistory.length === 0 && <div className="empty-context"><span>✦</span><p>Ask anything about the paper, or select a passage for precise focus.</p>{canAsk && activeConversation?.context_builder_version !== 'quick-ask-v1' && <div className="prompt-suggestions">{PROMPT_SUGGESTIONS.map((suggestion) => <button type="button" key={suggestion} onClick={() => { setQuestion(suggestion); composerRef.current?.focus(); }}>{suggestion}</button>)}</div>}</div>}
             </div>
-            <form className="composer" onSubmit={ask}><textarea ref={composerRef} value={question} onChange={(event) => setQuestion(event.target.value)} onKeyDown={(event) => { if (event.key === 'Enter' && !event.shiftKey && !event.nativeEvent.isComposing) { event.preventDefault(); event.currentTarget.form?.requestSubmit(); } }} placeholder={chatConfigured === false ? 'Add an API key in Settings to chat…' : activeConversation?.context_builder_version === 'quick-ask-v1' ? 'Continue this saved Quick Ask…' : contextSelections.length ? 'Ask about your context…' : 'Ask anything about this paper…'} disabled={!canAsk || asking} rows={3} /><div><button type="button" className={`composer-search-toggle${searchEnabled ? ' active' : ''}`} aria-pressed={searchEnabled} onClick={() => setSearchEnabled((enabled) => !enabled)} title="Allow a web search for this question">⌕ Search web</button><span>{chatConfigured === false ? 'Chat unavailable' : activeConversation?.context_builder_version === 'quick-ask-v1' ? 'Selection-only context' : contextSelections.length ? `${contextSelections.length} context ${contextSelections.length === 1 ? 'item' : 'items'}` : 'Full paper context'}</span><button type="submit" disabled={!canAsk || !question.trim() || asking}>{asking ? '…' : '↑'}</button></div></form>
+            <form className="composer" onSubmit={ask}><div className="composer-scope"><span className={`scope-pill${contextSelections.length ? ' focused' : ''}`}><i aria-hidden="true" />{chatConfigured === false ? 'Chat unavailable' : activeConversation?.context_builder_version === 'quick-ask-v1' ? 'Selection-only context' : contextSelections.length ? `${contextSelections.length} context ${contextSelections.length === 1 ? 'item' : 'items'}` : 'Full paper context'}</span></div><textarea ref={composerRef} value={question} onChange={(event) => setQuestion(event.target.value)} onKeyDown={(event) => { if (event.key === 'Enter' && !event.shiftKey && !event.nativeEvent.isComposing) { event.preventDefault(); event.currentTarget.form?.requestSubmit(); } }} placeholder={chatConfigured === false ? 'Add an API key in Settings to chat…' : activeConversation?.context_builder_version === 'quick-ask-v1' ? 'Continue this saved Quick Ask…' : contextSelections.length ? 'Ask about your context…' : 'Ask anything about this paper…'} disabled={!canAsk || asking} rows={3} /><div><button type="button" className={`composer-search-toggle${searchEnabled ? ' active' : ''}`} aria-pressed={searchEnabled} onClick={() => setSearchEnabled((enabled) => !enabled)} title="Allow a web search for this question"><UiIcon kind="globe" />Search web</button><span className="composer-hint"><kbd>↵</kbd> send <kbd>⇧↵</kbd> new line</span><button type="submit" disabled={!canAsk || !question.trim() || asking}>{asking ? '…' : <UiIcon kind="send" />}</button></div></form>
           </>}
         </aside>
       </div>
@@ -1750,9 +1887,10 @@ function ContextList({ selections, onRemove }: { selections: ContextSelection[];
   return <div className="context-list"><div className="context-list-heading"><span>Context</span><small>{selections.length} {selections.length === 1 ? 'item' : 'items'}</small></div>{selections.map((selection, index) => <div className={`selection-card${selection.imageDataUrl ? ' image-context' : ''}`} key={selection.id}><div><span>{selection.imageDataUrl ? 'Screenshot' : 'Excerpt'} {index + 1}{selection.page ? ` · ${selection.pageEnd && selection.pageEnd !== selection.page ? `pages ${selection.page}–${selection.pageEnd}` : `page ${selection.page}`}` : ''}</span>{onRemove && <button type="button" aria-label={`Remove context item ${index + 1}`} onClick={() => onRemove(selection.id)}>×</button>}</div>{selection.imageDataUrl ? <img src={selection.imageDataUrl} alt={`Selected area from page ${selection.page ?? ''}`} /> : <blockquote>{selection.text}</blockquote>}</div>)}</div>;
 }
 
-const PdfPageWithHighlights = memo(function PdfPageWithHighlights({ pageNumber, highlights, zoom }: { pageNumber: number; highlights: HighlightEntry[]; zoom: number }) {
+const PdfPageWithHighlights = memo(function PdfPageWithHighlights({ pageNumber, highlights, zoom, onReady }: { pageNumber: number; highlights: HighlightEntry[]; zoom: number; onReady: (page: number) => void }) {
   const [visible, setVisible] = useState(false);
   const [pageHeight, setPageHeight] = useState<number>();
+  useLayoutEffect(() => { if (pageHeight) onReady(pageNumber); }, [pageHeight, onReady, pageNumber]);
   const [renderVersion, setRenderVersion] = useState(0);
   const pageElementRef = useRef<HTMLDivElement>(null);
   const [rasterPage, setRasterPage] = useState<PDFPageProxy | null>(null);
@@ -1850,9 +1988,11 @@ function HighlightCanvas({ highlights, renderVersion }: { highlights: HighlightE
     const overlay = overlayRef.current;
     const page = overlay?.closest<HTMLElement>('.react-pdf__Page');
     const source = page?.querySelector<HTMLCanvasElement>('.react-pdf__Page__canvas');
-    if (!overlay || !source || !source.width || !source.height) return;
+    if (!overlay || !page || !source || !source.width || !source.height) return;
+    // Notes and linked passages draw underlines even when there are no plain
+    // highlights on this page. Only clear the canvas when all annotations leave.
+    if (highlights.length === 0) { overlay.width = 0; overlay.height = 0; return; }
     const markers = highlights.filter((highlight) => !highlight.note_text && !highlight.ai_links?.length);
-    if (markers.length === 0) { overlay.width = 0; overlay.height = 0; return; }
     overlay.width = source.width;
     overlay.height = source.height;
     const sourceContext = source.getContext('2d', { willReadFrequently: true });
@@ -1884,8 +2024,11 @@ function HighlightCanvas({ highlights, renderVersion }: { highlights: HighlightE
     });
     overlayContext.lineWidth = Math.max(2, source.width / 700);
     overlayContext.lineCap = 'round';
+    const linkedPassageColor = getComputedStyle(page).getPropertyValue('--accent').trim() || '#2e6650';
     highlights.filter((highlight) => Boolean(highlight.note_text) || Boolean(highlight.ai_links?.length)).forEach((highlight) => highlight.rects.forEach((rect) => {
-      overlayContext.strokeStyle = highlight.color;
+      // AI links use the same theme color as their PDF icon and Links tab.
+      // User-selected note colors remain specific to each note.
+      overlayContext.strokeStyle = highlight.ai_links?.length ? linkedPassageColor : highlight.color;
       const left = Math.max(0, rect.left * source.width);
       const right = Math.min(source.width, (rect.left + rect.width) * source.width);
       const bottom = Math.min(source.height - overlayContext.lineWidth, (rect.top + rect.height) * source.height - overlayContext.lineWidth / 2);
@@ -1898,9 +2041,36 @@ function HighlightCanvas({ highlights, renderVersion }: { highlights: HighlightE
   return <canvas className="pdf-highlight-canvas" ref={overlayRef} aria-hidden="true" />;
 }
 
+type UiIconKind = 'back' | 'note' | 'pen' | 'chat' | 'link' | 'region' | 'refresh' | 'plus' | 'history' | 'globe' | 'send';
+const UI_ICON_PATHS: Record<UiIconKind, string> = {
+  back: 'M15 18l-6-6 6-6',
+  note: 'M5 4h14v16l-7-4-7 4V4Z',
+  pen: 'M4 20h4L19 9l-4-4L4 16v4Zm9-13 4 4',
+  chat: 'M4 5h16v11H9l-5 4V5Z',
+  link: 'M10 14a4 4 0 0 0 5.7 0l3-3a4 4 0 0 0-5.7-5.7l-1 1M14 10a4 4 0 0 0-5.7 0l-3 3a4 4 0 0 0 5.7 5.7l1-1',
+  region: 'M4 8V4h4M16 4h4v4M20 16v4h-4M8 20H4v-4',
+  refresh: 'M20 11a8 8 0 1 0-2.3 5.7M20 4v7h-7',
+  plus: 'M12 5v14M5 12h14',
+  history: 'M4 12a8 8 0 1 0 2.4-5.7L4 8.7M4 4v4.7h4.7M12 8v4l3 2',
+  globe: 'M12 3a9 9 0 1 0 0 18 9 9 0 0 0 0-18Zm-9 9h18M12 3c2.5 2.6 3.5 5.6 3.5 9S14.5 18.4 12 21c-2.5-2.6-3.5-5.6-3.5-9S9.5 5.6 12 3Z',
+  send: 'M12 19V5M6 11l6-6 6 6',
+};
+function UiIcon({ kind }: { kind: UiIconKind }) {
+  return <svg className="ui-icon" viewBox="0 0 24 24" aria-hidden="true"><path d={UI_ICON_PATHS[kind]} /></svg>;
+}
+
+function ShortcutSheet({ onClose }: { onClose: () => void }) {
+  useEffect(() => {
+    const close = (event: KeyboardEvent) => { if (event.key === 'Escape' && !event.defaultPrevented && !document.querySelector('dialog[open]')) onClose(); };
+    window.addEventListener('keydown', close);
+    return () => window.removeEventListener('keydown', close);
+  }, [onClose]);
+  return <div className="shortcut-sheet" role="dialog" aria-label="Keyboard shortcuts"><header><strong>Keyboard shortcuts</strong><button type="button" aria-label="Close keyboard shortcuts" onClick={onClose}>×</button></header><dl>{SHORTCUTS.map(([keys, action]) => <div key={keys}><dt><kbd>{keys}</kbd></dt><dd>{action}</dd></div>)}</dl><p>Selection shortcuts work while text is selected in the paper.</p></div>;
+}
+
 function Brand() { return <div className="brand"><span className="brand-mark">A</span><strong>Adam</strong></div>; }
 function SettingsButton({ onClick, compact = false }: { onClick: () => void; compact?: boolean }) {
-  return <button type="button" className={`settings-button${compact ? ' compact-button' : ''}`} onClick={onClick} data-tooltip="Open settings (⌘ / Ctrl + ,)" aria-label="Open settings" aria-keyshortcuts="Meta+, Control+,"><span className="settings-gear" aria-hidden="true">⚙</span><span>{compact ? '' : 'Settings'}</span></button>;
+  return <button type="button" className={`settings-button${compact ? ' compact-button' : ''}`} onClick={onClick} data-tooltip="Open settings (⌘ / Ctrl + ,)" aria-label="Open settings" aria-keyshortcuts="Meta+, Control+,"><svg className="settings-gear" viewBox="0 0 24 24" aria-hidden="true"><circle cx="12" cy="12" r="3" /><path d="M19.4 15a1.7 1.7 0 0 0 .3 1.8l.1.1a2 2 0 1 1-2.8 2.8l-.1-.1a1.7 1.7 0 0 0-1.8-.3 1.7 1.7 0 0 0-1 1.5V21a2 2 0 1 1-4 0v-.1a1.7 1.7 0 0 0-1.1-1.5 1.7 1.7 0 0 0-1.8.3l-.1.1a2 2 0 1 1-2.8-2.8l.1-.1a1.7 1.7 0 0 0 .3-1.8 1.7 1.7 0 0 0-1.5-1H3a2 2 0 1 1 0-4h.1a1.7 1.7 0 0 0 1.5-1.1 1.7 1.7 0 0 0-.3-1.8l-.1-.1a2 2 0 1 1 2.8-2.8l.1.1a1.7 1.7 0 0 0 1.8.3H9a1.7 1.7 0 0 0 1-1.5V3a2 2 0 1 1 4 0v.1a1.7 1.7 0 0 0 1 1.5 1.7 1.7 0 0 0 1.8-.3l.1-.1a2 2 0 1 1 2.8 2.8l-.1.1a1.7 1.7 0 0 0-.3 1.8V9a1.7 1.7 0 0 0 1.5 1H21a2 2 0 1 1 0 4h-.1a1.7 1.7 0 0 0-1.5 1Z" /></svg><span>{compact ? '' : 'Settings'}</span></button>;
 }
 
 function SettingsDialog({ onClose }: { onClose: () => void }) {
@@ -1939,7 +2109,7 @@ function SettingsDialog({ onClose }: { onClose: () => void }) {
   }, []);
 
   useEffect(() => {
-    const close = (event: KeyboardEvent) => { if (event.key === 'Escape') onClose(); };
+    const close = (event: KeyboardEvent) => { if (event.key === 'Escape' && !event.defaultPrevented && !document.querySelector('dialog[open]')) onClose(); };
     window.addEventListener('keydown', close);
     dialogRef.current?.focus();
     return () => window.removeEventListener('keydown', close);
@@ -2065,7 +2235,7 @@ function SettingsDialog({ onClose }: { onClose: () => void }) {
           <div className="model-picker"><div className="model-picker-head"><label>Browse models</label><input type="search" value={query} onChange={(event) => setQuery(event.target.value)} placeholder="Search models…" /></div>{visibleModels.length ? <div className="model-list">{pinnedModels.length > 0 && <div className="model-group-label"><span>★ Pinned</span><small>{pinnedModels.length}</small></div>}{pinnedModels.map(modelRow)}{otherModels.length > 0 && pinnedModels.length > 0 && <div className="model-group-label all-models"><span>All models</span><small>{otherModels.length}</small></div>}{otherModels.map(modelRow)}</div> : <div className="model-empty">{loadingModels ? 'Loading models…' : settings?.providers[provider] ? 'Refresh to load models from this provider.' : 'Connect an API key to browse models.'}</div>}</div>
         </div> : settingsTab === 'titles' ? <div className="provider-content title-settings-page">
           <div className="provider-heading"><div><h3>Chat titles</h3><p>Choose the provider and model for automatic chat names and the Regenerate title button. This is separate from the chat model.</p></div></div>
-          <label className="field-label title-provider-field">Title provider<select value={titleProvider} onChange={(event) => { const next = event.target.value as ProviderId; setTitleProvider(next); setTitleModel(next === settings?.title_provider ? settings.title_model : ''); setTitleModels([]); setTitleQuery(''); setStatus(''); if (settings?.providers[next]) void loadTitleModels(next); }}>{PROVIDERS.map((item) => <option value={item.id} key={item.id}>{item.name}</option>)}</select></label>
+          <label className="field-label title-provider-field">Title provider<AppSelect label="Title provider" value={titleProvider} onChange={(value) => { const next = value as ProviderId; setTitleProvider(next); setTitleModel(next === settings?.title_provider ? settings.title_model : ''); setTitleModels([]); setTitleQuery(''); setStatus(''); if (settings?.providers[next]) void loadTitleModels(next); }} options={PROVIDERS.map((item) => ({ value: item.id, label: item.name }))} /></label>
           {!settings?.providers[titleProvider] && <p className="title-key-notice">Add an API key for {PROVIDERS.find((item) => item.id === titleProvider)?.name} in its Providers settings to use it for titles.</p>}
           <div className="selected-model-summary"><span>Current title model</span><strong>{settings?.title_model ?? 'gpt-6-luna'}</strong><small>{PROVIDERS.find((item) => item.id === settings?.title_provider)?.name ?? 'OpenCode Zen'}</small></div>
           <div className="model-picker"><div className="model-picker-head"><label htmlFor="title-model-search">Browse title models</label><div className="title-model-tools"><input id="title-model-search" type="search" value={titleQuery} onChange={(event) => setTitleQuery(event.target.value)} placeholder="Search models…" /><button type="button" className="secondary-button" disabled={!settings?.providers[titleProvider] || loadingTitleModels} onClick={() => void loadTitleModels(titleProvider)}>{loadingTitleModels ? 'Loading…' : 'Refresh models'}</button></div></div>{titleModels.length ? <div className="model-list">{titleModels.filter((id) => id.toLowerCase().includes(titleQuery.toLowerCase())).map((id) => <button type="button" className={titleModel === id ? 'selected' : ''} onClick={() => { setTitleModel(id); setStatus(''); }} key={id}><span>{id}{settings?.title_provider === titleProvider && settings.title_model === id && <small className="active-model-label">Active</small>}</span></button>)}</div> : <div className="model-empty">{loadingTitleModels ? 'Loading models…' : settings?.providers[titleProvider] ? 'Refresh to load models from this provider.' : 'Connect an API key to browse models.'}</div>}</div>
@@ -2181,9 +2351,11 @@ function PaperNoteEditor({ documentId, paperName, pendingQuote, onQuoteConsumed 
     changed();
   }
 
-  function addLink() {
-    const href = window.prompt('Paste a link');
-    if (href && /^https?:\/\//i.test(href)) command('createLink', href);
+  async function addLink() {
+    const selection = window.getSelection();
+    const range = selection?.rangeCount ? selection.getRangeAt(0).cloneRange() : null;
+    const href = await requestAppDialog({ title: 'Add a link', input: true, confirm: 'Insert link' });
+    if (href && /^https?:\/\//i.test(href)) { editorRef.current?.focus(); if (range) { const current = window.getSelection(); current?.removeAllRanges(); current?.addRange(range); } command('createLink', href); }
   }
 
   function addChecklist() {
@@ -2233,17 +2405,20 @@ function PaperNoteEditor({ documentId, paperName, pendingQuote, onQuoteConsumed 
     if (exitEmptyFormat(event)) return;
     if (event.key !== ' ' || event.metaKey || event.ctrlKey || event.altKey || event.nativeEvent.isComposing) return;
     const selection = window.getSelection();
-    if (!selection?.rangeCount || !selection.isCollapsed || !editorRef.current) return;
-    let block = selection.anchorNode?.nodeType === Node.TEXT_NODE ? selection.anchorNode.parentElement : selection.anchorNode as HTMLElement | null;
-    while (block?.parentElement && block.parentElement !== editorRef.current) block = block.parentElement;
-    if (block === editorRef.current && selection.anchorNode?.nodeType === Node.TEXT_NODE) {
-      const wrapper = document.createElement('div');
-      selection.anchorNode.before(wrapper);
-      wrapper.append(selection.anchorNode);
-      block = wrapper;
-    }
-    if (!block || block.parentElement !== editorRef.current) return;
-    const prefix = (block.textContent ?? '').replace(/\u00a0/g, ' ');
+    const editor = editorRef.current;
+    if (!selection?.rangeCount || !selection.isCollapsed || !editor || !selection.anchorNode || !editor.contains(selection.anchorNode)) return;
+    let block = selection.anchorNode.nodeType === Node.TEXT_NODE ? selection.anchorNode.parentElement : selection.anchorNode as HTMLElement | null;
+    // The first line may be bare text in the editor, while later lines are
+    // paragraphs. Never walk above the editor or combine existing paragraphs.
+    while (block && block !== editor && block.parentElement && block.parentElement !== editor) block = block.parentElement;
+    if (!block || (block !== editor && block.parentElement !== editor)) return;
+    const atRoot = block === editor;
+    if (atRoot && editor.querySelector('p, div, h1, h2, h3, h4, h5, ul, ol, blockquote')) return;
+    const beforeCaret = document.createRange();
+    beforeCaret.selectNodeContents(block);
+    beforeCaret.setEnd(selection.anchorNode, selection.anchorOffset);
+    const prefix = beforeCaret.toString().replace(/\u00a0/g, ' ');
+    if (prefix !== (block.textContent ?? '').replace(/\u00a0/g, ' ')) return;
     const heading = /^(#{1,5})$/.exec(prefix);
     const unordered = /^[-*+]$/.test(prefix);
     const ordered = /^1\.$/.test(prefix);
@@ -2251,6 +2426,12 @@ function PaperNoteEditor({ documentId, paperName, pendingQuote, onQuoteConsumed 
     const task = /^- \[(?: |x|X)\]$/.test(prefix);
     if (!heading && !unordered && !ordered && !quote && !task) return;
     event.preventDefault();
+    if (atRoot) {
+      const wrapper = document.createElement('div');
+      wrapper.append(...Array.from(editor.childNodes));
+      editor.append(wrapper);
+      block = wrapper;
+    }
     const range = document.createRange();
     range.selectNodeContents(block);
     selection.removeAllRanges(); selection.addRange(range);
