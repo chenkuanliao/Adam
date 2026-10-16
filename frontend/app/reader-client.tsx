@@ -931,6 +931,20 @@ export default function Home() {
     setPendingSelection(null);
   }
 
+  useEffect(() => {
+    if (!pendingSelection && !screenshotSelection) return;
+    const dismissSelection = (event: PointerEvent) => {
+      if (event.target instanceof Element && event.target.closest('.selection-toolbar')) return;
+      // Dismiss before the browser handles the next click, even if it lands
+      // inside the selected text. Do not prevent a new drag selection or action.
+      window.getSelection()?.removeAllRanges();
+      setPendingSelection(null);
+      setScreenshotSelection(null);
+    };
+    document.addEventListener('pointerdown', dismissSelection, true);
+    return () => document.removeEventListener('pointerdown', dismissSelection, true);
+  }, [pendingSelection, screenshotSelection]);
+
   async function addSelectionToContext() {
     if (!pendingSelection) return;
     const { id, text, page, range } = pendingSelection;
