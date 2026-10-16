@@ -221,10 +221,9 @@ def list_documents(db: Session = Depends(get_db)) -> list[Document]:
 @app.post("/api/documents", response_model=DocumentOut, status_code=201)
 async def upload_document(
     file: UploadFile,
-    db: Session = Depends(get_db),
     app_settings: Settings = Depends(get_settings),
 ) -> Document:
-    return await ingest_pdf(file, db, app_settings)
+    return await ingest_pdf(file, app_settings)
 
 
 @app.get("/api/documents/{document_id}", response_model=DocumentOut)
