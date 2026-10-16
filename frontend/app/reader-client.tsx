@@ -155,6 +155,8 @@ export default function Home() {
   const [settingsOpen, setSettingsOpen] = useState(false);
   const [libraryLoading, setLibraryLoading] = useState(true);
   const [paperSearchOpen, setPaperSearchOpen] = useState(false);
+  const [paperSearchMode, setPaperSearchMode] = useState<'library' | 'online'>('library');
+  const [paperSearchFolder, setPaperSearchFolder] = useState<string | null>(null);
   const [libraryNavigation, setLibraryNavigation] = useState(0);
   const [chatConfigured, setChatConfigured] = useState<boolean | null>(null);
   const [paneMode, setPaneModeState] = useState<PaneMode>('chat');
@@ -414,9 +416,9 @@ export default function Home() {
 
   useEffect(() => {
     const openPaperSearch = (event: KeyboardEvent) => {
-      if ((event.metaKey || event.ctrlKey) && event.key.toLowerCase() === 'k') {
+      if (!event.defaultPrevented && !event.altKey && (event.metaKey || event.ctrlKey) && event.key.toLowerCase() === 'k') {
         event.preventDefault();
-        if (!document.querySelector('dialog[open]')) setPaperSearchOpen(true);
+        if (!document.querySelector('dialog[open]')) { setPaperSearchMode(event.shiftKey ? 'online' : 'library'); const location = window.localStorage.getItem('adam.libraryLocation'); setPaperSearchFolder(location && !['all', 'unfiled'].includes(location) ? location : null); setPaperSearchOpen(true); }
       }
     };
     window.addEventListener('keydown', openPaperSearch);
@@ -1676,9 +1678,9 @@ export default function Home() {
   if (!active) return (<>
     <ActionTooltips />
     <AppDialogs />
-    <LibraryDashboard key={libraryNavigation} onSearch={() => setPaperSearchOpen(true)} papers={papers} loading={libraryLoading} uploading={uploading} error={error} brand={<Brand />} settings={<SettingsButton onClick={() => setSettingsOpen(true)} />} preview={(paper) => <PaperPreview paper={paper} />} onOpen={(paper) => openPaper(paper)} onUpload={upload} onDelete={(paper) => deletePaper(paper)} onUpdate={(updated) => setPapers((current) => current.map((paper) => updated.find((item) => item.id === paper.id) ?? paper))} />
+    <LibraryDashboard key={libraryNavigation} onSearch={(folderId) => { setPaperSearchMode('library'); setPaperSearchFolder(folderId ?? null); setPaperSearchOpen(true); }} onFindPapers={(folderId) => { setPaperSearchMode('online'); setPaperSearchFolder(folderId); setPaperSearchOpen(true); }} papers={papers} loading={libraryLoading} uploading={uploading} error={error} brand={<Brand />} settings={<SettingsButton onClick={() => setSettingsOpen(true)} />} preview={(paper) => <PaperPreview paper={paper} />} onOpen={(paper) => openPaper(paper)} onUpload={upload} onDelete={(paper) => deletePaper(paper)} onUpdate={(updated) => setPapers((current) => current.map((paper) => updated.find((item) => item.id === paper.id) ?? paper))} />
     {settingsOpen && <SettingsDialog onClose={closeSettings} />}
-    {paperSearchOpen && <LibrarySpotlight onBrowseFolder={(folderId) => { window.localStorage.setItem('adam.libraryLocation', folderId); setLibraryNavigation((value) => value + 1); setPaperSearchOpen(false); returnToLibrary(); }} papers={papers} onClose={() => setPaperSearchOpen(false)} onOpen={(paper) => { setPaperSearchOpen(false); openPaper(paper); }} />}
+    {paperSearchOpen && <LibrarySpotlight initialMode={paperSearchMode} initialFolderId={paperSearchFolder} onImported={(paper) => setPapers((current) => current.some((item) => item.id === paper.id) ? current.map((item) => item.id === paper.id ? paper : item) : [paper, ...current])} onBrowseFolder={(folderId) => { window.localStorage.setItem('adam.libraryLocation', folderId); setLibraryNavigation((value) => value + 1); setPaperSearchOpen(false); returnToLibrary(); }} papers={papers} onClose={() => setPaperSearchOpen(false)} onOpen={(paper) => { setPaperSearchOpen(false); openPaper(paper); }} />}
   </>);
 
   return (
@@ -1731,7 +1733,7 @@ export default function Home() {
         <div className="quick-ask-footer"><span>Save this thread before linking it to the PDF</span><div><button type="button" className="move-to-chat" onClick={() => void importQuickAsk()} disabled={quickAsking || quickImporting || (!quickTurns.length && !quickAnswer)}>{quickImporting ? 'Saving…' : 'Save as new chat →'}</button></div></div>
       </form>}
       {settingsOpen && <SettingsDialog onClose={closeSettings} />}
-      {paperSearchOpen && <LibrarySpotlight onBrowseFolder={(folderId) => { window.localStorage.setItem('adam.libraryLocation', folderId); setLibraryNavigation((value) => value + 1); setPaperSearchOpen(false); returnToLibrary(); }} papers={papers} onClose={() => setPaperSearchOpen(false)} onOpen={(paper) => { setPaperSearchOpen(false); openPaper(paper); }} />}
+      {paperSearchOpen && <LibrarySpotlight initialMode={paperSearchMode} initialFolderId={paperSearchFolder} onImported={(paper) => setPapers((current) => current.some((item) => item.id === paper.id) ? current.map((item) => item.id === paper.id ? paper : item) : [paper, ...current])} onBrowseFolder={(folderId) => { window.localStorage.setItem('adam.libraryLocation', folderId); setLibraryNavigation((value) => value + 1); setPaperSearchOpen(false); returnToLibrary(); }} papers={papers} onClose={() => setPaperSearchOpen(false)} onOpen={(paper) => { setPaperSearchOpen(false); openPaper(paper); }} />}
     </main>
   );
 }
