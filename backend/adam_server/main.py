@@ -14,7 +14,7 @@ import httpx
 from .config import Settings, get_settings
 from .database import SessionLocal, get_db, run_migrations
 from .models import Annotation, Conversation, Document, Folder, Message, ModelFavorite, Page, PaperNote
-from .schemas import AiNoteCreate, AiNoteUnlink, AnnotationIn, AnnotationOut, AnnotationUpdate, AppSettingsOut, AppSettingsUpdate, ChatRequest, ConversationCreate, ConversationDetail, ConversationOut, ConversationUpdate, DocumentMove, DocumentOut, DocumentUpdate, FolderIn, FolderOut, ModelFavoriteUpdate, PageTextOut, PaperNoteOut, PaperNoteUpdate, ProviderKeyUpdate, ProviderModelsOut, QuickAskImportRequest, QuickAskRequest, TitleModelUpdate
+from .schemas import AiNoteCreate, AiNoteUnlink, AnnotationIn, AnnotationOut, AnnotationUpdate, AppSettingsOut, AppSettingsUpdate, ChatRequest, ConversationCreate, ConversationDetail, ConversationOut, ConversationUpdate, DocumentMove, DocumentOut, DocumentUpdate, FolderIn, FolderOut, FolderUpdate, ModelFavoriteUpdate, PageTextOut, PaperNoteOut, PaperNoteUpdate, ProviderKeyUpdate, ProviderModelsOut, QuickAskImportRequest, QuickAskRequest, TitleModelUpdate
 from .services.context import build_paper_context
 from .services.documents import document_file_path, ingest_pdf
 from .services.llm import AnthropicProvider, GoogleProvider, OpenAICompatibleProvider, OpenAIResponsesProvider, TITLE_SYSTEM_PROMPT, clean_title, generate_zen_title, sse
@@ -149,14 +149,44 @@ async def list_provider_models(provider: str, app_settings: Settings = Depends(g
     return ProviderModelsOut(provider=provider, models=sorted(set(models)))
 
 
-def validate_folder_name(name: str, db: Session, folder_id: str | None = None) -> str:
+FOLDER_COLORS = ["#8c9d65", "#618fbd", "#b8836d", "#9a80b8", "#c29d54", "#689f98"]
+
+
+def validate_folder_name(name: str, db: Session, folder_id: str | None = None, parent_id: str | None = None) -> str:
     name = name.strip()
     if not name or any(ord(char) < 32 for char in name):
         raise HTTPException(422, "Enter a folder name.")
-    existing = db.scalar(select(Folder).where(func.lower(Folder.name) == name.lower()))
-    if existing and existing.id != folder_id:
-        raise HTTPException(409, "A folder with this name already exists.")
+    existing = db.scalar(select(Folder).where(func.lower(Folder.name) == name.lower(), Folder.parent_id == parent_id, Folder.id != (folder_id or "")))
+    if existing:
+        raise HTTPException(409, "A folder with this name already exists here.")
     return name
+
+
+def folder_parent(db: Session, parent_id: str | None, folder_id: str | None = None) -> Folder | None:
+    parent = db.get(Folder, parent_id) if parent_id else None
+    if parent_id and not parent:
+        raise HTTPException(404, "Destination folder not found.")
+    ancestor = parent
+    while ancestor:
+        if ancestor.id == folder_id:
+            raise HTTPException(422, "A folder cannot be moved into itself or its descendants.")
+        ancestor = db.get(Folder, ancestor.parent_id) if ancestor.parent_id else None
+    return parent
+
+
+def automatic_folder_color(db: Session, previous: str | None = None) -> str:
+    roots = list(db.scalars(select(Folder).where(Folder.parent_id.is_(None))))
+    choices = [color for color in FOLDER_COLORS if color != previous]
+    return min(choices, key=lambda color: sum(root.color == color for root in roots))
+
+
+def color_branch(db: Session, folder: Folder, color: str) -> None:
+    pending = [folder]
+    children = list(db.scalars(select(Folder)))
+    while pending:
+        current = pending.pop()
+        current.color = color
+        pending.extend(child for child in children if child.parent_id == current.id)
 
 
 @app.get("/api/folders", response_model=list[FolderOut])
@@ -166,23 +196,27 @@ def list_folders(db: Session = Depends(get_db)) -> list[Folder]:
 
 @app.post("/api/folders", response_model=FolderOut, status_code=201)
 def create_folder(request: FolderIn, db: Session = Depends(get_db)) -> Folder:
-    folder = Folder(name=validate_folder_name(request.name, db), color=(request.color or "#8c9d65").lower())
+    parent = folder_parent(db, request.parent_id)
+    folder = Folder(name=validate_folder_name(request.name, db, parent_id=request.parent_id), parent_id=request.parent_id,
+                    color=parent.color if parent else (request.color or automatic_folder_color(db)).lower())
     db.add(folder)
     db.commit()
-    db.refresh(folder)
     return folder
 
 
 @app.patch("/api/folders/{folder_id}", response_model=FolderOut)
-def rename_folder(folder_id: str, request: FolderIn, db: Session = Depends(get_db)) -> Folder:
+def rename_folder(folder_id: str, request: FolderUpdate, db: Session = Depends(get_db)) -> Folder:
     folder = db.get(Folder, folder_id)
     if not folder:
         raise HTTPException(404, "Folder not found.")
-    folder.name = validate_folder_name(request.name, db, folder_id)
-    if request.color is not None:
-        folder.color = request.color.lower()
+    parent_id = request.parent_id if "parent_id" in request.model_fields_set else folder.parent_id
+    parent = folder_parent(db, parent_id, folder_id)
+    name = validate_folder_name(request.name if request.name is not None else folder.name, db, folder_id, parent_id)
+    color = parent.color if parent else (automatic_folder_color(db, folder.color) if folder.parent_id else request.color or folder.color)
+    folder.name = name
+    folder.parent_id = parent_id
+    color_branch(db, folder, color.lower())
     db.commit()
-    db.refresh(folder)
     return folder
 
 
@@ -191,7 +225,17 @@ def delete_folder(folder_id: str, db: Session = Depends(get_db)) -> Response:
     folder = db.get(Folder, folder_id)
     if not folder:
         raise HTTPException(404, "Folder not found.")
-    # Deleting an organizational folder always keeps its papers and reader data.
+    # Keep children and their contents, promoting them to the library root.
+    children = list(db.scalars(select(Folder).where(Folder.parent_id == folder_id)))
+    for child in children:
+        base = child.name
+        suffix = 2
+        while db.scalar(select(Folder).where(Folder.parent_id.is_(None), func.lower(Folder.name) == child.name.lower(), Folder.id != child.id)):
+            child.name = f"{base[:70]} ({suffix})"
+            suffix += 1
+        child.parent_id = None
+        color_branch(db, child, automatic_folder_color(db, child.color))
+        db.flush()
     for document in db.scalars(select(Document).where(Document.folder_id == folder_id)):
         document.folder_id = None
     db.delete(folder)

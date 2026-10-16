@@ -571,9 +571,10 @@ def test_folder_migration_preserves_existing_papers_and_children(tmp_path) -> No
     subprocess.run([sys.executable, '-m', 'alembic', 'upgrade', '0009_folders'], cwd=backend_root, env=env, check=True, capture_output=True)
     with sqlite3.connect(path) as db:
         db.execute("INSERT INTO folders (id, name, created_at) VALUES ('old-folder', 'Existing folder', CURRENT_TIMESTAMP)")
+        db.execute("UPDATE documents SET folder_id = 'old-folder' WHERE id = 'existing'")
     subprocess.run([sys.executable, '-m', 'alembic', 'upgrade', 'head'], cwd=backend_root, env=env, check=True, capture_output=True)
     with sqlite3.connect(path) as db:
-        assert db.execute('SELECT id, folder_id FROM documents').fetchall() == [('existing', None)]
+        assert db.execute('SELECT id, folder_id FROM documents').fetchall() == [('existing', 'old-folder')]
         for table in ['pages', 'paper_notes', 'conversations', 'messages', 'annotations']:
             assert db.execute(f'SELECT COUNT(*) FROM {table}').fetchone()[0] == 1
         assert db.execute('SELECT color FROM folders WHERE id = ?', ('old-folder',)).fetchone()[0] == '#8c9d65'
@@ -634,3 +635,36 @@ def test_auto_title_uses_answer_and_preserves_chat_on_title_failure(monkeypatch)
         detail = client.get(f"/api/conversations/{conversation['id']}").json()
         assert detail["messages"][-1]["content"].startswith("Residual connections")
         assert detail["title"] == ("What does this do?" if mode == "failure" else "My residual connection notes")
+
+
+def test_nested_folders_inherit_colors_move_safely_and_keep_contents() -> None:
+    root = client.post('/api/folders', json={'name': 'Nested root', 'color': '#123456'}).json()
+    other = client.post('/api/folders', json={'name': 'Other root', 'color': '#654321'}).json()
+    child = client.post('/api/folders', json={'name': 'Child', 'parent_id': root['id'], 'color': '#ffffff'}).json()
+    leaf = client.post('/api/folders', json={'name': 'Leaf', 'parent_id': child['id']}).json()
+    assert child['color'] == leaf['color'] == root['color']
+    assert client.post('/api/folders', json={'name': 'child', 'parent_id': root['id']}).status_code == 409
+    twin = client.post('/api/folders', json={'name': 'Child', 'parent_id': other['id']})
+    assert twin.status_code == 201
+    assert client.patch(f"/api/folders/{root['id']}", json={'parent_id': leaf['id']}).status_code == 422
+    assert client.patch(f"/api/folders/{child['id']}", json={'parent_id': child['id']}).status_code == 422
+    assert client.patch(f"/api/folders/{child['id']}", json={'parent_id': 'missing'}).status_code == 404
+    # Conflicting moves leave the whole branch unchanged.
+    assert client.patch(f"/api/folders/{child['id']}", json={'parent_id': other['id']}).status_code == 409
+    client.delete(f"/api/folders/{twin.json()['id']}")
+    moved = client.patch(f"/api/folders/{child['id']}", json={'parent_id': other['id']})
+    assert moved.json()['color'] == other['color']
+    client.patch(f"/api/folders/{other['id']}", json={'color': '#abcdef'})
+    folders = {folder['id']: folder for folder in client.get('/api/folders').json()}
+    assert folders[leaf['id']]['color'] == '#abcdef'
+    detached = client.patch(f"/api/folders/{child['id']}", json={'parent_id': None}).json()
+    assert detached['parent_id'] is None and detached['color'] != '#abcdef'
+    paper = client.post('/api/documents', files={'file': ('nested.pdf', BytesIO(sample_pdf('Nested contents survive.')), 'application/pdf')}).json()
+    assert client.post('/api/document-moves', json={'document_ids': [paper['id']], 'folder_id': leaf['id']}).status_code == 200
+    # Reopening reads the persisted hierarchy; removing a parent keeps its children and papers.
+    assert client.delete(f"/api/folders/{child['id']}").status_code == 204
+    folders = {folder['id']: folder for folder in client.get('/api/folders').json()}
+    assert folders[leaf['id']]['parent_id'] is None
+    assert client.get(f"/api/documents/{paper['id']}").json()['folder_id'] == leaf['id']
+    for folder in [root, other, leaf]:
+        client.delete(f"/api/folders/{folder['id']}")
