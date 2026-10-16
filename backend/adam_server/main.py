@@ -1,10 +1,11 @@
+import asyncio
 import json
 import os
 from collections.abc import AsyncIterator
 from datetime import datetime, timezone
 from pathlib import Path
 
-from fastapi import Depends, FastAPI, HTTPException, Response, UploadFile
+from fastapi import Depends, FastAPI, HTTPException, Query, Response, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse, StreamingResponse
 from sqlalchemy import func, select
@@ -19,6 +20,8 @@ from .services.context import build_paper_context
 from .services.documents import document_file_path, ingest_pdf
 from .services.llm import AnthropicProvider, GoogleProvider, OpenAICompatibleProvider, OpenAIResponsesProvider, TITLE_SYSTEM_PROMPT, clean_title, generate_zen_title, sse
 from .services.web_search import asks_for_citing_papers, plan_search, previous_sources, search_citing_papers, search_web, web_context
+from .schemas import PaperCandidate, PaperImportIn, PaperSearchOut
+from .services.paper_discovery import discover, download_pdf, existing_paper, resolve_pdf
 
 settings = get_settings()
 run_migrations()
@@ -31,6 +34,37 @@ app.add_middleware(
     allow_methods=["GET", "POST", "PUT", "PATCH", "DELETE", "OPTIONS"],
     allow_headers=["Content-Type"],
 )
+
+
+@app.get("/api/paper-discovery/search", response_model=PaperSearchOut)
+async def search_papers(q: str = Query(min_length=1, max_length=500), db: Session = Depends(get_db)):
+    if not q.strip():
+        raise HTTPException(422, "Enter a paper title, keywords, DOI, or arXiv link.")
+    return await discover(q.strip(), settings.search_base_url, db)
+
+
+@app.post("/api/paper-discovery/resolve", response_model=PaperCandidate)
+async def resolve_paper(paper: PaperCandidate):
+    try:
+        async with asyncio.timeout(35):
+            return await resolve_pdf(paper)
+    except (httpx.HTTPError, OSError, TimeoutError):
+        raise HTTPException(502, "The source could not be reached. Open its page or try another result.") from None
+
+
+@app.post("/api/paper-discovery/import", response_model=DocumentOut)
+async def import_paper(request: PaperImportIn, db: Session = Depends(get_db)):
+    if request.folder_id and not db.get(Folder, request.folder_id):
+        raise HTTPException(404, "The destination folder no longer exists. Choose another folder.")
+    if existing := existing_paper(db, request.paper):
+        return existing
+    try:
+        upload = await download_pdf(request.pdf_url, request.paper.title, settings.max_upload_mb * 1024 * 1024)
+        metadata = request.paper.model_dump(exclude={"existing_document_id", "pdf_urls"})
+        metadata.update({"pdf_url": request.pdf_url, "imported_at": datetime.now(timezone.utc).isoformat()})
+        return await ingest_pdf(upload, db, settings, folder_id=request.folder_id, discovery=metadata)
+    except (httpx.HTTPError, OSError, TimeoutError):
+        raise HTTPException(502, "The PDF could not be downloaded. Retry, choose another source, or upload it manually.") from None
 
 
 def make_provider(provider_name: str, api_key: str, model: str, system_prompt: str):

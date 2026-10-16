@@ -26,10 +26,10 @@ async function request<T>(path: string, method = 'GET', body?: unknown): Promise
   return payload as T;
 }
 
-export default function LibraryDashboard({ papers, loading, uploading, error, brand, settings, preview, onOpen, onUpload, onDelete, onUpdate, onSearch }: {
+export default function LibraryDashboard({ papers, loading, uploading, error, brand, settings, preview, onOpen, onUpload, onDelete, onUpdate, onSearch, onFindPapers }: {
   papers: LibraryPaper[]; loading: boolean; uploading: boolean; error: string; brand: ReactNode; settings: ReactNode;
   preview: (paper: LibraryPaper) => ReactNode; onOpen: (paper: LibraryPaper) => void;
-  onUpload: (file: File, folderId?: string | null) => Promise<void>; onDelete: (paper: LibraryPaper) => Promise<void>; onUpdate: (papers: LibraryPaper[]) => void; onSearch: () => void;
+  onUpload: (file: File, folderId?: string | null) => Promise<void>; onDelete: (paper: LibraryPaper) => Promise<void>; onUpdate: (papers: LibraryPaper[]) => void; onSearch: (folderId?: string | null) => void; onFindPapers: (folderId: string | null) => void;
 }) {
   const [recentReadings, setRecentReadings] = useState<ReadingPosition[]>([]);
   const [folders, setFolders] = useState<Folder[]>([]);
@@ -208,7 +208,7 @@ export default function LibraryDashboard({ papers, loading, uploading, error, br
 
   return <main className="library-shell files-shell">
     <span ref={dragPreviewRef} className="files-drag-preview" aria-hidden="true"><Icon kind="file" /><span ref={dragCountRef} className="files-drag-count" hidden /></span>
-    <header className="library-header">{brand}<button className="command-trigger" aria-label="Search all papers and folders" aria-keyshortcuts="Meta+K Control+K" data-tooltip="Search all papers and folders (⌘ / Ctrl + K)" onClick={onSearch}><Icon kind="search" /><span>Search papers and folders…</span><kbd>⌘ K</kbd></button><div className="library-actions">{settings}{addPDF}</div></header>
+    <header className="library-header">{brand}<button className="command-trigger" aria-label="Search all papers and folders" aria-keyshortcuts="Meta+K Control+K" data-tooltip="Search all papers and folders (⌘ / Ctrl + K)" onClick={() => onSearch(folderId)}><Icon kind="search" /><span>Search papers and folders…</span><kbd>⌘ K</kbd></button><div className="library-actions">{settings}<button className="files-secondary" aria-keyshortcuts="Meta+Shift+K Control+Shift+K" data-tooltip="Find papers online (⌘ / Ctrl + Shift + K)" onClick={() => onFindPapers(folderId)}>Find papers</button>{addPDF}</div></header>
     <input ref={uploadRef} aria-label="Upload PDF" type="file" accept="application/pdf,.pdf" hidden disabled={uploading} onChange={(event) => { const file = event.target.files?.[0]; if (file) void onUpload(file, folderId); event.target.value = ''; }} />
     <div className="files-workspace">
       <aside className="files-sidebar"><p className="files-nav-label">LIBRARY</p><nav aria-label="Library navigation">

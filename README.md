@@ -5,6 +5,7 @@ Adam is a local-first, self-hosted research-paper reader with selection-aware AI
 The current vertical slice supports:
 
 - persistent local PDF upload and library
+- online paper discovery from **Find papers** or the search dialog: search arXiv and the web, review source/PDF links, choose a folder, and download into the local reader; source failures leave other results available, and identical PDFs reuse existing library copies
 - optional folders with bulk paper moves, folder-scoped uploads and search, and grid/list views; removing a folder keeps its papers, notes, and chats
 - in-browser PDF rendering and native text selection
 - a floating reader dock with editable page and zoom controls, plus a matching editable chat text percentage
@@ -55,7 +56,7 @@ npm run dev
 ```
 
 The frontend runs at <http://localhost:3000> and proxies `/api` requests to the development API at <http://localhost:8000>.
-For local development, start the search service with `docker compose up -d search`; the backend uses <http://localhost:8888> by default.
+For local development, start the search service with `docker compose up -d search`; the backend uses <http://localhost:8888> by default. Paper discovery queries arXiv directly and uses this service for broader web results. No AI key is needed. Search runs only on submission; reviewing a source may load remote metadata/PDF links, and **Download & add to library** stores the PDF and extracts its text. Restricted or unavailable PDFs can still be uploaded manually. Imported papers retain their source URL, PDF URL, available identifiers, and import date. arXiv versions remain separate search results; repeat imports preserve the existing copy and its folder, notes, and chats.
 
 ## Data durability
 
@@ -93,3 +94,5 @@ Open <http://localhost:7414>. The original reference previews on 7411–7413 use
 Click a page number or percentage to edit it; Enter applies a valid value, and Escape or leaving the field cancels the edit. Page numbers must be whole numbers within the paper. Paper zoom accepts 10–3200%; chat text accepts 100–200%. Invalid input stays in the field with a message. Escape clears bulk selection when no dialog or text entry is active. Continue reading appears after opening papers and stores progress in this browser; it resumes the page, position within the page, horizontal scroll, and zoom.
 
 Checks: `npm run lint`, `npm run build`, and `npm run test:reader-controls` from `frontend/`. The existing global Cloudflare/browser type collisions remain in the default TypeScript configuration; `npx tsc --noEmit --types node --incremental false` checks the browser code without those conflicting ambient globals.
+
+Paper search shortcuts: `Cmd/Ctrl + K` opens library search and switches between local and online search while the dialog is open. `Cmd/Ctrl + Shift + K` opens online paper discovery directly. Switching modes preserves the query and online results.

@@ -1,3 +1,4 @@
+import json
 from datetime import datetime, timezone
 from uuid import uuid4
 
@@ -35,11 +36,16 @@ class Document(Base):
     storage_path: Mapped[str] = mapped_column(Text)
     page_count: Mapped[int] = mapped_column(Integer, default=0)
     status: Mapped[str] = mapped_column(String(32), default="ready")
+    discovery_json: Mapped[str] = mapped_column(Text, default="{}", server_default="{}")
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
     updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow, onupdate=utcnow)
     pages: Mapped[list["Page"]] = relationship(back_populates="document", cascade="all, delete-orphan")
     conversations: Mapped[list["Conversation"]] = relationship(back_populates="document", cascade="all, delete-orphan")
     paper_note: Mapped["PaperNote | None"] = relationship(back_populates="document", cascade="all, delete-orphan", uselist=False)
+
+    @property
+    def discovery(self) -> dict:
+        return json.loads(self.discovery_json or "{}")
 
 
 class Page(Base):
