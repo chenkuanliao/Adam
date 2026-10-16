@@ -198,7 +198,7 @@ def list_folders(db: Session = Depends(get_db)) -> list[Folder]:
 def create_folder(request: FolderIn, db: Session = Depends(get_db)) -> Folder:
     parent = folder_parent(db, request.parent_id)
     folder = Folder(name=validate_folder_name(request.name, db, parent_id=request.parent_id), parent_id=request.parent_id,
-                    color=parent.color if parent else (request.color or automatic_folder_color(db)).lower())
+                    color=parent.color if parent else (request.color or automatic_folder_color(db)).lower(), icon=request.icon or "folder")
     db.add(folder)
     db.commit()
     return folder
@@ -216,6 +216,8 @@ def rename_folder(folder_id: str, request: FolderUpdate, db: Session = Depends(g
     folder.name = name
     folder.parent_id = parent_id
     color_branch(db, folder, color.lower())
+    if request.icon is not None:
+        folder.icon = request.icon
     db.commit()
     return folder
 
