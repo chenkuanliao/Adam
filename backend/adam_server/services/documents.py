@@ -1,4 +1,5 @@
 import hashlib
+import json
 import os
 import threading
 from pathlib import Path
@@ -10,6 +11,7 @@ import fitz
 from fastapi import HTTPException, UploadFile
 from sqlalchemy import select
 from sqlalchemy.exc import IntegrityError
+from sqlalchemy.orm import Session
 
 from ..config import Settings
 from ..database import SessionLocal
@@ -37,14 +39,32 @@ _INGEST_LOCK = threading.Lock()
 _INGEST_LIMITER = anyio.CapacityLimiter(2)
 
 
-async def ingest_pdf(upload: UploadFile, settings: Settings) -> Document:
+async def ingest_pdf(upload: UploadFile, settings: Settings, *, folder_id: str | None = None, discovery: dict | None = None) -> Document:
     try:
-        return await anyio.to_thread.run_sync(ingest_pdf_file, upload.file, upload.filename, settings, limiter=_INGEST_LIMITER)
+        return await anyio.to_thread.run_sync(
+            lambda: ingest_pdf_file(upload.file, upload.filename, settings, folder_id=folder_id, discovery=discovery),
+            limiter=_INGEST_LIMITER,
+        )
     finally:
         await upload.close()
 
 
-def ingest_pdf_file(source_file: BinaryIO, filename: str | None, settings: Settings) -> Document:
+def _existing_document(db: Session, existing: Document, discovery: dict | None) -> Document:
+    if discovery and not existing.discovery:
+        existing.discovery_json = json.dumps(discovery)
+        db.commit()
+        db.refresh(existing)
+    return existing
+
+
+def ingest_pdf_file(
+    source_file: BinaryIO,
+    filename: str | None,
+    settings: Settings,
+    *,
+    folder_id: str | None = None,
+    discovery: dict | None = None,
+) -> Document:
     """Store and extract a PDF using its own database session; safe to run in a worker thread."""
     safe_name = Path(filename or "paper.pdf").name
     temp_path = settings.data_dir / "tmp" / f"upload-{os.urandom(12).hex()}.pdf"
@@ -70,12 +90,12 @@ def ingest_pdf_file(source_file: BinaryIO, filename: str | None, settings: Setti
         with SessionLocal() as db:
             existing = db.scalar(select(Document).where(Document.sha256 == sha256))
             if existing:
-                return existing
+                return _existing_document(db, existing, discovery)
 
             with _INGEST_LOCK:
                 existing = db.scalar(select(Document).where(Document.sha256 == sha256))
                 if existing:
-                    return existing
+                    return _existing_document(db, existing, discovery)
 
                 try:
                     with PDF_ENGINE_LOCK:
@@ -108,6 +128,8 @@ def ingest_pdf_file(source_file: BinaryIO, filename: str | None, settings: Setti
                     storage_path=str(final_path.relative_to(settings.data_dir)),
                     page_count=len(extracted),
                     status="ready",
+                    folder_id=folder_id,
+                    discovery_json=json.dumps(discovery or {}),
                 )
                 document.pages = [Page(**page) for page in extracted]
                 db.add(document)
@@ -118,7 +140,7 @@ def ingest_pdf_file(source_file: BinaryIO, filename: str | None, settings: Setti
                     db.rollback()
                     existing = db.scalar(select(Document).where(Document.sha256 == sha256))
                     if existing:
-                        return existing
+                        return _existing_document(db, existing, discovery)
                     raise
                 db.refresh(document)
                 return document

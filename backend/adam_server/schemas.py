@@ -1,4 +1,5 @@
 from datetime import datetime
+from typing import Literal
 
 from pydantic import BaseModel, ConfigDict, Field
 
@@ -13,6 +14,31 @@ class DocumentOut(BaseModel):
     status: str
     created_at: datetime
     updated_at: datetime
+    discovery: dict = Field(default_factory=dict)
+
+
+class PaperCandidate(BaseModel):
+    title: str = Field(min_length=1, max_length=1000)
+    authors: list[str] = Field(default_factory=list, max_length=100)
+    year: str = Field(default="", max_length=10)
+    abstract: str = Field(default="", max_length=15000)
+    source: str = Field(default="Web", max_length=100)
+    source_url: str = Field(min_length=1, max_length=4000)
+    pdf_urls: list[str] = Field(default_factory=list, max_length=10)
+    arxiv_id: str | None = Field(default=None, max_length=100)
+    doi: str | None = Field(default=None, max_length=300)
+    existing_document_id: str | None = None
+
+
+class PaperSearchOut(BaseModel):
+    results: list[PaperCandidate]
+    warnings: list[str]
+
+
+class PaperImportIn(BaseModel):
+    paper: PaperCandidate
+    pdf_url: str = Field(min_length=1, max_length=4000)
+    folder_id: str | None = None
 
 
 class DocumentUpdate(BaseModel):
@@ -221,16 +247,30 @@ class ProviderKeyUpdate(BaseModel):
     api_key: str | None = Field(default=None, max_length=10000)
 
 
+FolderIcon = Literal["folder", "book", "bookmark", "star", "heart", "lightbulb", "flask", "code", "globe", "leaf", "briefcase", "graduation"]
+
+
 class FolderIn(BaseModel):
+    parent_id: str | None = None
     name: str = Field(min_length=1, max_length=80)
     color: str | None = Field(default=None, pattern=r"^#[0-9a-fA-F]{6}$")
+    icon: FolderIcon | None = None
+
+
+class FolderUpdate(BaseModel):
+    name: str | None = Field(default=None, min_length=1, max_length=80)
+    color: str | None = Field(default=None, pattern=r"^#[0-9a-fA-F]{6}$")
+    parent_id: str | None = None
+    icon: FolderIcon | None = None
 
 
 class FolderOut(BaseModel):
     model_config = ConfigDict(from_attributes=True)
     id: str
     name: str
+    parent_id: str | None
     color: str
+    icon: FolderIcon
     created_at: datetime
 
 
