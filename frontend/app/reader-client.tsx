@@ -114,7 +114,8 @@ export default function Home() {
   const [quickError, setQuickError] = useState('');
   const [revealedLinkId, setRevealedLinkId] = useState<string | null>(null);
   const [linkRevealVersion, setLinkRevealVersion] = useState(0);
-  const [linkedTurn, setLinkedTurn] = useState<{ conversationId: string; question: string } | null>(null);
+  const linkedTurnRevealRef = useRef(0);
+  const [linkedTurn, setLinkedTurn] = useState<{ conversationId: string; question: string; reveal: number } | null>(null);
   const [selectedAiNote, setSelectedAiNote] = useState<HighlightEntry | null>(null);
   const [screenshotMode, setScreenshotMode] = useState(false);
   const [screenshotDrag, setScreenshotDrag] = useState<ScreenshotDrag | null>(null);
@@ -155,9 +156,15 @@ export default function Home() {
   const [settingsOpen, setSettingsOpen] = useState(false);
   const [libraryLoading, setLibraryLoading] = useState(true);
   const [paperSearchOpen, setPaperSearchOpen] = useState(false);
+  const [paperSearchMode, setPaperSearchMode] = useState<'library' | 'online'>('library');
+  const [paperSearchFolder, setPaperSearchFolder] = useState<string | null>(null);
   const [libraryNavigation, setLibraryNavigation] = useState(0);
   const [chatConfigured, setChatConfigured] = useState<boolean | null>(null);
-  const [paneMode, setPaneMode] = useState<PaneMode>('chat');
+  const [paneMode, setPaneModeState] = useState<PaneMode>('chat');
+  const setPaneMode = useCallback((mode: PaneMode) => {
+    setLinkedTurn(null);
+    setPaneModeState(mode);
+  }, []);
   const [pendingNoteQuote, setPendingNoteQuote] = useState<ContextSelection | null>(null);
   const [currentPage, setCurrentPage] = useState(1);
   const [shortcutsOpen, setShortcutsOpen] = useState(false);
@@ -411,9 +418,9 @@ export default function Home() {
 
   useEffect(() => {
     const openPaperSearch = (event: KeyboardEvent) => {
-      if ((event.metaKey || event.ctrlKey) && event.key.toLowerCase() === 'k') {
+      if (!event.defaultPrevented && !event.altKey && (event.metaKey || event.ctrlKey) && event.key.toLowerCase() === 'k') {
         event.preventDefault();
-        if (!document.querySelector('dialog[open]')) setPaperSearchOpen(true);
+        if (!document.querySelector('dialog[open]')) { setPaperSearchMode(event.shiftKey ? 'online' : 'library'); const location = window.localStorage.getItem('adam.libraryLocation'); setPaperSearchFolder(location && !['all', 'unfiled'].includes(location) ? location : null); setPaperSearchOpen(true); }
       }
     };
     window.addEventListener('keydown', openPaperSearch);
@@ -576,7 +583,7 @@ export default function Home() {
     setSheetOpen(true);
     followOutputRef.current = true;
     focusComposerAfterContextRef.current = true;
-  }, [changeReadingMode]);
+  }, [changeReadingMode, setPaneMode]);
 
   function pauseChatFollow() {
     followOutputRef.current = false;
@@ -821,6 +828,7 @@ export default function Home() {
 
   async function openConversation(conversation: Conversation) {
     if (activePaperIdRef.current !== conversation.document_id) return;
+    setLinkedTurn(null);
     activeConversationIdRef.current = conversation.id;
     const loadId = ++conversationLoadRef.current;
     const response = await fetch(`${API_BASE}/api/conversations/${conversation.id}`);
@@ -1166,7 +1174,7 @@ export default function Home() {
       setPaneMode('chat');
       changeReadingMode(false);
       setHistoryOpen(false);
-      setLinkedTurn({ conversationId: conversation.id, question: link.question });
+      setLinkedTurn({ conversationId: conversation.id, question: link.question, reveal: ++linkedTurnRevealRef.current });
     } catch (reason) {
       setError(reason instanceof Error ? reason.message : 'This linked chat could not be opened.');
     }
@@ -1700,9 +1708,9 @@ export default function Home() {
   if (!active) return (<>
     <ActionTooltips />
     <AppDialogs />
-    <LibraryDashboard key={libraryNavigation} onSearch={() => setPaperSearchOpen(true)} papers={papers} loading={libraryLoading} uploading={uploading} error={error} brand={<Brand />} settings={<SettingsButton onClick={() => setSettingsOpen(true)} />} preview={(paper) => <PaperPreview paper={paper} />} onOpen={(paper) => openPaper(paper)} onUpload={upload} onDelete={(paper) => deletePaper(paper)} onUpdate={(updated) => setPapers((current) => current.map((paper) => updated.find((item) => item.id === paper.id) ?? paper))} />
+    <LibraryDashboard key={libraryNavigation} onSearch={(folderId) => { setPaperSearchMode('library'); setPaperSearchFolder(folderId ?? null); setPaperSearchOpen(true); }} onFindPapers={(folderId) => { setPaperSearchMode('online'); setPaperSearchFolder(folderId); setPaperSearchOpen(true); }} papers={papers} loading={libraryLoading} uploading={uploading} error={error} brand={<Brand />} settings={<SettingsButton onClick={() => setSettingsOpen(true)} />} preview={(paper) => <PaperPreview paper={paper} />} onOpen={(paper) => openPaper(paper)} onUpload={upload} onDelete={(paper) => deletePaper(paper)} onUpdate={(updated) => setPapers((current) => current.map((paper) => updated.find((item) => item.id === paper.id) ?? paper))} />
     {settingsOpen && <SettingsDialog onClose={closeSettings} />}
-    {paperSearchOpen && <LibrarySpotlight onBrowseFolder={(folderId) => { window.localStorage.setItem('adam.libraryLocation', folderId); setLibraryNavigation((value) => value + 1); setPaperSearchOpen(false); returnToLibrary(); }} papers={papers} onClose={() => setPaperSearchOpen(false)} onOpen={(paper) => { setPaperSearchOpen(false); openPaper(paper); }} />}
+    {paperSearchOpen && <LibrarySpotlight initialMode={paperSearchMode} initialFolderId={paperSearchFolder} onImported={(paper) => setPapers((current) => current.some((item) => item.id === paper.id) ? current.map((item) => item.id === paper.id ? paper : item) : [paper, ...current])} onBrowseFolder={(folderId) => { window.localStorage.setItem('adam.libraryLocation', folderId); setLibraryNavigation((value) => value + 1); setPaperSearchOpen(false); returnToLibrary(); }} papers={papers} onClose={() => setPaperSearchOpen(false)} onOpen={(paper) => { setPaperSearchOpen(false); openPaper(paper); }} />}
   </>);
 
   return (
@@ -1727,9 +1735,9 @@ export default function Home() {
             <button type="button" className="new-chat-card" onClick={() => void createNewConversation()}><span>＋</span><div><strong>Start a new chat</strong><small>Uses your current default model</small></div><i>→</i></button>
             <div className="history-list">{conversations.map((item) => <article className={`history-card${item.id === activeConversation?.id ? ' current' : ''}`} key={item.id}>{renamingChatId === item.id ? <form className="chat-title-form history-title-form" onSubmit={(event) => void renameConversation(event, item)}><input autoFocus value={chatTitleValue} maxLength={200} aria-label="Chat title" onChange={(event) => setChatTitleValue(event.target.value)} onKeyDown={(event) => { if (event.key === 'Escape') setRenamingChatId(null); }} /><button type="submit" disabled={!chatTitleValue.trim() || titleSaving}>Save</button><button type="button" onClick={() => setRenamingChatId(null)}>Cancel</button></form> : <button type="button" className="history-card-main" onClick={() => void openConversation(item)}><div className="history-card-top"><span className="history-model-mark">✦</span><time>{formatConversationDate(item.updated_at)}</time></div><strong>{item.title}</strong><p>{item.provider} · {item.model_id}</p><div className="history-card-meta"><span>{Math.ceil(item.message_count / 2)} {Math.ceil(item.message_count / 2) === 1 ? 'exchange' : 'exchanges'}</span><span>{item.context_builder_version === 'quick-ask-v1' ? 'Selection only' : 'Full paper'}</span>{item.id === activeConversation?.id && <em>Current</em>}</div></button>}<div className="history-card-actions"><button type="button" aria-label={`Rename ${item.title}`} title="Rename chat" onClick={() => beginChatRename(item)}>✎</button>{item.message_count > 0 && <button type="button" aria-label={`Regenerate title for ${item.title}`} title="Regenerate title with the model selected in Settings" disabled={titleSaving} onClick={() => void regenerateConversationTitle(item)}>↻</button>}<button type="button" className="history-delete" aria-label={`Delete ${item.title}`} title="Delete chat" onClick={() => void deleteConversation(item)}><TrashIcon /></button></div></article>)}</div>
           </section> : <>
-            <div className="conversation-header"><div>{activeConversation && renamingChatId === activeConversation.id ? <form className="chat-title-form" onSubmit={(event) => void renameConversation(event, activeConversation)}><input autoFocus value={chatTitleValue} maxLength={200} aria-label="Chat title" onChange={(event) => setChatTitleValue(event.target.value)} onKeyDown={(event) => { if (event.key === 'Escape') setRenamingChatId(null); }} /><button type="submit" disabled={!chatTitleValue.trim() || titleSaving}>Save</button></form> : <button type="button" className="chat-title-button" title="Rename chat" onClick={() => activeConversation && beginChatRename(activeConversation)}><strong>{activeConversation?.title ?? 'Loading chat…'}</strong><span>✎</span></button>}<small>{activeConversation ? `${activeConversation.provider} · ${activeConversation.model_id}` : 'Preparing paper context'}</small></div><div className="conversation-actions">{activeConversation && activeConversation.message_count > 0 && <button type="button" disabled={titleSaving} onClick={() => void regenerateConversationTitle(activeConversation)} title="Regenerate title with the model selected in Settings"><UiIcon kind="refresh" /><span>Title</span></button>}<button type="button" onClick={() => void createNewConversation()} title="Start a new chat"><UiIcon kind="plus" /><span>New</span></button><button type="button" onClick={() => setHistoryOpen(true)} title="Browse chats for this paper"><UiIcon kind="history" /><span>History</span></button></div></div>
+            <div className="conversation-header"><div>{activeConversation && renamingChatId === activeConversation.id ? <form className="chat-title-form" onSubmit={(event) => void renameConversation(event, activeConversation)}><input autoFocus value={chatTitleValue} maxLength={200} aria-label="Chat title" onChange={(event) => setChatTitleValue(event.target.value)} onKeyDown={(event) => { if (event.key === 'Escape') setRenamingChatId(null); }} /><button type="submit" disabled={!chatTitleValue.trim() || titleSaving}>Save</button></form> : <button type="button" className="chat-title-button" title="Rename chat" onClick={() => activeConversation && beginChatRename(activeConversation)}><strong>{activeConversation?.title ?? 'Loading chat…'}</strong><span>✎</span></button>}<small>{activeConversation ? `${activeConversation.provider} · ${activeConversation.model_id}` : 'Preparing paper context'}</small></div><div className="conversation-actions">{activeConversation && activeConversation.message_count > 0 && <button type="button" disabled={titleSaving} onClick={() => void regenerateConversationTitle(activeConversation)} title="Regenerate title with the model selected in Settings"><UiIcon kind="refresh" /><span>Title</span></button>}<button type="button" onClick={() => void createNewConversation()} title="Start a new chat"><UiIcon kind="plus" /><span>New</span></button><button type="button" onClick={() => { setLinkedTurn(null); setHistoryOpen(true); }} title="Browse chats for this paper"><UiIcon kind="history" /><span>History</span></button></div></div>
             <div className="chat-body" ref={chatBodyRef} onWheelCapture={(event) => { if (event.deltaY < 0) pauseChatFollow(); }} onTouchMove={pauseChatFollow} onPointerDown={(event) => { if (event.target === event.currentTarget) pauseChatFollow(); }} onScroll={(event) => { const element = event.currentTarget; followOutputRef.current = element.scrollHeight - element.scrollTop - element.clientHeight < 40; }}><div className="chat-heading"><span className="spark">✦</span><div><strong>{activeConversation?.context_builder_version === 'quick-ask-v1' ? 'Saved Quick Ask' : 'Ask about this paper'}</strong><p>{activeConversation?.context_builder_version === 'quick-ask-v1' ? 'This saved thread uses only its original selection and Quick Ask prompt.' : 'The full paper is available automatically. Select text only when you want to focus the answer.'}</p></div></div>{chatConfigured === false && <button type="button" className="no-key-notice" onClick={() => setSettingsOpen(true)}><strong>No API key configured</strong><span>Choose a provider and add a key in Settings to enable chat.</span></button>}
-              {chatHistory.map((turn) => <div className={`chat-turn${linkedTurn?.conversationId === activeConversation?.id && linkedTurn?.question === turn.question ? ' linked-turn' : ''}`} data-question={turn.question} tabIndex={-1} key={turn.id}>{turn.importedQuickAsk && <div className="quick-import-badge">✦ Saved Quick Ask · selection only</div>}<ContextList selections={turn.context} />{activeConversation && turn.context.some((item) => item.rects?.length) && <button type="button" className={`turn-link-button${isAiLinked(activeConversation.id, turn.question) ? ' linked' : ''}`} onClick={() => void toggleAiLink(activeConversation, turn.question, turn.context)}>{isAiLinked(activeConversation.id, turn.question) ? '✦ Linked to PDF · click to unlink' : '✦ Link reference to PDF'}</button>}<div className="user-message"><span>You</span><p>{turn.question}</p></div><div className="answer-card complete"><div className="answer-meta"><span>Adam</span><span className="stream-state">Done</span></div><MarkdownAnswer web={turn.web}>{turn.answer}</MarkdownAnswer><WebEvidence web={turn.web} /></div></div>)}
+              {chatHistory.map((turn) => <div className="chat-turn" data-question={turn.question} tabIndex={-1} key={turn.id}>{linkedTurn?.conversationId === activeConversation?.id && linkedTurn?.question === turn.question && <span key={linkedTurn.reveal} className="linked-turn-reveal" aria-hidden="true" onAnimationEnd={() => setLinkedTurn((current) => current === linkedTurn ? null : current)} />}{turn.importedQuickAsk && <div className="quick-import-badge">✦ Saved Quick Ask · selection only</div>}<ContextList selections={turn.context} />{activeConversation && turn.context.some((item) => item.rects?.length) && <button type="button" className={`turn-link-button${isAiLinked(activeConversation.id, turn.question) ? ' linked' : ''}`} onClick={() => void toggleAiLink(activeConversation, turn.question, turn.context)}>{isAiLinked(activeConversation.id, turn.question) ? '✦ Linked to PDF · click to unlink' : '✦ Link reference to PDF'}</button>}<div className="user-message"><span>You</span><p>{turn.question}</p></div><div className="answer-card complete"><div className="answer-meta"><span>Adam</span><span className="stream-state">Done</span></div><MarkdownAnswer web={turn.web}>{turn.answer}</MarkdownAnswer><WebEvidence web={turn.web} /></div></div>)}
               {submittedQuestion && <><ContextList selections={submittedContext} />{activeConversation && streamStatus === 'complete' && submittedContext.some((item) => item.rects?.length) && <button type="button" className={`turn-link-button${isAiLinked(activeConversation.id, submittedQuestion) ? ' linked' : ''}`} onClick={() => void toggleAiLink(activeConversation, submittedQuestion, submittedContext)}>{isAiLinked(activeConversation.id, submittedQuestion) ? '✦ Linked to PDF · click to unlink' : '✦ Link reference to PDF'}</button>}<div className="user-message"><span>You</span><p>{submittedQuestion}</p></div></>}
               {streamStatus !== 'idle' && streamStatus !== 'error' && <div className={`answer-card ${streamStatus}`} aria-live="polite"><div className="answer-meta"><span>Adam</span><span className="stream-state">{streamStatus === 'connecting' ? <>Thinking<span className="thinking-dots"><i /><i /><i /></span></> : streamStatus === 'streaming' ? 'Responding…' : 'Done'}</span></div>{searchNotice && <p className="search-notice" role="status">{searchNotice}</p>}<StreamingMarkdown store={answerStore} web={answerWeb} streaming={streamStatus === 'streaming'} onCommit={followChatOutput} /><WebEvidence web={answerWeb} /></div>}{error && <p className="error-banner compact">{error}</p>}
               {contextSelections.length > 0 ? <ContextList selections={contextSelections} onRemove={(id) => setContextSelections((current) => current.filter((item) => item.id !== id))} /> : !submittedQuestion && chatHistory.length === 0 && <div className="empty-context"><span>✦</span><p>Ask anything about the paper, or select a passage for precise focus.</p>{canAsk && activeConversation?.context_builder_version !== 'quick-ask-v1' && <div className="prompt-suggestions">{PROMPT_SUGGESTIONS.map((suggestion) => <button type="button" key={suggestion} onClick={() => { questionStore.set(suggestion); composerRef.current?.focus(); }}>{suggestion}</button>)}</div>}</div>}
@@ -1755,7 +1763,7 @@ export default function Home() {
         <div className="quick-ask-footer"><span>Save this thread before linking it to the PDF</span><div><button type="button" className="move-to-chat" onClick={() => void importQuickAsk()} disabled={quickAsking || quickImporting || (!quickTurns.length && !hasQuickAnswer)}>{quickImporting ? 'Saving…' : 'Save as new chat →'}</button></div></div>
       </form>}
       {settingsOpen && <SettingsDialog onClose={closeSettings} />}
-      {paperSearchOpen && <LibrarySpotlight onBrowseFolder={(folderId) => { window.localStorage.setItem('adam.libraryLocation', folderId); setLibraryNavigation((value) => value + 1); setPaperSearchOpen(false); returnToLibrary(); }} papers={papers} onClose={() => setPaperSearchOpen(false)} onOpen={(paper) => { setPaperSearchOpen(false); openPaper(paper); }} />}
+      {paperSearchOpen && <LibrarySpotlight initialMode={paperSearchMode} initialFolderId={paperSearchFolder} onImported={(paper) => setPapers((current) => current.some((item) => item.id === paper.id) ? current.map((item) => item.id === paper.id ? paper : item) : [paper, ...current])} onBrowseFolder={(folderId) => { window.localStorage.setItem('adam.libraryLocation', folderId); setLibraryNavigation((value) => value + 1); setPaperSearchOpen(false); returnToLibrary(); }} papers={papers} onClose={() => setPaperSearchOpen(false)} onOpen={(paper) => { setPaperSearchOpen(false); openPaper(paper); }} />}
     </main>
   );
 }

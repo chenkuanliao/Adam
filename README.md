@@ -5,7 +5,8 @@ Adam is a local-first, self-hosted research-paper reader with selection-aware AI
 The current vertical slice supports:
 
 - persistent local PDF upload and library
-- optional folders with bulk paper moves, folder-scoped uploads and search, and grid/list views; removing a folder keeps its papers, notes, and chats
+- online paper discovery from **Find papers** or the search dialog: search arXiv and the web, review source/PDF links, choose a folder, and download into the local reader; source failures leave other results available, and identical PDFs reuse existing library copies
+- nested folders with drag-and-drop folder and paper moves, root color inheritance, 12 selectable icons, folder-scoped uploads and search, and grid/list views; removing a folder keeps its papers, notes, and chats
 - in-browser PDF rendering and native text selection
 - a floating reader dock with editable page and zoom controls, plus a matching editable chat text percentage
 - Continue reading with browser-local saved page, zoom, and reading position
@@ -55,7 +56,7 @@ npm run dev
 ```
 
 The frontend runs at <http://localhost:3000> and proxies `/api` requests to the development API at <http://localhost:8000>.
-For local development, start the search service with `docker compose up -d search`; the backend uses <http://localhost:8888> by default.
+For local development, start the search service with `docker compose up -d search`; the backend uses <http://localhost:8888> by default. Paper discovery queries arXiv directly and uses this service for broader web results. No AI key is needed. Search runs only on submission; reviewing a source may load remote metadata/PDF links, and **Download & add to library** stores the PDF and extracts its text. Restricted or unavailable PDFs can still be uploaded manually. Imported papers retain their source URL, PDF URL, available identifiers, and import date. arXiv versions remain separate search results; repeat imports preserve the existing copy and its folder, notes, and chats.
 
 ## Data durability
 
@@ -90,6 +91,10 @@ ADAM_INTERNAL_API_BASE=http://127.0.0.1:8414 ADAM_INSPECTOR_PORT=9414 npm run de
 
 Open <http://localhost:7414>. The original reference previews on 7411–7413 use other checkouts and are left running. No Docker changes are required. Demo chat needs a configured provider key for live AI; the PDF, folder, settings, selection, and saved-reading interactions work without one.
 
+Click a sidebar folder row to open it and toggle its subfolders. The chevron indicates whether the branch is expanded, and your choices are remembered in this browser. Create a subfolder from an open folder, or choose a parent in the New folder dialog. Drag folders onto other folders or onto All papers / Workspace to move them to the top level. Edit folder also lets you change its parent. Descendants inherit their root folder’s color; moving a branch to the top level automatically assigns a color. Removing a folder keeps its papers in Unfiled and promotes its subfolders to the top level.
+
 Click a page number or percentage to edit it; Enter applies a valid value, and Escape or leaving the field cancels the edit. Page numbers must be whole numbers within the paper. Paper zoom accepts 10–3200%; chat text accepts 100–200%. Invalid input stays in the field with a message. Escape clears bulk selection when no dialog or text entry is active. Continue reading appears after opening papers and stores progress in this browser; it resumes the page, position within the page, horizontal scroll, and zoom.
 
 Checks: `npm run lint`, `npm run build`, and `npm run test:reader-controls` from `frontend/`. The existing global Cloudflare/browser type collisions remain in the default TypeScript configuration; `npx tsc --noEmit --types node --incremental false` checks the browser code without those conflicting ambient globals.
+
+Paper search shortcuts: `Cmd/Ctrl + K` opens library search and switches between local and online search while the dialog is open. `Cmd/Ctrl + Shift + K` opens online paper discovery directly. Switching modes preserves the query and online results.
