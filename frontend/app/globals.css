@@ -662,6 +662,8 @@ kbd { display: inline-grid; place-items: center; min-width: 18px; height: 18px; 
 .paper-note-editor input[type="checkbox"] { width: 14px; height: 14px; margin: 0 8px 0 -20px; vertical-align: -2px; accent-color: var(--accent) }
 .paper-note-placeholder { position: absolute; z-index: 0; left: 26px; top: 24px; display: none; max-width: calc(100% - 52px); color: var(--faint); pointer-events: none }
 .paper-note-placeholder.visible { display: grid; gap: 6px }
+/* Empty-state instructions must not sit underneath the active text caret. */
+.paper-note-editor:focus + .paper-note-placeholder { display: none }
 .paper-note-placeholder strong { font: 500 18px var(--font-serif) }
 .paper-note-placeholder span { font-size: 12.5px; line-height: 1.5 }
 .paper-note-error { flex: none; padding: 10px 16px; border: 0; border-top: 1px solid #ecc8c1; background: var(--danger-soft); color: var(--danger); font-size: 12.5px; text-align: left }
