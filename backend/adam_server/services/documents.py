@@ -1,4 +1,5 @@
 import hashlib
+import json
 import os
 from pathlib import Path
 
@@ -22,7 +23,7 @@ def document_file_path(storage_path: str, settings: Settings) -> Path:
     return path.resolve()
 
 
-async def ingest_pdf(upload: UploadFile, db: Session, settings: Settings) -> Document:
+async def ingest_pdf(upload: UploadFile, db: Session, settings: Settings, *, folder_id: str | None = None, discovery: dict | None = None) -> Document:
     safe_name = Path(upload.filename or "paper.pdf").name
     temp_path = settings.data_dir / "tmp" / f"upload-{os.urandom(12).hex()}.pdf"
     digest = hashlib.sha256()
@@ -45,6 +46,10 @@ async def ingest_pdf(upload: UploadFile, db: Session, settings: Settings) -> Doc
         sha256 = digest.hexdigest()
         existing = db.scalar(select(Document).where(Document.sha256 == sha256))
         if existing:
+            if discovery and not existing.discovery:
+                existing.discovery_json = json.dumps(discovery)
+                db.commit()
+                db.refresh(existing)
             return existing
 
         try:
@@ -75,6 +80,8 @@ async def ingest_pdf(upload: UploadFile, db: Session, settings: Settings) -> Doc
             storage_path=str(final_path.relative_to(settings.data_dir)),
             page_count=len(extracted),
             status="ready",
+            folder_id=folder_id,
+            discovery_json=json.dumps(discovery or {}),
         )
         document.pages = [Page(**page) for page in extracted]
         db.add(document)
