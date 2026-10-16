@@ -5,7 +5,7 @@ Adam is a local-first, self-hosted research-paper reader with selection-aware AI
 The current vertical slice supports:
 
 - persistent local PDF upload and library
-- optional folders with bulk paper moves, folder-scoped uploads and search, and grid/list views; removing a folder keeps its papers, notes, and chats
+- optional folders with 12 selectable icons and preset/custom colors, bulk paper moves, folder-scoped uploads and search, and grid/list views; removing a folder keeps its papers, notes, and chats
 - in-browser PDF rendering and native text selection
 - a floating reader dock with editable page and zoom controls, plus a matching editable chat text percentage
 - Continue reading with browser-local saved page, zoom, and reading position

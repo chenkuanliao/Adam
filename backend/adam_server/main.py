@@ -166,7 +166,7 @@ def list_folders(db: Session = Depends(get_db)) -> list[Folder]:
 
 @app.post("/api/folders", response_model=FolderOut, status_code=201)
 def create_folder(request: FolderIn, db: Session = Depends(get_db)) -> Folder:
-    folder = Folder(name=validate_folder_name(request.name, db), color=(request.color or "#8c9d65").lower())
+    folder = Folder(name=validate_folder_name(request.name, db), color=(request.color or "#8c9d65").lower(), icon=request.icon or "folder")
     db.add(folder)
     db.commit()
     db.refresh(folder)
@@ -181,6 +181,8 @@ def rename_folder(folder_id: str, request: FolderIn, db: Session = Depends(get_d
     folder.name = validate_folder_name(request.name, db, folder_id)
     if request.color is not None:
         folder.color = request.color.lower()
+    if request.icon is not None:
+        folder.icon = request.icon
     db.commit()
     db.refresh(folder)
     return folder

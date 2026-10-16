@@ -20,6 +20,7 @@ class Folder(Base):
 
     id: Mapped[str] = mapped_column(String(36), primary_key=True, default=new_id)
     name: Mapped[str] = mapped_column(String(80), unique=True)
+    icon: Mapped[str] = mapped_column(String(24), default="folder", server_default="folder")
     color: Mapped[str] = mapped_column(String(7), default="#8c9d65", server_default="#8c9d65")
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
 

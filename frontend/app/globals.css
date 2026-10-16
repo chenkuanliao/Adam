@@ -1108,3 +1108,12 @@ kbd { display: inline-grid; place-items: center; min-width: 18px; height: 18px; 
   .reader-dock, .selection-toolbar, .files-selection-bar, .action-tooltip, .linked-passage-toast, .quick-ask-head { background:#f1f6f1; -webkit-backdrop-filter:none; backdrop-filter:none }
   .side-pane .mode-tabs, .side-pane .conversation-header, .composer { background:var(--surface); -webkit-backdrop-filter:none; backdrop-filter:none }
 }
+
+.folder-icon-picker { min-width: 0; margin: 20px 0 0; padding: 0; border: 0 }
+.folder-icon-picker legend { margin-bottom: 10px; padding: 0; color: var(--ink-2); font-size: 13px; font-weight: 600 }
+.folder-icon-options { display: grid; grid-template-columns: repeat(6, minmax(0, 1fr)); gap: 8px }
+.folder-icon-option { display: grid; place-items: center; min-height: 40px; padding: 8px; border: 1px solid var(--rule); border-radius: 9px; background: var(--surface); color: var(--ink-2); transition: background .15s, border-color .15s }
+.folder-icon-option:hover { background: var(--folder-tint); color: var(--folder-ink) }
+.folder-icon-option[aria-pressed=true] { background: var(--folder-tint); border-color: var(--folder-ink); color: var(--folder-ink); box-shadow: inset 0 0 0 1px var(--folder-ink) }
+.folder-icon-option:focus-visible { outline: 2px solid var(--folder-ink); outline-offset: 3px }
+.folder-icon-picker:disabled { opacity: .55 }

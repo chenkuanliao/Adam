@@ -1,4 +1,5 @@
 from datetime import datetime
+from typing import Literal
 
 from pydantic import BaseModel, ConfigDict, Field
 
@@ -221,9 +222,13 @@ class ProviderKeyUpdate(BaseModel):
     api_key: str | None = Field(default=None, max_length=10000)
 
 
+FolderIcon = Literal["folder", "book", "bookmark", "star", "heart", "lightbulb", "flask", "code", "globe", "leaf", "briefcase", "graduation"]
+
+
 class FolderIn(BaseModel):
     name: str = Field(min_length=1, max_length=80)
     color: str | None = Field(default=None, pattern=r"^#[0-9a-fA-F]{6}$")
+    icon: FolderIcon | None = None
 
 
 class FolderOut(BaseModel):
@@ -231,6 +236,7 @@ class FolderOut(BaseModel):
     id: str
     name: str
     color: str
+    icon: FolderIcon
     created_at: datetime
 
 
