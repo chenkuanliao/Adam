@@ -7,6 +7,7 @@ The current vertical slice supports:
 - persistent local PDF upload and library
 - optional folders with bulk paper moves, folder-scoped uploads and search, and grid/list views; removing a folder keeps its papers, notes, and chats
 - in-browser PDF rendering and native text selection
+- full-window focus reading: click **Focus reading** or press `F` to hide the sidebar and anchored note cards while keeping note and chat-link icons available; use **Exit focus** or `Esc` to restore your workspace, zoom, and reading position
 - local native-text extraction with PyMuPDF
 - durable per-paper chat histories with create, switch, delete, and reload restoration
 - automatic full-paper context for every question, with selected passages and images treated as explicit focus

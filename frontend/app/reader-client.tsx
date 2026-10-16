@@ -1,7 +1,7 @@
 'use client';
 /* eslint-disable @next/next/no-img-element -- context thumbnails are local data URLs */
 
-import { FormEvent, useCallback, useEffect, useLayoutEffect, useRef, useState, type CSSProperties } from 'react';
+import { FormEvent, memo, useCallback, useEffect, useLayoutEffect, useRef, useState, type CSSProperties } from 'react';
 import { Document as PdfDocument, Page, pdfjs } from 'react-pdf';
 import type { PDFPageProxy, TextContent } from 'pdfjs-dist/types/src/display/api';
 import ReactMarkdown from 'react-markdown';
@@ -103,6 +103,10 @@ export default function Home() {
   const [highlightEntries, setHighlightEntries] = useState<HighlightEntry[]>([]);
   const [noteEditor, setNoteEditor] = useState<NoteEditor | null>(null);
   const [notesVisible, setNotesVisible] = useState(false);
+  const [focusReading, setFocusReading] = useState(false);
+  const focusButtonRef = useRef<HTMLButtonElement>(null);
+  const focusWorkspaceRef = useRef<{ zoom: number; fit: boolean } | null>(null);
+  const readingAnchorRef = useRef<{ page: number; offset: number } | null>(null);
   const [noteSaving, setNoteSaving] = useState(false);
   const [question, setQuestion] = useState('');
   const [submittedQuestion, setSubmittedQuestion] = useState('');
@@ -117,6 +121,7 @@ export default function Home() {
   const [answerWeb, setAnswerWeb] = useState<WebInfo | null>(null);
   const [searchNotice, setSearchNotice] = useState('');
   const [zoom, setZoom] = useState(DEFAULT_ZOOM);
+  const [rasterZoom, setRasterZoom] = useState(DEFAULT_ZOOM);
   const [chatScale, setChatScale] = useState(DEFAULT_CHAT_SCALE);
   const [paperPercent, setPaperPercent] = useState(DEFAULT_PAPER_PERCENT);
   const [uploading, setUploading] = useState(false);
@@ -168,6 +173,13 @@ export default function Home() {
   const highlightRedoRef = useRef<HighlightEntry[][]>([]);
   const isScreenshotDragging = screenshotDrag !== null;
 
+  // Scale the existing page immediately; redraw at a sharper resolution only
+  // after the gesture settles, rather than restarting PDF.js on every wheel tick.
+  useEffect(() => {
+    const timer = window.setTimeout(() => setRasterZoom(zoom), 200);
+    return () => window.clearTimeout(timer);
+  }, [zoom]);
+
   const loadPapers = useCallback(async () => {
     try {
       const response = await fetch(`${API_BASE}/api/documents`);
@@ -195,14 +207,14 @@ export default function Home() {
       const centerX = viewerRect.left + viewportX;
       const centerY = viewerRect.top + viewportY;
       const pageElements = Array.from(viewer.querySelectorAll<HTMLElement>('[data-page-number]'));
-      const focusedPage = pageElements.reduce<HTMLElement | null>((closest, page) => {
+      let focusedPage: HTMLElement | null = null;
+      let closestDistance = Infinity;
+      for (const page of pageElements) {
         const rect = page.getBoundingClientRect();
         const distance = centerY < rect.top ? rect.top - centerY : centerY > rect.bottom ? centerY - rect.bottom : 0;
-        if (!closest) return page;
-        const closestRect = closest.getBoundingClientRect();
-        const closestDistance = centerY < closestRect.top ? closestRect.top - centerY : centerY > closestRect.bottom ? centerY - closestRect.bottom : 0;
-        return distance < closestDistance ? page : closest;
-      }, null);
+        if (distance < closestDistance) { focusedPage = page; closestDistance = distance; }
+        if (distance === 0) break;
+      }
       if (focusedPage) {
         const rect = focusedPage.querySelector('.pdf-page-wrap')!.getBoundingClientRect();
         pendingZoomRef.current = {
@@ -224,12 +236,69 @@ export default function Home() {
     if (!viewer) return;
     const styles = window.getComputedStyle(viewer);
     const horizontalPadding = parseFloat(styles.paddingLeft) + parseFloat(styles.paddingRight);
-    const availableWidth = viewer.clientWidth - horizontalPadding - 34 - (notesVisibleRef.current ? NOTE_RAIL_WIDTH : 0);
+    const availableWidth = viewer.clientWidth - horizontalPadding - 34 - (notesVisibleRef.current && !focusWorkspaceRef.current ? NOTE_RAIL_WIDTH : 0);
     if (availableWidth <= 0) return;
     const fittedZoom = Math.min(MAX_ZOOM, Math.max(MIN_ZOOM, Math.floor(availableWidth / BASE_PAGE_WIDTH * 100) / 100));
     changeZoom(fittedZoom - zoomRef.current);
     fitZoomRef.current = true;
   }, [changeZoom]);
+
+  const changeReadingMode = useCallback((opening: boolean) => {
+    if (opening === Boolean(focusWorkspaceRef.current)) return;
+    const viewer = viewerRef.current;
+    if (viewer) {
+      const top = viewer.getBoundingClientRect().top;
+      const page = Array.from(viewer.querySelectorAll<HTMLElement>('[data-page-number]')).find((item) => item.getBoundingClientRect().bottom > top);
+      if (page) {
+        const rect = page.getBoundingClientRect();
+        readingAnchorRef.current = { page: Number(page.dataset.pageNumber), offset: (top - rect.top) / rect.height };
+      }
+    }
+    if (opening) focusWorkspaceRef.current = { zoom: zoomRef.current, fit: fitZoomRef.current };
+    setPendingSelection(null);
+    setScreenshotSelection(null);
+    setFocusReading(opening);
+  }, []);
+
+  useLayoutEffect(() => {
+    const previous = focusWorkspaceRef.current;
+    if (!previous) return;
+    if (focusReading) fitPaperToPane();
+    else {
+      focusWorkspaceRef.current = null;
+      if (previous.fit) fitPaperToPane();
+      else { changeZoom(previous.zoom - zoomRef.current); fitZoomRef.current = false; }
+    }
+    const frame = window.requestAnimationFrame(() => {
+      const viewer = viewerRef.current;
+      const anchor = readingAnchorRef.current;
+      const page = viewer?.querySelector<HTMLElement>(`[data-page-number="${anchor?.page}"]`);
+      if (viewer && anchor && page) {
+        const rect = page.getBoundingClientRect();
+        viewer.scrollTop += rect.top + anchor.offset * rect.height - viewer.getBoundingClientRect().top;
+      }
+      readingAnchorRef.current = null;
+    });
+    return () => window.cancelAnimationFrame(frame);
+  }, [focusReading, changeZoom, fitPaperToPane]);
+
+  useEffect(() => {
+    const handleReadingKey = (event: KeyboardEvent) => {
+      const target = event.target as HTMLElement | null;
+      if (event.defaultPrevented || event.repeat || target?.closest('input, textarea, select, [contenteditable="true"], dialog[open]') || document.querySelector('dialog[open]')) return;
+      if (event.key.toLowerCase() === 'f' && !event.metaKey && !event.ctrlKey && !event.altKey && !event.shiftKey && !window.getSelection()?.toString()) {
+        event.preventDefault();
+        if (target && target === focusButtonRef.current) target.blur();
+        changeReadingMode(!focusReading);
+      } else if (event.key === 'Escape' && focusReading && !pendingSelection && !quickAskTarget && !noteEditor && !selectedAiNote && !screenshotMode && !screenshotSelection) {
+        event.preventDefault();
+        if (target && target === focusButtonRef.current) target.blur();
+        changeReadingMode(false);
+      }
+    };
+    if (active) window.addEventListener('keydown', handleReadingKey);
+    return () => window.removeEventListener('keydown', handleReadingKey);
+  }, [active, focusReading, changeReadingMode, pendingSelection, quickAskTarget, noteEditor, selectedAiNote, screenshotMode, screenshotSelection]);
 
   function toggleNotes() {
     const opening = !notesVisibleRef.current;
@@ -333,6 +402,10 @@ export default function Home() {
     const viewer = viewerRef.current;
     if (!viewer || !active) return;
 
+    let frame: number | null = null;
+    let requestedZoom = zoomRef.current;
+    let pointer = { x: 0, y: 0 };
+
     const handleViewerWheel = (event: WheelEvent) => {
       // Browsers expose trackpad pinch as a wheel event with ctrlKey set.
       // Also support explicit Ctrl/Command + mouse-wheel zoom.
@@ -347,12 +420,18 @@ export default function Home() {
       event.preventDefault();
       if (event.deltaY === 0) return;
       const factor = Math.exp(-Math.max(-100, Math.min(100, event.deltaY)) * .005);
-      changeZoom(zoomRef.current * (factor - 1), { x: event.clientX, y: event.clientY });
+      requestedZoom = Math.min(MAX_ZOOM, Math.max(MIN_ZOOM, (frame === null ? zoomRef.current : requestedZoom) * factor));
+      pointer = { x: event.clientX, y: event.clientY };
+      if (frame === null) frame = window.requestAnimationFrame(() => {
+        frame = null;
+        changeZoom(requestedZoom - zoomRef.current, pointer);
+      });
     };
 
     viewer.addEventListener('wheel', handleViewerWheel, { passive: false });
     return () => {
       viewer.removeEventListener('wheel', handleViewerWheel);
+      if (frame !== null) window.cancelAnimationFrame(frame);
     };
   }, [active, changeZoom]);
 
@@ -414,9 +493,11 @@ export default function Home() {
   }, [answer, submittedQuestion, streamStatus, chatHistory.length, contextSelections.length]);
 
   const revealNewContext = useCallback(() => {
+    changeReadingMode(false);
+    setPaneMode('chat');
     followOutputRef.current = true;
     focusComposerAfterContextRef.current = true;
-  }, []);
+  }, [changeReadingMode]);
 
   function pauseChatFollow() {
     followOutputRef.current = false;
@@ -585,6 +666,7 @@ export default function Home() {
     setLinkedTurn(null);
     setRevealedLinkId(null);
     setSelectedAiNote(null);
+    changeReadingMode(false);
     setPages(0);
     setContextSelections([]);
     setPendingSelection(null);
@@ -617,6 +699,7 @@ export default function Home() {
   }
 
   function returnToLibrary() {
+    changeReadingMode(false);
     activePaperIdRef.current = null;
     activeConversationIdRef.current = null;
     paperLoadRef.current += 1;
@@ -778,6 +861,8 @@ export default function Home() {
     const pageElement = (range.startContainer.nodeType === Node.ELEMENT_NODE ? range.startContainer as Element : range.startContainer.parentElement)?.closest<HTMLElement>('.react-pdf__Page');
     const selection = { id, text, page, rects: pageElement ? getHighlightRects(range, pageElement) : undefined };
     clearBrowserSelection();
+    changeReadingMode(false);
+    setPaneMode('chat');
     if (!alreadyAdded) {
       if (shouldStartNewChat && !await createNewConversation()) return;
       revealNewContext();
@@ -791,6 +876,7 @@ export default function Home() {
     const { id, text, page } = pendingSelection;
     setPendingNoteQuote({ id, text, page });
     setPaneMode('notes');
+    changeReadingMode(false);
     clearBrowserSelection();
   }
 
@@ -964,6 +1050,7 @@ export default function Home() {
       if (activePaperIdRef.current !== paperId || activeConversationIdRef.current !== conversation.id) return;
       setSelectedAiNote(null);
       setPaneMode('chat');
+      changeReadingMode(false);
       setHistoryOpen(false);
       setLinkedTurn({ conversationId: conversation.id, question: link.question });
     } catch (reason) {
@@ -1176,6 +1263,12 @@ export default function Home() {
   }
 
   function openSavedNote(entry: HighlightEntry) {
+    changeReadingMode(false);
+    // Wait for the restored split and reading anchor before placing the editor.
+    window.requestAnimationFrame(() => window.requestAnimationFrame(() => positionSavedNote(entry)));
+  }
+
+  function positionSavedNote(entry: HighlightEntry) {
     const page = viewerRef.current?.querySelector<HTMLElement>(`[data-page-number="${entry.page}"] .react-pdf__Page`);
     const pageRect = page?.getBoundingClientRect();
     const first = entry.rects[0];
@@ -1448,19 +1541,19 @@ export default function Home() {
   </>);
 
   return (
-    <main className="reader-shell">
+    <main className={`reader-shell${focusReading ? ' focus-reading' : ''}`}>
       <ActionTooltips />
-      <header className="reader-header"><button className="brand-button" onClick={returnToLibrary} aria-label="Back to library"><Brand /></button><div className="document-title">{renaming ? <form onSubmit={(event) => void renamePaper(event)}><input autoFocus aria-label="PDF filename" value={renameValue} maxLength={512} onChange={(event) => setRenameValue(event.target.value)} onKeyDown={(event) => { if (event.key === 'Escape') setRenaming(false); }} disabled={renameSaving} /><button type="submit" disabled={!renameValue.trim() || renameSaving}>{renameSaving ? 'Saving…' : 'Save'}</button></form> : <button type="button" className="document-title-button" title="Rename PDF" onClick={() => { setRenameValue(active.original_name.replace(/\.pdf$/i, '')); setRenaming(true); }}><strong>{active.original_name.replace(/\.pdf$/i, '')}</strong><span aria-hidden="true">✎</span></button>}<span>{pages || active.page_count} pages · local</span></div><div className="reader-header-tools"><button type="button" className={`note-view-button${notesVisible ? ' active' : ''}`} onClick={toggleNotes} title={notesVisible ? 'Hide anchored notes' : 'View anchored notes'}><span>▰</span>{notesVisible ? 'Hide notes' : 'View notes'}<strong>{highlightEntries.filter((entry) => entry.note_text).length}</strong></button><div className="paper-zoom"><span className="control-label">Paper</span><div className="header-actions" role="group" aria-label="Paper zoom"><button title="Zoom paper out" aria-label="Zoom paper out" disabled={zoom <= MIN_ZOOM} onClick={() => changeZoom(zoom * (1 / 1.2 - 1))}>−</button><button className="zoom-reset" title="Reset paper zoom to 100%" aria-label="Reset paper zoom to 100%" onClick={() => changeZoom(1 - zoomRef.current)}>{Math.round(zoom * 100)}%</button><button title="Zoom paper in" aria-label="Zoom paper in" disabled={zoom >= MAX_ZOOM} onClick={() => changeZoom(zoom * .2)}>+</button><button className="zoom-fit" title="Fit paper to pane" aria-label="Fit paper to pane" onClick={fitPaperToPane}>Fit</button></div></div><button type="button" className="reader-delete-button" aria-label="Delete paper" title="Delete paper" onClick={() => void deletePaper(active)}><TrashIcon /></button><SettingsButton compact onClick={() => setSettingsOpen(true)} /></div></header>
-      <div className={`reader-workspace${notesVisible ? ' notes-mode' : ''}`} ref={workspaceRef} style={{ gridTemplateColumns: `minmax(0, ${paperPercent}fr) minmax(340px, ${100 - paperPercent}fr)` }}>
+      <header className="reader-header"><button className="brand-button" onClick={returnToLibrary} aria-label="Back to library"><Brand /></button><div className="document-title">{renaming ? <form onSubmit={(event) => void renamePaper(event)}><input autoFocus aria-label="PDF filename" value={renameValue} maxLength={512} onChange={(event) => setRenameValue(event.target.value)} onKeyDown={(event) => { if (event.key === 'Escape') setRenaming(false); }} disabled={renameSaving} /><button type="submit" disabled={!renameValue.trim() || renameSaving}>{renameSaving ? 'Saving…' : 'Save'}</button></form> : <button type="button" className="document-title-button" title="Rename PDF" onClick={() => { setRenameValue(active.original_name.replace(/\.pdf$/i, '')); setRenaming(true); }}><strong>{active.original_name.replace(/\.pdf$/i, '')}</strong><span aria-hidden="true">✎</span></button>}<span>{pages || active.page_count} pages · local</span></div><div className="reader-header-tools"><button type="button" ref={focusButtonRef} className="focus-reading-button" aria-pressed={focusReading} aria-keyshortcuts="F" title={focusReading ? 'Exit focus reading · Esc' : 'Focus reading · F'} onClick={() => changeReadingMode(!focusReading)}><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.7" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true"><path d={focusReading ? 'M4 9h5V4m11 5h-5V4M4 15h5v5m11-5h-5v5' : 'M9 4H4v5m11-5h5v5M4 15v5h5m11-5v5h-5'} /></svg><span>{focusReading ? 'Exit focus' : 'Focus reading'}</span><kbd>{focusReading ? 'Esc' : 'F'}</kbd></button><button type="button" className={`note-view-button${notesVisible ? ' active' : ''}`} onClick={toggleNotes} title={notesVisible ? 'Hide anchored notes' : 'View anchored notes'}><span>▰</span>{notesVisible ? 'Hide notes' : 'View notes'}<strong>{highlightEntries.filter((entry) => entry.note_text).length}</strong></button><div className="paper-zoom"><span className="control-label">Paper</span><div className="header-actions" role="group" aria-label="Paper zoom"><button title="Zoom paper out" aria-label="Zoom paper out" disabled={zoom <= MIN_ZOOM} onClick={() => changeZoom(zoom * (1 / 1.2 - 1))}>−</button><button className="zoom-reset" title="Reset paper zoom to 100%" aria-label="Reset paper zoom to 100%" onClick={() => changeZoom(1 - zoomRef.current)}>{Math.round(zoom * 100)}%</button><button title="Zoom paper in" aria-label="Zoom paper in" disabled={zoom >= MAX_ZOOM} onClick={() => changeZoom(zoom * .2)}>+</button><button className="zoom-fit" title="Fit paper to pane" aria-label="Fit paper to pane" onClick={fitPaperToPane}>Fit</button></div></div><button type="button" className="reader-delete-button" aria-label="Delete paper" title="Delete paper" onClick={() => void deletePaper(active)}><TrashIcon /></button><SettingsButton compact onClick={() => setSettingsOpen(true)} /></div></header>
+      <div className={`reader-workspace${notesVisible && !focusReading ? ' notes-mode' : ''}`} ref={workspaceRef} style={{ gridTemplateColumns: `minmax(0, ${paperPercent}fr) minmax(340px, ${100 - paperPercent}fr)` }}>
         <section className={`pdf-pane${screenshotMode ? ' screenshot-mode' : ''}`} ref={viewerRef} onMouseUp={(event) => { if (!screenshotMode) captureSelection(event); }} onPointerDown={beginScreenshot} onPointerMove={moveScreenshot} onPointerUp={finishScreenshot} onPointerCancel={() => { screenshotPointerRef.current = null; setScreenshotDrag(null); setScreenshotMode(false); }}>
           <PdfDocument file={`${API_BASE}/api/documents/${active.id}/file`} onLoadSuccess={({ numPages }) => setPages(numPages)} loading={<div className="viewer-message">Rendering paper…</div>} error={<div className="viewer-message error-banner">Could not render this PDF.</div>}>
-            {Array.from({ length: pages }, (_, index) => { const pageEntries = highlightEntries.filter((entry) => entry.page === index + 1); const pageNotes = pageEntries.filter((entry) => entry.note_text).sort(compareNotePosition); const aiNotes = pageEntries.filter((entry) => entry.ai_links?.length).sort(compareNotePosition); const markers = pageEntries.filter((entry) => entry.note_text || entry.ai_links?.length).sort(compareNotePosition); const pageScale = zoom / BASE_RENDER_SCALE; return <div className="pdf-page-stage" data-page-number={index + 1} key={index + 1}><div className="pdf-page-wrap" style={{ zoom: pageScale, '--page-scale': pageScale } as CSSProperties}><PdfPageWithHighlights pageNumber={index + 1} highlights={pageEntries} zoom={zoom} />{pageEntries.filter((entry) => entry.id === revealedLinkId).map((entry) => <LinkedPassageReveal key={`${entry.id}-${linkRevealVersion}`} entry={entry} viewerRef={viewerRef} />)}{aiNotes.map((note) => <button type="button" className="ai-note-anchor" style={{ top: `${noteMarkerTop(markers, markers.indexOf(note)) * 100}%` }} title={`${note.ai_links!.length} linked AI ${note.ai_links!.length === 1 ? 'note' : 'notes'}`} aria-label="Open linked AI notes" onClick={() => setSelectedAiNote(note)} key={`ai-${note.id}`}>✦<small>{note.ai_links!.length}</small></button>)}{!notesVisible && pageNotes.map((note) => <button type="button" className="note-anchor" style={{ top: `${noteMarkerTop(markers, markers.indexOf(note)) * 100}%`, '--note-color': note.color } as CSSProperties} title="Open note" aria-label="Open note" onClick={() => openSavedNote(note)} key={note.id}>▰</button>)}{notesVisible && <aside className="page-notes" aria-label={`Notes for page ${index + 1}`}>{pageNotes.map((note, noteIndex) => <button type="button" className="page-note-card" style={{ top: `${noteCardTop(pageNotes, noteIndex) * 100}%`, '--note-color': note.color } as CSSProperties} onClick={() => openSavedNote(note)} key={note.id}><span>Page {index + 1}</span><p>{note.note_text}</p><small>{note.text}</small></button>)}</aside>}<span className="page-label">{index + 1}</span></div></div>; })}
+            {Array.from({ length: pages }, (_, index) => { const pageEntries = highlightEntries.filter((entry) => entry.page === index + 1); const pageNotes = pageEntries.filter((entry) => entry.note_text).sort(compareNotePosition); const aiNotes = pageEntries.filter((entry) => entry.ai_links?.length).sort(compareNotePosition); const markers = pageEntries.filter((entry) => entry.note_text || entry.ai_links?.length).sort(compareNotePosition); const pageScale = zoom / BASE_RENDER_SCALE; return <div className="pdf-page-stage" data-page-number={index + 1} key={index + 1}><div className="pdf-page-wrap" style={{ zoom: pageScale, '--page-scale': pageScale } as CSSProperties}><PdfPageWithHighlights pageNumber={index + 1} highlights={pageEntries} zoom={rasterZoom} />{pageEntries.filter((entry) => entry.id === revealedLinkId).map((entry) => <LinkedPassageReveal key={`${entry.id}-${linkRevealVersion}`} entry={entry} viewerRef={viewerRef} />)}{aiNotes.map((note) => <button type="button" className="ai-note-anchor" style={{ top: `${noteMarkerTop(markers, markers.indexOf(note)) * 100}%` }} title={`${note.ai_links!.length} linked AI ${note.ai_links!.length === 1 ? 'note' : 'notes'}`} aria-label="Open linked AI notes" onClick={() => { changeReadingMode(false); setPaneMode('links'); setSelectedAiNote(note); }} key={`ai-${note.id}`}>✦<small>{note.ai_links!.length}</small></button>)}{(!notesVisible || focusReading) && pageNotes.map((note) => <button type="button" className="note-anchor" style={{ top: `${noteMarkerTop(markers, markers.indexOf(note)) * 100}%`, '--note-color': note.color } as CSSProperties} title="Open note" aria-label="Open note" onClick={() => openSavedNote(note)} key={note.id}>▰</button>)}{notesVisible && !focusReading && <aside className="page-notes" aria-label={`Notes for page ${index + 1}`}>{pageNotes.map((note, noteIndex) => <button type="button" className="page-note-card" style={{ top: `${noteCardTop(pageNotes, noteIndex) * 100}%`, '--note-color': note.color } as CSSProperties} onClick={() => openSavedNote(note)} key={note.id}><span>Page {index + 1}</span><p>{note.note_text}</p><small>{note.text}</small></button>)}</aside>}<span className="page-label">{index + 1}</span></div></div>; })}
           </PdfDocument>
           {screenshotMode && !screenshotDrag && <div className="screenshot-hint">Drag over the PDF to ask about it · Esc to cancel</div>}
           {screenshotDrag && <div className="screenshot-region" style={{ left: screenshotDrag.overlayLeft, top: screenshotDrag.overlayTop, width: screenshotDrag.overlayWidth, height: screenshotDrag.overlayHeight }} />}
         </section>
-        <div className="pane-resizer" style={{ left: `${paperPercent}%` }} role="separator" aria-label="Resize paper and chat panes" aria-orientation="vertical" aria-valuemin={MIN_PAPER_PERCENT} aria-valuemax={80} aria-valuenow={Math.round(paperPercent)} tabIndex={0} onPointerDown={beginWorkspaceResize} onPointerMove={moveWorkspaceResize} onPointerUp={finishWorkspaceResize} onPointerCancel={() => { resizingRef.current = false; }} onDoubleClick={resetWorkspaceResize}><span /></div>
-        <aside className="side-pane" style={{ '--chat-scale': chatScale } as CSSProperties}>
+        <div className="pane-resizer" hidden={focusReading} style={{ left: `${paperPercent}%` }} role="separator" aria-label="Resize paper and chat panes" aria-orientation="vertical" aria-valuemin={MIN_PAPER_PERCENT} aria-valuemax={80} aria-valuenow={Math.round(paperPercent)} tabIndex={0} onPointerDown={beginWorkspaceResize} onPointerMove={moveWorkspaceResize} onPointerUp={finishWorkspaceResize} onPointerCancel={() => { resizingRef.current = false; }} onDoubleClick={resetWorkspaceResize}><span /></div>
+        <aside className="side-pane" inert={focusReading} aria-hidden={focusReading} style={{ '--chat-scale': chatScale } as CSSProperties}>
           <div className="mode-tabs"><div className="tab-list"><button type="button" className={paneMode === 'chat' ? 'active' : ''} onClick={() => setPaneMode('chat')}>Chat</button><button type="button" className={paneMode === 'notes' ? 'active' : ''} onClick={() => setPaneMode('notes')}>Notes</button><button type="button" className={paneMode === 'links' ? 'active links-tab' : 'links-tab'} aria-pressed={paneMode === 'links'} onClick={() => setPaneMode('links')}>Chat links<span>{highlightEntries.reduce((count, entry) => count + (entry.ai_links?.length ?? 0), 0)}</span></button></div>{paneMode === 'chat' && <div className="chat-text-controls" role="group" aria-label="Chat text size"><span className="control-label">Text size</span><div><button type="button" aria-label="Decrease chat text size" title="Decrease chat text size" disabled={chatScale <= MIN_CHAT_SCALE} onClick={() => changeChatScale(-CHAT_SCALE_STEP)}>A−</button><output aria-live="polite" aria-label={`Chat text size ${Math.round(chatScale * 100)} percent`}>{Math.round(chatScale * 100)}%</output><button type="button" aria-label="Increase chat text size" title="Increase chat text size" disabled={chatScale >= MAX_CHAT_SCALE} onClick={() => changeChatScale(CHAT_SCALE_STEP)}>A+</button></div></div>}</div>
           {paneMode === 'links' ? <ChatLinksPanel key={active.id} entries={highlightEntries} conversations={conversations} activeConversationId={activeConversation?.id} revealedLinkId={revealedLinkId} onShowInPdf={showLinkInPdf} onOpen={openAiConversation} /> : paneMode === 'notes' ? <PaperNoteEditor documentId={active.id} paperName={active.original_name.replace(/\.pdf$/i, '')} pendingQuote={pendingNoteQuote} onQuoteConsumed={() => setPendingNoteQuote(null)} /> : historyOpen ? <section className="history-view">
             <div className="history-header"><div><p>Conversations</p><h2>Chat history</h2><span>{conversations.length} saved for this paper</span></div><button type="button" onClick={() => setHistoryOpen(false)} aria-label="Close chat history">×</button></div>
@@ -1657,11 +1750,12 @@ function ContextList({ selections, onRemove }: { selections: ContextSelection[];
   return <div className="context-list"><div className="context-list-heading"><span>Context</span><small>{selections.length} {selections.length === 1 ? 'item' : 'items'}</small></div>{selections.map((selection, index) => <div className={`selection-card${selection.imageDataUrl ? ' image-context' : ''}`} key={selection.id}><div><span>{selection.imageDataUrl ? 'Screenshot' : 'Excerpt'} {index + 1}{selection.page ? ` · ${selection.pageEnd && selection.pageEnd !== selection.page ? `pages ${selection.page}–${selection.pageEnd}` : `page ${selection.page}`}` : ''}</span>{onRemove && <button type="button" aria-label={`Remove context item ${index + 1}`} onClick={() => onRemove(selection.id)}>×</button>}</div>{selection.imageDataUrl ? <img src={selection.imageDataUrl} alt={`Selected area from page ${selection.page ?? ''}`} /> : <blockquote>{selection.text}</blockquote>}</div>)}</div>;
 }
 
-function PdfPageWithHighlights({ pageNumber, highlights, zoom }: { pageNumber: number; highlights: HighlightEntry[]; zoom: number }) {
+const PdfPageWithHighlights = memo(function PdfPageWithHighlights({ pageNumber, highlights, zoom }: { pageNumber: number; highlights: HighlightEntry[]; zoom: number }) {
   const [visible, setVisible] = useState(false);
   const [pageHeight, setPageHeight] = useState<number>();
   const [renderVersion, setRenderVersion] = useState(0);
   const pageElementRef = useRef<HTMLDivElement>(null);
+  const [rasterPage, setRasterPage] = useState<PDFPageProxy | null>(null);
   // Upgrade only pages near the viewport; cap raster size even at extreme zoom.
   // CSS zoom keeps the page, text, annotations, and note geometry in sync.
   useEffect(() => {
@@ -1674,7 +1768,6 @@ function PdfPageWithHighlights({ pageNumber, highlights, zoom }: { pageNumber: n
     return () => observer.disconnect();
   }, []);
   const renderScale = visible ? Math.max(BASE_RENDER_SCALE, Math.min(zoom, 4)) : BASE_RENDER_SCALE;
-  const pixelRatio = Math.min(typeof window === 'undefined' ? 1 : window.devicePixelRatio, 4 / renderScale);
   const pdfPageRef = useRef<PDFPageProxy | null>(null);
   const textContentRef = useRef<TextContent | null>(null);
   const handleRenderSuccess = useCallback(() => setRenderVersion((version) => version + 1), []);
@@ -1691,6 +1784,7 @@ function PdfPageWithHighlights({ pageNumber, highlights, zoom }: { pageNumber: n
     const spans = element.querySelectorAll<HTMLElement>('.textLayer span[role="presentation"]');
     const items = content.items.filter((item) => 'str' in item && item.str.length > 0);
     if (spans.length !== items.length || screenScale <= 0) return;
+    const corrections: Array<{ span: HTMLElement; transform: string }> = [];
     spans.forEach((span, index) => {
       const item = items[index];
       if (!('str' in item) || span.textContent !== item.str || content.styles[item.fontName]?.vertical) return;
@@ -1700,11 +1794,54 @@ function PdfPageWithHighlights({ pageNumber, highlights, zoom }: { pageNumber: n
       const actualWidth = span.getBoundingClientRect().width;
       const expectedWidth = item.width * viewport.scale * screenScale;
       if (actualWidth > 0 && Math.abs(actualWidth - expectedWidth) > 0.25) {
-        span.style.transform = `${span.style.transform} scaleX(${expectedWidth / actualWidth})`;
+        corrections.push({ span, transform: `${span.style.transform} scaleX(${expectedWidth / actualWidth})` });
       }
     });
+    // Finish layout reads before writing styles, avoiding a forced reflow for
+    // every text run when the sharper text layer arrives after zooming.
+    corrections.forEach(({ span, transform }) => { span.style.transform = transform; });
   }, []);
-  return <div style={{ width: BASE_PAGE_WIDTH * BASE_RENDER_SCALE, height: pageHeight }}><div style={{ zoom: BASE_RENDER_SCALE / renderScale }}><Page inputRef={pageElementRef} pageNumber={pageNumber} width={BASE_PAGE_WIDTH * renderScale} devicePixelRatio={pixelRatio} renderAnnotationLayer renderTextLayer onLoadSuccess={(page) => { pdfPageRef.current = page; const viewport = page.getViewport({ scale: 1 }); setPageHeight(BASE_PAGE_WIDTH * BASE_RENDER_SCALE * viewport.height / viewport.width); }} onGetTextSuccess={(content) => { textContentRef.current = content; }} onRenderTextLayerSuccess={alignTextLayer} onRenderSuccess={handleRenderSuccess}><HighlightCanvas highlights={highlights} renderVersion={renderVersion} /></Page></div></div>;
+  return <div className="pdf-raster-surface" style={{ width: BASE_PAGE_WIDTH * BASE_RENDER_SCALE, height: pageHeight }}><Page inputRef={pageElementRef} pageNumber={pageNumber} width={BASE_PAGE_WIDTH * BASE_RENDER_SCALE} renderMode="none" renderAnnotationLayer renderTextLayer onLoadSuccess={(page) => { pdfPageRef.current = page; setRasterPage(page); const viewport = page.getViewport({ scale: 1 }); setPageHeight(BASE_PAGE_WIDTH * BASE_RENDER_SCALE * viewport.height / viewport.width); }} onGetTextSuccess={(content) => { textContentRef.current = content; }} onRenderTextLayerSuccess={alignTextLayer}><PdfRasterCanvas page={rasterPage} renderScale={renderScale} onRenderSuccess={handleRenderSuccess} /><HighlightCanvas highlights={highlights} renderVersion={renderVersion} /></Page></div>;
+
+}, (previous, next) => previous.pageNumber === next.pageNumber && previous.zoom === next.zoom && previous.highlights.length === next.highlights.length && previous.highlights.every((entry, index) => entry === next.highlights[index]));
+
+// Keep the interactive Page/text layer at a fixed scale. Only the offscreen
+// raster changes resolution; completed images replace the displayed pixels.
+function PdfRasterCanvas({ page, renderScale, onRenderSuccess }: { page: PDFPageProxy | null; renderScale: number; onRenderSuccess: () => void }) {
+  const canvasRef = useRef<HTMLCanvasElement>(null);
+  const [error, setError] = useState('');
+  const baseViewport = page?.getViewport({ scale: 1 });
+  const width = BASE_PAGE_WIDTH * BASE_RENDER_SCALE;
+  const height = baseViewport ? width * baseViewport.height / baseViewport.width : undefined;
+
+  useEffect(() => {
+    if (!page) return;
+    const base = page.getViewport({ scale: 1 });
+    const pixelRatio = Math.min(window.devicePixelRatio || 1, 4 / renderScale);
+    const viewport = page.getViewport({ scale: BASE_PAGE_WIDTH * renderScale * pixelRatio / base.width });
+    const buffer = document.createElement('canvas');
+    buffer.width = Math.floor(viewport.width);
+    buffer.height = Math.floor(viewport.height);
+    let cancelled = false;
+    const task = page.render({ canvas: buffer, viewport, annotationMode: pdfjs.AnnotationMode.ENABLE });
+    void task.promise.then(() => {
+      if (cancelled) return;
+      const canvas = canvasRef.current;
+      const context = canvas?.getContext('2d', { alpha: false });
+      if (!canvas || !context) return;
+      canvas.width = buffer.width;
+      canvas.height = buffer.height;
+      context.drawImage(buffer, 0, 0);
+      setError('');
+      onRenderSuccess();
+    }).catch((reason: unknown) => {
+      if (cancelled || (reason instanceof Error && reason.name === 'RenderingCancelledException')) return;
+      setError('Could not render this page. Try reopening the paper.');
+    }).finally(() => { buffer.width = 0; buffer.height = 0; });
+    return () => { cancelled = true; task.cancel(); };
+  }, [page, renderScale, onRenderSuccess]);
+
+  return <><canvas ref={canvasRef} className="react-pdf__Page__canvas pdf-displayed-canvas" style={{ width, height }} aria-hidden="true" />{error && <div className="viewer-message error-banner" role="alert">{error}</div>}</>;
 }
 
 function HighlightCanvas({ highlights, renderVersion }: { highlights: HighlightEntry[]; renderVersion: number }) {
@@ -1714,13 +1851,15 @@ function HighlightCanvas({ highlights, renderVersion }: { highlights: HighlightE
     const page = overlay?.closest<HTMLElement>('.react-pdf__Page');
     const source = page?.querySelector<HTMLCanvasElement>('.react-pdf__Page__canvas');
     if (!overlay || !source || !source.width || !source.height) return;
+    const markers = highlights.filter((highlight) => !highlight.note_text && !highlight.ai_links?.length);
+    if (markers.length === 0) { overlay.width = 0; overlay.height = 0; return; }
     overlay.width = source.width;
     overlay.height = source.height;
     const sourceContext = source.getContext('2d', { willReadFrequently: true });
     const overlayContext = overlay.getContext('2d');
     if (!sourceContext || !overlayContext) return;
     overlayContext.clearRect(0, 0, overlay.width, overlay.height);
-    highlights.filter((highlight) => !highlight.note_text && !highlight.ai_links?.length).forEach((highlight) => {
+    markers.forEach((highlight) => {
       const red = Number.parseInt(highlight.color.slice(1, 3), 16);
       const green = Number.parseInt(highlight.color.slice(3, 5), 16);
       const blue = Number.parseInt(highlight.color.slice(5, 7), 16);
