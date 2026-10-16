@@ -2,7 +2,7 @@
 
 import { useEffect, useRef, useState } from 'react';
 import PaperDiscovery from './paper-discovery';
-import { folderStyle } from './folder-appearance';
+import { FolderIcon, folderStyle } from './folder-appearance';
 import { Icon, type Folder, type LibraryPaper } from './library-dashboard';
 
 type Result = { kind: 'folder'; folder: Folder } | { kind: 'paper'; paper: LibraryPaper };
@@ -27,7 +27,7 @@ export default function LibrarySpotlight({ papers, onClose, onOpen, onBrowseFold
   const inputRef = useRef<HTMLInputElement>(null);
   const resultsRef = useRef<HTMLDivElement>(null);
   const term = query.trim().toLocaleLowerCase();
-  const matchingFolders = scope ? [] : folders.filter((folder) => folder.name.toLocaleLowerCase().includes(term));
+  const matchingFolders = folders.filter((folder) => (!scope || folder.parent_id === scope.id) && folder.name.toLocaleLowerCase().includes(term));
   const matchingPapers = papers.filter((paper) => (!scope || paper.folder_id === scope.id) && paper.original_name.toLocaleLowerCase().includes(term));
   const results: Result[] = [...matchingFolders.map((folder): Result => ({ kind: 'folder', folder })), ...matchingPapers.map((paper): Result => ({ kind: 'paper', paper }))];
   const activeIndex = Math.min(selected, Math.max(0, results.length - 1));
@@ -99,10 +99,10 @@ export default function LibrarySpotlight({ papers, onClose, onOpen, onBrowseFold
     {error && <p className="error-banner" role="alert">{error}</p>}
     <div className="spotlight-panel" hidden={mode !== 'online'}><PaperDiscovery query={query} folders={folders} papers={papers} initialFolderId={scope?.id ?? initialFolderId} onImported={onImported} onOpen={onOpen} /></div>
     <div className="spotlight-panel" hidden={mode !== 'library'}>
-    {scope ? <div className="spotlight-scope"><button className="spotlight-back" data-tooltip="Return to all search results (Backspace in an empty search)" onClick={() => changeScope(null)}><span aria-hidden="true">←</span>All papers and folders</button><div className="spotlight-scope-heading" style={folderStyle(scope.color)}><span><Icon /><strong>{scope.name}</strong><small>{scopeCount} {scopeCount === 1 ? 'paper' : 'papers'}</small></span><button data-tooltip={`View ${scope.name} in the dashboard`} onClick={() => onBrowseFolder(scope.id)}>Open folder <span aria-hidden="true">↗</span></button></div></div> : <div className="spotlight-search-hint">Search your entire library. Select a folder to explore its papers.{loading && <span role="status">Loading folders…</span>}</div>}
+    {scope ? <div className="spotlight-scope"><button className="spotlight-back" data-tooltip="Return to all search results (Backspace in an empty search)" onClick={() => changeScope(null)}><span aria-hidden="true">←</span>All papers and folders</button><div className="spotlight-scope-heading" style={folderStyle(scope.color)}><span><FolderIcon value={scope.icon} /><strong>{scope.name}</strong><small>{scopeCount} {scopeCount === 1 ? 'paper' : 'papers'}</small></span><button data-tooltip={`View ${scope.name} in the dashboard`} onClick={() => onBrowseFolder(scope.id)}>Open folder <span aria-hidden="true">↗</span></button></div></div> : <div className="spotlight-search-hint">Search your entire library. Select a folder to explore its papers.{loading && <span role="status">Loading folders…</span>}</div>}
     <div className="spotlight-results" ref={resultsRef}>
       {results.map((result, index) => <button type="button" key={result.kind === 'folder' ? `folder-${result.folder.id}` : result.paper.id} className={index === activeIndex ? 'selected' : ''} data-active={index === activeIndex} aria-label={result.kind === 'folder' ? `Browse ${result.folder.name}` : `Open ${result.paper.original_name}`} data-tooltip={result.kind === 'folder' ? `Browse and search papers in ${result.folder.name}` : `Open ${result.paper.original_name}`} onMouseEnter={() => setSelected(index)} onClick={() => openResult(result)}>
-        {result.kind === 'folder' ? <><span className="spotlight-folder-icon" style={folderStyle(result.folder.color)}><Icon /></span><span><strong>{result.folder.name}</strong><small>Folder · {papers.filter((paper) => paper.folder_id === result.folder.id).length} papers</small></span><i aria-hidden="true">→</i></> : <><span className="spotlight-pdf">PDF</span><span><strong>{result.paper.original_name.replace(/\.pdf$/i, '')}</strong><small>{folders.find((folder) => folder.id === result.paper.folder_id)?.name ?? (result.paper.folder_id ? 'Folder' : 'Unfiled')} · {result.paper.page_count} pages · {Math.max(1, Math.round(result.paper.byte_size / 1024))} KB</small></span><i aria-hidden="true">↵</i></>}
+        {result.kind === 'folder' ? <><span className="spotlight-folder-icon" style={folderStyle(result.folder.color)}><FolderIcon value={result.folder.icon} /></span><span><strong>{result.folder.name}</strong><small>Folder · {papers.filter((paper) => paper.folder_id === result.folder.id).length} papers</small></span><i aria-hidden="true">→</i></> : <><span className="spotlight-pdf">PDF</span><span><strong>{result.paper.original_name.replace(/\.pdf$/i, '')}</strong><small>{folders.find((folder) => folder.id === result.paper.folder_id)?.name ?? (result.paper.folder_id ? 'Folder' : 'Unfiled')} · {result.paper.page_count} pages · {Math.max(1, Math.round(result.paper.byte_size / 1024))} KB</small></span><i aria-hidden="true">↵</i></>}
       </button>)}
       {results.length === 0 && <div className="spotlight-empty"><strong>{scope && !scopeCount ? 'This folder is empty' : 'No matching papers or folders'}</strong><span>{scope && !scopeCount ? 'Open the folder to add a PDF or move papers into it.' : scope ? 'Try a different title or return to all papers and folders.' : 'Try searching with fewer words.'}</span>{query && <button className="files-secondary" onClick={() => { setQuery(''); setSelected(0); inputRef.current?.focus(); }}>Clear search</button>}</div>}
     </div>
