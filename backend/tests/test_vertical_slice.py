@@ -576,7 +576,7 @@ def test_folder_migration_preserves_existing_papers_and_children(tmp_path) -> No
         assert db.execute('SELECT id, folder_id FROM documents').fetchall() == [('existing', None)]
         for table in ['pages', 'paper_notes', 'conversations', 'messages', 'annotations']:
             assert db.execute(f'SELECT COUNT(*) FROM {table}').fetchone()[0] == 1
-        assert db.execute('SELECT color FROM folders WHERE id = ?', ('old-folder',)).fetchone()[0] == '#8c9d65'
+        assert db.execute('SELECT color, icon FROM folders WHERE id = ?', ('old-folder',)).fetchone() == ('#8c9d65', 'folder')
         assert db.execute('PRAGMA foreign_key_check').fetchall() == []
 
 
@@ -634,3 +634,26 @@ def test_auto_title_uses_answer_and_preserves_chat_on_title_failure(monkeypatch)
         detail = client.get(f"/api/conversations/{conversation['id']}").json()
         assert detail["messages"][-1]["content"].startswith("Residual connections")
         assert detail["title"] == ("What does this do?" if mode == "failure" else "My residual connection notes")
+
+
+def test_folder_icons_are_validated_and_persist_across_updates() -> None:
+    folder = client.post('/api/folders', json={'name': 'Icon lifecycle'}).json()
+    assert folder['icon'] == 'folder'
+    url = f"/api/folders/{folder['id']}"
+    icons = ['folder', 'book', 'bookmark', 'star', 'heart', 'lightbulb', 'flask', 'code', 'globe', 'leaf', 'briefcase', 'graduation']
+    for icon in icons:
+        saved = client.patch(url, json={'name': folder['name'], 'icon': icon})
+        assert saved.status_code == 200
+        assert saved.json()['icon'] == icon
+    renamed = client.patch(url, json={'name': 'Icon renamed', 'color': '#618fbd'})
+    assert renamed.json()['icon'] == 'graduation'
+    assert next(item for item in client.get('/api/folders').json() if item['id'] == folder['id'])['icon'] == 'graduation'
+    for invalid in ['', 'unknown', '<svg>', 5]:
+        assert client.patch(url, json={'name': 'Icon renamed', 'icon': invalid}).status_code == 422
+        assert client.post('/api/folders', json={'name': 'Invalid icon', 'icon': invalid}).status_code == 422
+    assert client.patch(url, json={'name': 'Icon renamed', 'icon': None}).json()['icon'] == 'graduation'
+    client.delete(url)
+    custom = client.post('/api/folders', json={'name': 'Book collection', 'icon': 'book', 'color': '#9275bc'})
+    assert custom.status_code == 201
+    assert custom.json()['icon'] == 'book'
+    client.delete(f"/api/folders/{custom.json()['id']}")
