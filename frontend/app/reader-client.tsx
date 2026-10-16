@@ -4,10 +4,6 @@
 import { FormEvent, memo, useCallback, useEffect, useLayoutEffect, useRef, useState, type CSSProperties } from 'react';
 import { Document as PdfDocument, Page, pdfjs } from 'react-pdf';
 import type { PDFPageProxy, TextContent } from 'pdfjs-dist/types/src/display/api';
-import ReactMarkdown from 'react-markdown';
-import remarkGfm from 'remark-gfm';
-import remarkMath from 'remark-math';
-import rehypeKatex from 'rehype-katex';
 import AppSelect from './app-select';
 import { sameHighlightLocation } from './highlight-location';
 import EditableNumber from './editable-number';
@@ -16,6 +12,8 @@ import { readingHistory, saveReadingPosition, forgetReadingPosition, type Readin
 import ActionTooltips from './action-tooltips';
 import LibrarySpotlight from './library-spotlight';
 import LibraryDashboard, { type LibraryPaper } from './library-dashboard';
+import { DraftInput, DraftTextarea, MarkdownAnswer, StreamingMarkdown, useHasText } from './chat-text';
+import { createStreamBatcher, createTextStore, type StreamBatcher } from './stream-text';
 import 'katex/dist/katex.min.css';
 import 'react-pdf/dist/Page/AnnotationLayer.css';
 import 'react-pdf/dist/Page/TextLayer.css';
@@ -102,9 +100,11 @@ export default function Home() {
   const [pendingSelection, setPendingSelection] = useState<PendingSelection | null>(null);
   const [screenshotSelection, setScreenshotSelection] = useState<ScreenshotSelection | null>(null);
   const [quickAskTarget, setQuickAskTarget] = useState<QuickAskTarget | null>(null);
-  const [quickQuestion, setQuickQuestion] = useState('');
+  const [quickQuestionStore] = useState(createTextStore);
+  const hasQuickQuestion = useHasText(quickQuestionStore, true);
   const [quickActiveQuestion, setQuickActiveQuestion] = useState('');
-  const [quickAnswer, setQuickAnswer] = useState('');
+  const [quickAnswerStore] = useState(createTextStore);
+  const hasQuickAnswer = useHasText(quickAnswerStore);
   const [quickAnswerWeb, setQuickAnswerWeb] = useState<WebInfo | null>(null);
   const [quickSearchEnabled, setQuickSearchEnabled] = useState(false);
   const [quickSearchNotice, setQuickSearchNotice] = useState('');
@@ -127,10 +127,11 @@ export default function Home() {
   const focusWorkspaceRef = useRef<{ zoom: number; fit: boolean } | null>(null);
   const readingAnchorRef = useRef<{ page: number; offset: number } | null>(null);
   const [noteSaving, setNoteSaving] = useState(false);
-  const [question, setQuestion] = useState('');
+  const [questionStore] = useState(createTextStore);
+  const hasQuestion = useHasText(questionStore, true);
   const [submittedQuestion, setSubmittedQuestion] = useState('');
   const [submittedContext, setSubmittedContext] = useState<ContextSelection[]>([]);
-  const [answer, setAnswer] = useState('');
+  const [answerStore] = useState(createTextStore);
   const [chatHistory, setChatHistory] = useState<ChatTurn[]>([]);
   const [conversations, setConversations] = useState<Conversation[]>([]);
   const [activeConversation, setActiveConversation] = useState<Conversation | null>(null);
@@ -189,6 +190,7 @@ export default function Home() {
   const screenshotPointerRef = useRef<{ x: number; y: number } | null>(null);
   const pendingZoomRef = useRef<{ page: number; x: number; y: number; viewportX: number; viewportY: number } | null>(null);
   const pendingAnswersRef = useRef(new Map<string, PendingAnswer>());
+  const streamBatchersRef = useRef(new Set<StreamBatcher>());
   const activeConversationIdRef = useRef<string | null>(null);
   const activePaperIdRef = useRef<string | null>(null);
   const paperLoadRef = useRef(0);
@@ -551,7 +553,8 @@ export default function Home() {
     };
   }, [isScreenshotDragging]);
 
-  useEffect(() => {
+  // Also called by the streaming answer after each committed fragment batch.
+  const followChatOutput = useCallback(() => {
     const chatBody = chatBodyRef.current;
     if (!chatBody || !followOutputRef.current) return;
     if (autoScrollFrameRef.current !== null) window.cancelAnimationFrame(autoScrollFrameRef.current);
@@ -559,11 +562,20 @@ export default function Home() {
       if (followOutputRef.current) chatBody.scrollTop = chatBody.scrollHeight;
       autoScrollFrameRef.current = null;
     });
+  }, []);
+
+  useEffect(() => {
+    followChatOutput();
     return () => {
       if (autoScrollFrameRef.current !== null) window.cancelAnimationFrame(autoScrollFrameRef.current);
       autoScrollFrameRef.current = null;
     };
-  }, [answer, submittedQuestion, streamStatus, chatHistory.length, contextSelections.length]);
+  }, [followChatOutput, submittedQuestion, streamStatus, chatHistory.length, contextSelections.length]);
+
+  useEffect(() => {
+    const batchers = streamBatchersRef.current;
+    return () => { for (const batcher of batchers) batcher.cancel(); batchers.clear(); };
+  }, []);
 
   const revealNewContext = useCallback(() => {
     changeReadingMode(false);
@@ -758,17 +770,17 @@ export default function Home() {
     notesVisibleRef.current = false;
     zoomBeforeNotesRef.current = null;
     clearHighlights();
-    setQuestion('');
+    questionStore.set('');
     setSubmittedQuestion('');
     setSubmittedContext([]);
-    setAnswer('');
+    answerStore.set('');
     setAnswerWeb(null);
     setSearchEnabled(false);
     setSearchNotice('');
     setAsking(false);
     setQuickAskTarget(null);
     setQuickAsking(false);
-    setQuickAnswer('');
+    quickAnswerStore.set('');
     setChatHistory([]);
     setConversations([]);
     setActiveConversation(null);
@@ -839,7 +851,7 @@ export default function Home() {
     const alreadySaved = pending?.status === 'complete' && turns.some((turn) => turn.question === pending.question && turn.answer === pending.answer);
     if (alreadySaved) pendingAnswersRef.current.delete(conversation.id);
     const visible = alreadySaved ? null : pending;
-    setSubmittedQuestion(visible?.question ?? ''); setSubmittedContext(visible?.context ?? []); setAnswer(visible?.answer ?? ''); setAnswerWeb(visible?.web ?? null); setSearchNotice(visible?.searchNotice ?? ''); setStreamStatus(visible?.status ?? 'idle'); setAsking(visible?.status === 'connecting' || visible?.status === 'streaming'); setContextSelections([]); setError(visible?.error ?? '');
+    setSubmittedQuestion(visible?.question ?? ''); setSubmittedContext(visible?.context ?? []); answerStore.set(visible?.answer ?? ''); setAnswerWeb(visible?.web ?? null); setSearchNotice(visible?.searchNotice ?? ''); setStreamStatus(visible?.status ?? 'idle'); setAsking(visible?.status === 'connecting' || visible?.status === 'streaming'); setContextSelections([]); setError(visible?.error ?? '');
   }
 
   async function createNewConversation() {
@@ -1012,7 +1024,7 @@ export default function Home() {
     const { id, text, page, range } = pendingSelection;
     const pageElement = (range.startContainer.nodeType === Node.ELEMENT_NODE ? range.startContainer as Element : range.startContainer.parentElement)?.closest<HTMLElement>('.react-pdf__Page');
     setQuickAskTarget({ id, text, page, rects: pageElement ? getHighlightRects(range, pageElement) : undefined, ...placeQuickAskBeside(range.getBoundingClientRect()) });
-    setQuickQuestion(''); setQuickActiveQuestion(''); setQuickAnswer(''); setQuickAnswerWeb(null); setQuickSearchEnabled(false); setQuickSearchNotice(''); setQuickTurns([]); setQuickError('');
+    quickQuestionStore.set(''); setQuickActiveQuestion(''); quickAnswerStore.set(''); setQuickAnswerWeb(null); setQuickSearchEnabled(false); setQuickSearchNotice(''); setQuickTurns([]); setQuickError('');
     clearBrowserSelection();
     window.requestAnimationFrame(() => quickAskInputRef.current?.focus());
   }
@@ -1030,14 +1042,14 @@ export default function Home() {
     if (!screenshotSelection) return;
     const { id, text, page, pageEnd, imageDataUrl, rects, left, right, top, bottom } = screenshotSelection;
     setQuickAskTarget({ id, text, page, pageEnd, imageDataUrl, rects, ...placeQuickAskBeside({ left, right, top, bottom }) });
-    setQuickQuestion(''); setQuickActiveQuestion(''); setQuickAnswer(''); setQuickAnswerWeb(null); setQuickSearchEnabled(false); setQuickSearchNotice(''); setQuickTurns([]); setQuickError('');
+    quickQuestionStore.set(''); setQuickActiveQuestion(''); quickAnswerStore.set(''); setQuickAnswerWeb(null); setQuickSearchEnabled(false); setQuickSearchNotice(''); setQuickTurns([]); setQuickError('');
     setScreenshotSelection(null);
     window.requestAnimationFrame(() => quickAskInputRef.current?.focus());
   }
 
   function closeQuickAsk() {
     if (quickAsking) return;
-    setQuickAskTarget(null); setQuickQuestion(''); setQuickActiveQuestion(''); setQuickAnswer(''); setQuickAnswerWeb(null); setQuickSearchEnabled(false); setQuickSearchNotice(''); setQuickTurns([]); setQuickError('');
+    setQuickAskTarget(null); quickQuestionStore.set(''); setQuickActiveQuestion(''); quickAnswerStore.set(''); setQuickAnswerWeb(null); setQuickSearchEnabled(false); setQuickSearchNotice(''); setQuickTurns([]); setQuickError('');
   }
 
   useEffect(() => {
@@ -1046,16 +1058,20 @@ export default function Home() {
 
   async function submitQuickAsk(event: FormEvent) {
     event.preventDefault();
-    if (!quickAskTarget || !activeConversation || !quickQuestion.trim() || quickAsking) return;
+    const previousAnswer = quickAnswerStore.get();
+    const sentQuestion = quickQuestionStore.get().trim();
+    if (!quickAskTarget || !activeConversation || !sentQuestion || quickAsking) return;
     const originPaperId = activePaperIdRef.current;
     const requestId = ++quickAskRequestRef.current;
     const isVisible = () => quickAskRequestRef.current === requestId && activePaperIdRef.current === originPaperId;
-    const priorTurns = quickAnswer ? [...quickTurns, { question: quickActiveQuestion, answer: quickAnswer, web: quickAnswerWeb }] : quickTurns;
-    const sentQuestion = quickQuestion.trim();
+    const priorTurns = previousAnswer ? [...quickTurns, { question: quickActiveQuestion, answer: previousAnswer, web: quickAnswerWeb }] : quickTurns;
     const allowWebSearch = quickSearchEnabled;
-    if (quickAnswer) setQuickTurns(priorTurns);
+    if (previousAnswer) setQuickTurns(priorTurns);
+    let streamed = '';
+    const batcher = createStreamBatcher(() => { if (isVisible()) quickAnswerStore.set(streamed); });
+    streamBatchersRef.current.add(batcher);
     quickFollowRef.current = true;
-    setQuickAsking(true); setQuickActiveQuestion(sentQuestion); setQuickQuestion(''); setQuickAnswer(''); setQuickAnswerWeb(null); setQuickSearchEnabled(false); setQuickSearchNotice(''); setQuickError('');
+    setQuickAsking(true); setQuickActiveQuestion(sentQuestion); quickQuestionStore.set(''); quickAnswerStore.set(''); setQuickAnswerWeb(null); setQuickSearchEnabled(false); setQuickSearchNotice(''); setQuickError('');
     try {
       const selectionText = quickAskTarget.imageDataUrl ? '' : quickAskTarget.text;
       const selectionImages = quickAskTarget.imageDataUrl ? [{ data_url: quickAskTarget.imageDataUrl, page: quickAskTarget.page }] : [];
@@ -1065,17 +1081,19 @@ export default function Home() {
       while (true) {
         const { value, done } = await reader.read(); if (done) break;
         buffer += decoder.decode(value, { stream: true }); const events = buffer.split('\n\n'); buffer = events.pop() ?? '';
-        for (const block of events) { const line = block.split('\n').find((item) => item.startsWith('data: ')); if (!line) continue; const data = JSON.parse(line.slice(6)); if (!isVisible()) continue; if (data.type === 'searching') setQuickSearchNotice('Planning web search…'); if (data.type === 'search_error') setQuickSearchNotice(data.message); if (data.type === 'web_sources') { setQuickAnswerWeb(data.web as WebInfo); setQuickSearchNotice((current) => current.startsWith('Web search is unavailable') ? current : ''); } if (data.type === 'delta') setQuickAnswer((current) => current + data.text); if (data.type === 'completed') setQuickAnswerWeb(data.web as WebInfo); if (data.type === 'error') throw new Error(data.message); }
+        for (const block of events) { const line = block.split('\n').find((item) => item.startsWith('data: ')); if (!line) continue; const data = JSON.parse(line.slice(6)); if (!isVisible()) continue; if (data.type === 'searching') setQuickSearchNotice('Planning web search…'); if (data.type === 'search_error') setQuickSearchNotice(data.message); if (data.type === 'web_sources') { setQuickAnswerWeb(data.web as WebInfo); setQuickSearchNotice((current) => current.startsWith('Web search is unavailable') ? current : ''); } if (data.type === 'delta') { const first = !streamed; streamed += data.text; if (first) batcher.flush(); else batcher.schedule(); } if (data.type === 'completed') setQuickAnswerWeb(data.web as WebInfo); if (data.type === 'error') throw new Error(data.message); }
       }
-    } catch (reason) { if (isVisible()) setQuickError(reason instanceof Error ? reason.message : 'Quick Ask failed.'); }
-    finally { if (isVisible()) setQuickAsking(false); }
+      batcher.flush();
+    } catch (reason) { batcher.flush(); if (isVisible()) setQuickError(reason instanceof Error ? reason.message : 'Quick Ask failed.'); }
+    finally { batcher.cancel(); streamBatchersRef.current.delete(batcher); if (isVisible()) setQuickAsking(false); }
   }
 
-  useLayoutEffect(() => {
+  const followQuickThread = useCallback(() => {
     const thread = quickThreadRef.current;
-    if (!thread || !quickFollowRef.current) return;
-    thread.scrollTop = thread.scrollHeight;
-  }, [quickAnswer, quickAnswerWeb, quickTurns, quickAsking, quickSearchNotice]);
+    if (thread && quickFollowRef.current) thread.scrollTop = thread.scrollHeight;
+  }, []);
+
+  useLayoutEffect(followQuickThread, [followQuickThread, hasQuickAnswer, quickAnswerWeb, quickTurns, quickAsking, quickSearchNotice]);
 
   function beginQuickDrag(event: React.PointerEvent<HTMLDivElement>) {
     if (!quickAskTarget || (event.target as HTMLElement).closest('button')) return;
@@ -1094,14 +1112,15 @@ export default function Home() {
 
   async function importQuickAsk() {
     if (!quickAskTarget || !activeConversation || quickAsking || quickImporting) return;
-    const turns = quickAnswer ? [...quickTurns, { question: quickActiveQuestion, answer: quickAnswer, web: quickAnswerWeb }] : quickTurns;
+    const currentAnswer = quickAnswerStore.get();
+    const turns = currentAnswer ? [...quickTurns, { question: quickActiveQuestion, answer: currentAnswer, web: quickAnswerWeb }] : quickTurns;
     if (!turns.length) return;
     setQuickImporting(true); setQuickError('');
     try {
       const response = await fetch(`${API_BASE}/api/conversations/${activeConversation.id}/quick-ask/import`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ selected_text: quickAskTarget.imageDataUrl ? '' : quickAskTarget.text, images: quickAskTarget.imageDataUrl ? [{ data_url: quickAskTarget.imageDataUrl, page: quickAskTarget.page }] : [], anchors: quickAskTarget.page && quickAskTarget.rects?.length ? [{ text: quickAskTarget.text, page: quickAskTarget.page, rects: quickAskTarget.rects }] : [], page: quickAskTarget.page, turns: turns.map((turn) => ({ ...turn, selected_text: '', images: [], page: quickAskTarget.page })) }) });
       const updated = await response.json() as Conversation; if (!response.ok) throw new Error((updated as unknown as { detail?: string }).detail ?? 'Could not move Quick Ask to chat.');
       setActiveConversation(updated); setConversations((current) => [updated, ...current]);
-      await openConversation(updated); setQuickAskTarget(null); setQuickQuestion(''); setQuickActiveQuestion(''); setQuickAnswer(''); setQuickAnswerWeb(null); setQuickSearchEnabled(false); setQuickSearchNotice(''); setQuickTurns([]);
+      await openConversation(updated); setQuickAskTarget(null); quickQuestionStore.set(''); setQuickActiveQuestion(''); quickAnswerStore.set(''); setQuickAnswerWeb(null); setQuickSearchEnabled(false); setQuickSearchNotice(''); setQuickTurns([]);
     } catch (reason) { setQuickError(reason instanceof Error ? reason.message : 'Could not move Quick Ask to chat.'); }
     finally { setQuickImporting(false); }
   }
@@ -1584,28 +1603,33 @@ export default function Home() {
 
   async function ask(event: FormEvent) {
     event.preventDefault();
-    if (!active || !activeConversation || !question.trim() || asking) return;
+    const sentQuestion = questionStore.get().trim();
+    if (!active || !activeConversation || !sentQuestion || asking) return;
     const originPaperId = active.id;
     const originConversationId = activeConversation.id;
     const existing = pendingAnswersRef.current.get(originConversationId);
     if (existing?.status === 'connecting' || existing?.status === 'streaming') return;
     const sendingConversation = activeConversation.message_count === 0 ? await syncConversationDefaults(activeConversation) : activeConversation;
     if (activePaperIdRef.current !== originPaperId || activeConversationIdRef.current !== originConversationId) return;
-    const sentQuestion = question.trim();
     const sentContext = contextSelections.map((selection) => ({ ...selection }));
     const pending: PendingAnswer = { question: sentQuestion, context: sentContext, answer: '', status: 'connecting', error: '', web: null, searchNotice: '' };
     pendingAnswersRef.current.set(originConversationId, pending);
     const isVisible = () => activePaperIdRef.current === originPaperId && activeConversationIdRef.current === originConversationId && pendingAnswersRef.current.get(originConversationId) === pending;
-    if (submittedQuestion && answer) {
-      setChatHistory((current) => [...current, { id: crypto.randomUUID(), question: submittedQuestion, answer, context: submittedContext, web: answerWeb }]);
+    const previousAnswer = answerStore.get();
+    if (submittedQuestion && previousAnswer) {
+      setChatHistory((current) => [...current, { id: crypto.randomUUID(), question: submittedQuestion, answer: previousAnswer, context: submittedContext, web: answerWeb }]);
     }
+    // Fragments always accumulate in `pending` (so background conversations stay
+    // current); the visible answer is published at most once per batch interval.
+    const batcher = createStreamBatcher(() => { if (isVisible()) answerStore.set(pending.answer); });
+    streamBatchersRef.current.add(batcher);
     followOutputRef.current = true;
     setAsking(true);
-    setQuestion('');
+    questionStore.set('');
     setSubmittedQuestion(sentQuestion);
     setSubmittedContext(sentContext);
     setContextSelections([]);
-    setAnswer('');
+    answerStore.set('');
     setAnswerWeb(null);
     setSearchNotice('');
     const allowWebSearch = searchEnabled;
@@ -1651,9 +1675,10 @@ export default function Home() {
             if (isVisible()) { setAnswerWeb(pending.web); setSearchNotice(pending.searchNotice); }
           }
           if (data.type === 'delta') {
+            const first = pending.status !== 'streaming';
             pending.answer += data.text;
             pending.status = 'streaming';
-            if (isVisible()) { setAnswer(pending.answer); setStreamStatus('streaming'); }
+            if (first) { batcher.flush(); if (isVisible()) setStreamStatus('streaming'); } else batcher.schedule();
           }
           if (data.type === 'error') throw new Error(data.message);
           if (data.type === 'completed') {
@@ -1662,15 +1687,20 @@ export default function Home() {
           }
         }
       }
+      batcher.flush();
       const savedConversation = await fetch(`${API_BASE}/api/conversations/${sendingConversation.id}`).then((result) => result.ok ? result.json() as Promise<Conversation> : null).catch(() => null);
       const updatedConversation = { ...sendingConversation, ...(savedConversation ?? {}), message_count: savedConversation?.message_count ?? sendingConversation.message_count + 2, updated_at: savedConversation?.updated_at ?? new Date().toISOString() };
       pending.status = 'complete';
-      if (isVisible()) { setAnswer(pending.answer); setStreamStatus('complete'); setAsking(false); setActiveConversation((current) => current?.id === updatedConversation.id ? updatedConversation : current); }
+      if (isVisible()) { answerStore.set(pending.answer); setStreamStatus('complete'); setAsking(false); setActiveConversation((current) => current?.id === updatedConversation.id ? updatedConversation : current); }
       setConversations((current) => current.map((item) => item.id === updatedConversation.id ? updatedConversation : item));
     } catch (reason) {
+      batcher.flush();
       pending.error = reason instanceof Error ? reason.message : 'The model request failed.';
       pending.status = 'error';
       if (isVisible()) { setError(pending.error); setStreamStatus('error'); setAsking(false); }
+    } finally {
+      batcher.cancel();
+      streamBatchersRef.current.delete(batcher);
     }
   }
 
@@ -1709,10 +1739,10 @@ export default function Home() {
             <div className="chat-body" ref={chatBodyRef} onWheelCapture={(event) => { if (event.deltaY < 0) pauseChatFollow(); }} onTouchMove={pauseChatFollow} onPointerDown={(event) => { if (event.target === event.currentTarget) pauseChatFollow(); }} onScroll={(event) => { const element = event.currentTarget; followOutputRef.current = element.scrollHeight - element.scrollTop - element.clientHeight < 40; }}><div className="chat-heading"><span className="spark">✦</span><div><strong>{activeConversation?.context_builder_version === 'quick-ask-v1' ? 'Saved Quick Ask' : 'Ask about this paper'}</strong><p>{activeConversation?.context_builder_version === 'quick-ask-v1' ? 'This saved thread uses only its original selection and Quick Ask prompt.' : 'The full paper is available automatically. Select text only when you want to focus the answer.'}</p></div></div>{chatConfigured === false && <button type="button" className="no-key-notice" onClick={() => setSettingsOpen(true)}><strong>No API key configured</strong><span>Choose a provider and add a key in Settings to enable chat.</span></button>}
               {chatHistory.map((turn) => <div className="chat-turn" data-question={turn.question} tabIndex={-1} key={turn.id}>{linkedTurn?.conversationId === activeConversation?.id && linkedTurn?.question === turn.question && <span key={linkedTurn.reveal} className="linked-turn-reveal" aria-hidden="true" onAnimationEnd={() => setLinkedTurn((current) => current === linkedTurn ? null : current)} />}{turn.importedQuickAsk && <div className="quick-import-badge">✦ Saved Quick Ask · selection only</div>}<ContextList selections={turn.context} />{activeConversation && turn.context.some((item) => item.rects?.length) && <button type="button" className={`turn-link-button${isAiLinked(activeConversation.id, turn.question) ? ' linked' : ''}`} onClick={() => void toggleAiLink(activeConversation, turn.question, turn.context)}>{isAiLinked(activeConversation.id, turn.question) ? '✦ Linked to PDF · click to unlink' : '✦ Link reference to PDF'}</button>}<div className="user-message"><span>You</span><p>{turn.question}</p></div><div className="answer-card complete"><div className="answer-meta"><span>Adam</span><span className="stream-state">Done</span></div><MarkdownAnswer web={turn.web}>{turn.answer}</MarkdownAnswer><WebEvidence web={turn.web} /></div></div>)}
               {submittedQuestion && <><ContextList selections={submittedContext} />{activeConversation && streamStatus === 'complete' && submittedContext.some((item) => item.rects?.length) && <button type="button" className={`turn-link-button${isAiLinked(activeConversation.id, submittedQuestion) ? ' linked' : ''}`} onClick={() => void toggleAiLink(activeConversation, submittedQuestion, submittedContext)}>{isAiLinked(activeConversation.id, submittedQuestion) ? '✦ Linked to PDF · click to unlink' : '✦ Link reference to PDF'}</button>}<div className="user-message"><span>You</span><p>{submittedQuestion}</p></div></>}
-              {streamStatus !== 'idle' && streamStatus !== 'error' && <div className={`answer-card ${streamStatus}`} aria-live="polite"><div className="answer-meta"><span>Adam</span><span className="stream-state">{streamStatus === 'connecting' ? <>Thinking<span className="thinking-dots"><i /><i /><i /></span></> : streamStatus === 'streaming' ? 'Responding…' : 'Done'}</span></div>{searchNotice && <p className="search-notice" role="status">{searchNotice}</p>}{answer ? <MarkdownAnswer web={answerWeb} streaming={streamStatus === 'streaming'}>{answer}</MarkdownAnswer> : <div className="answer-skeleton"><i /><i /><i /></div>}<WebEvidence web={answerWeb} /></div>}{error && <p className="error-banner compact">{error}</p>}
-              {contextSelections.length > 0 ? <ContextList selections={contextSelections} onRemove={(id) => setContextSelections((current) => current.filter((item) => item.id !== id))} /> : !submittedQuestion && chatHistory.length === 0 && <div className="empty-context"><span>✦</span><p>Ask anything about the paper, or select a passage for precise focus.</p>{canAsk && activeConversation?.context_builder_version !== 'quick-ask-v1' && <div className="prompt-suggestions">{PROMPT_SUGGESTIONS.map((suggestion) => <button type="button" key={suggestion} onClick={() => { setQuestion(suggestion); composerRef.current?.focus(); }}>{suggestion}</button>)}</div>}</div>}
+              {streamStatus !== 'idle' && streamStatus !== 'error' && <div className={`answer-card ${streamStatus}`} aria-live="polite"><div className="answer-meta"><span>Adam</span><span className="stream-state">{streamStatus === 'connecting' ? <>Thinking<span className="thinking-dots"><i /><i /><i /></span></> : streamStatus === 'streaming' ? 'Responding…' : 'Done'}</span></div>{searchNotice && <p className="search-notice" role="status">{searchNotice}</p>}<StreamingMarkdown store={answerStore} web={answerWeb} streaming={streamStatus === 'streaming'} onCommit={followChatOutput} /><WebEvidence web={answerWeb} /></div>}{error && <p className="error-banner compact">{error}</p>}
+              {contextSelections.length > 0 ? <ContextList selections={contextSelections} onRemove={(id) => setContextSelections((current) => current.filter((item) => item.id !== id))} /> : !submittedQuestion && chatHistory.length === 0 && <div className="empty-context"><span>✦</span><p>Ask anything about the paper, or select a passage for precise focus.</p>{canAsk && activeConversation?.context_builder_version !== 'quick-ask-v1' && <div className="prompt-suggestions">{PROMPT_SUGGESTIONS.map((suggestion) => <button type="button" key={suggestion} onClick={() => { questionStore.set(suggestion); composerRef.current?.focus(); }}>{suggestion}</button>)}</div>}</div>}
             </div>
-            <form className="composer" onSubmit={ask}><div className="composer-scope"><span className={`scope-pill${contextSelections.length ? ' focused' : ''}`}><i aria-hidden="true" />{chatConfigured === false ? 'Chat unavailable' : activeConversation?.context_builder_version === 'quick-ask-v1' ? 'Selection-only context' : contextSelections.length ? `${contextSelections.length} context ${contextSelections.length === 1 ? 'item' : 'items'}` : 'Full paper context'}</span></div><textarea ref={composerRef} value={question} onChange={(event) => setQuestion(event.target.value)} onKeyDown={(event) => { if (event.key === 'Enter' && !event.shiftKey && !event.nativeEvent.isComposing) { event.preventDefault(); event.currentTarget.form?.requestSubmit(); } }} placeholder={chatConfigured === false ? 'Add an API key in Settings to chat…' : activeConversation?.context_builder_version === 'quick-ask-v1' ? 'Continue this saved Quick Ask…' : contextSelections.length ? 'Ask about your context…' : 'Ask anything about this paper…'} disabled={!canAsk || asking} rows={3} /><div><button type="button" className={`composer-search-toggle${searchEnabled ? ' active' : ''}`} aria-pressed={searchEnabled} onClick={() => setSearchEnabled((enabled) => !enabled)} title="Allow a web search for this question"><UiIcon kind="globe" />Search web</button><span className="composer-hint"><kbd>↵</kbd> send <kbd>⇧↵</kbd> new line</span><button type="submit" disabled={!canAsk || !question.trim() || asking}>{asking ? '…' : <UiIcon kind="send" />}</button></div></form>
+            <form className="composer" onSubmit={ask}><div className="composer-scope"><span className={`scope-pill${contextSelections.length ? ' focused' : ''}`}><i aria-hidden="true" />{chatConfigured === false ? 'Chat unavailable' : activeConversation?.context_builder_version === 'quick-ask-v1' ? 'Selection-only context' : contextSelections.length ? `${contextSelections.length} context ${contextSelections.length === 1 ? 'item' : 'items'}` : 'Full paper context'}</span></div><DraftTextarea store={questionStore} ref={composerRef} onKeyDown={(event) => { if (event.key === 'Enter' && !event.shiftKey && !event.nativeEvent.isComposing) { event.preventDefault(); event.currentTarget.form?.requestSubmit(); } }} placeholder={chatConfigured === false ? 'Add an API key in Settings to chat…' : activeConversation?.context_builder_version === 'quick-ask-v1' ? 'Continue this saved Quick Ask…' : contextSelections.length ? 'Ask about your context…' : 'Ask anything about this paper…'} disabled={!canAsk || asking} rows={3} /><div><button type="button" className={`composer-search-toggle${searchEnabled ? ' active' : ''}`} aria-pressed={searchEnabled} onClick={() => setSearchEnabled((enabled) => !enabled)} title="Allow a web search for this question"><UiIcon kind="globe" />Search web</button><span className="composer-hint"><kbd>↵</kbd> send <kbd>⇧↵</kbd> new line</span><button type="submit" disabled={!canAsk || !hasQuestion || asking}>{asking ? '…' : <UiIcon kind="send" />}</button></div></form>
           </>}
         </aside>
       </div>
@@ -1725,12 +1755,12 @@ export default function Home() {
         <div className={`quick-ask-context${quickAskTarget.imageDataUrl ? ' image' : ''}`}>{quickAskTarget.imageDataUrl ? <img src={quickAskTarget.imageDataUrl} alt="Selected PDF area" /> : <blockquote>{quickAskTarget.text}</blockquote>}</div>
         <div className="quick-thread" ref={quickThreadRef} onWheelCapture={(event) => { if (event.deltaY < 0) quickFollowRef.current = false; }} onTouchMove={() => { quickFollowRef.current = false; }} onScroll={(event) => { const element = event.currentTarget; quickFollowRef.current = element.scrollHeight - element.scrollTop - element.clientHeight < 24; }}>
           {quickTurns.map((turn, index) => <div className="quick-turn" key={index}><div className="quick-user">{turn.question}</div><MarkdownAnswer web={turn.web}>{turn.answer}</MarkdownAnswer><WebEvidence web={turn.web} /></div>)}
-          {(quickActiveQuestion && (quickAnswer || quickAsking)) && <div className="quick-turn"><div className="quick-user">{quickActiveQuestion}</div>{quickSearchNotice && <p className="search-notice">{quickSearchNotice}</p>}{quickAnswer ? <MarkdownAnswer streaming={quickAsking} web={quickAnswerWeb}>{quickAnswer}</MarkdownAnswer> : <div className="answer-skeleton"><i /><i /><i /></div>}<WebEvidence web={quickAnswerWeb} /></div>}
+          {(quickActiveQuestion && (hasQuickAnswer || quickAsking)) && <div className="quick-turn"><div className="quick-user">{quickActiveQuestion}</div>{quickSearchNotice && <p className="search-notice">{quickSearchNotice}</p>}<StreamingMarkdown store={quickAnswerStore} streaming={quickAsking} web={quickAnswerWeb} onCommit={followQuickThread} /><WebEvidence web={quickAnswerWeb} /></div>}
         </div>
-        <div className="quick-ask-entry"><input ref={quickAskInputRef} value={quickQuestion} onChange={(event) => setQuickQuestion(event.target.value)} placeholder={quickTurns.length || quickAnswer ? 'Ask a follow-up…' : 'What would you like clarified?'} disabled={quickAsking} /><button type="submit" disabled={!quickQuestion.trim() || quickAsking}>{quickAsking ? '…' : '↑'}</button></div>
+        <div className="quick-ask-entry"><DraftInput store={quickQuestionStore} ref={quickAskInputRef} placeholder={quickTurns.length || hasQuickAnswer ? 'Ask a follow-up…' : 'What would you like clarified?'} disabled={quickAsking} /><button type="submit" disabled={!hasQuickQuestion || quickAsking}>{quickAsking ? '…' : '↑'}</button></div>
         <div className="quick-ask-search-row"><button type="button" className={`composer-search-toggle${quickSearchEnabled ? ' active' : ''}`} aria-pressed={quickSearchEnabled} onClick={() => setQuickSearchEnabled((enabled) => !enabled)} title="Allow a web search for this question">⌕ Search web</button></div>
         {quickError && <p className="quick-ask-error">{quickError}</p>}
-        <div className="quick-ask-footer"><span>Save this thread before linking it to the PDF</span><div><button type="button" className="move-to-chat" onClick={() => void importQuickAsk()} disabled={quickAsking || quickImporting || (!quickTurns.length && !quickAnswer)}>{quickImporting ? 'Saving…' : 'Save as new chat →'}</button></div></div>
+        <div className="quick-ask-footer"><span>Save this thread before linking it to the PDF</span><div><button type="button" className="move-to-chat" onClick={() => void importQuickAsk()} disabled={quickAsking || quickImporting || (!quickTurns.length && !hasQuickAnswer)}>{quickImporting ? 'Saving…' : 'Save as new chat →'}</button></div></div>
       </form>}
       {settingsOpen && <SettingsDialog onClose={closeSettings} />}
       {paperSearchOpen && <LibrarySpotlight initialMode={paperSearchMode} initialFolderId={paperSearchFolder} onImported={(paper) => setPapers((current) => current.some((item) => item.id === paper.id) ? current.map((item) => item.id === paper.id ? paper : item) : [paper, ...current])} onBrowseFolder={(folderId) => { window.localStorage.setItem('adam.libraryLocation', folderId); setLibraryNavigation((value) => value + 1); setPaperSearchOpen(false); returnToLibrary(); }} papers={papers} onClose={() => setPaperSearchOpen(false)} onOpen={(paper) => { setPaperSearchOpen(false); openPaper(paper); }} />}
@@ -2463,46 +2493,6 @@ function PaperNoteEditor({ documentId, paperName, pendingQuote, onQuoteConsumed 
     <div className="paper-note-canvas"><div ref={editorRef} className="paper-note-editor" contentEditable suppressContentEditableWarning role="textbox" aria-multiline="true" aria-label="Paper note" spellCheck onKeyDown={applyInputRule} onInput={changed} onClick={(event) => { if ((event.target as HTMLElement).matches('input[type="checkbox"]')) changed(); }} onBlur={() => void save()} /><div className={`paper-note-placeholder${empty ? ' visible' : ''}`} aria-hidden="true"><strong>Start writing about this paper…</strong><span>Try # through ##### for headings, - for bullets, 1. for numbers, - [ ] for tasks, or &gt; for quotes.</span></div></div>
     {errorMessage && <button type="button" className="paper-note-error" onClick={() => void save()}>{errorMessage} Click to retry.</button>}
   </section>;
-}
-
-function normalizeMathDelimiters(markdown: string): string {
-  const lines = markdown.split('\n');
-  let fence: { marker: string; length: number } | null = null;
-  let prose = '';
-  let result = '';
-  const flushProse = () => {
-    result += prose.replace(/(`+)[\s\S]*?\1|\\\[([\s\S]*?)\\\]|\\\(([^\n]*?)\\\)/g, (match, _ticks: string, display: string | undefined, inline: string | undefined) => {
-      if (display !== undefined) return `\n$$\n${display.trim()}\n$$\n`;
-      if (inline !== undefined) return `$${inline}$`;
-      return match;
-    });
-    prose = '';
-  };
-
-  for (const [index, line] of lines.entries()) {
-    const suffix = index < lines.length - 1 ? '\n' : '';
-    const opening = /^ {0,3}(`{3,}|~{3,})/.exec(line);
-    if (fence) {
-      result += line + suffix;
-      if (new RegExp(`^ {0,3}${fence.marker}{${fence.length},}[ \\t]*$`).test(line)) fence = null;
-    } else if (opening) {
-      flushProse();
-      fence = { marker: opening[1][0], length: opening[1].length };
-      result += line + suffix;
-    } else {
-      prose += line + suffix;
-    }
-  }
-  flushProse();
-  return result;
-}
-
-function MarkdownAnswer({ children, streaming = false, web }: { children: string; streaming?: boolean; web?: WebInfo | null }) {
-  const linked = web ? children.replace(/\[W(\d+)\]/g, (marker, number: string) => {
-    const url = web.sources[Number(number) - 1]?.url;
-    return url ? `[${marker}](<${url.replaceAll('>', '%3E')}>)` : marker;
-  }) : children;
-  return <div className="markdown-answer"><ReactMarkdown remarkPlugins={[remarkGfm, remarkMath]} rehypePlugins={[rehypeKatex]} components={{ a: ({ children: linkText, ...props }) => <a {...props} target="_blank" rel="noreferrer">{linkText}</a> }}>{normalizeMathDelimiters(linked)}</ReactMarkdown>{streaming && <i className="stream-cursor" />}</div>;
 }
 
 function WebEvidence({ web }: { web?: WebInfo | null }) {
