@@ -2383,17 +2383,20 @@ function PaperNoteEditor({ documentId, paperName, pendingQuote, onQuoteConsumed 
     if (exitEmptyFormat(event)) return;
     if (event.key !== ' ' || event.metaKey || event.ctrlKey || event.altKey || event.nativeEvent.isComposing) return;
     const selection = window.getSelection();
-    if (!selection?.rangeCount || !selection.isCollapsed || !editorRef.current) return;
-    let block = selection.anchorNode?.nodeType === Node.TEXT_NODE ? selection.anchorNode.parentElement : selection.anchorNode as HTMLElement | null;
-    while (block?.parentElement && block.parentElement !== editorRef.current) block = block.parentElement;
-    if (block === editorRef.current && selection.anchorNode?.nodeType === Node.TEXT_NODE) {
-      const wrapper = document.createElement('div');
-      selection.anchorNode.parentNode?.insertBefore(wrapper, selection.anchorNode);
-      wrapper.append(selection.anchorNode);
-      block = wrapper;
-    }
-    if (!block || block.parentElement !== editorRef.current) return;
-    const prefix = (block.textContent ?? '').replace(/\u00a0/g, ' ');
+    const editor = editorRef.current;
+    if (!selection?.rangeCount || !selection.isCollapsed || !editor || !selection.anchorNode || !editor.contains(selection.anchorNode)) return;
+    let block = selection.anchorNode.nodeType === Node.TEXT_NODE ? selection.anchorNode.parentElement : selection.anchorNode as HTMLElement | null;
+    // The first line may be bare text in the editor, while later lines are
+    // paragraphs. Never walk above the editor or combine existing paragraphs.
+    while (block && block !== editor && block.parentElement && block.parentElement !== editor) block = block.parentElement;
+    if (!block || (block !== editor && block.parentElement !== editor)) return;
+    const atRoot = block === editor;
+    if (atRoot && editor.querySelector('p, div, h1, h2, h3, h4, h5, ul, ol, blockquote')) return;
+    const beforeCaret = document.createRange();
+    beforeCaret.selectNodeContents(block);
+    beforeCaret.setEnd(selection.anchorNode, selection.anchorOffset);
+    const prefix = beforeCaret.toString().replace(/\u00a0/g, ' ');
+    if (prefix !== (block.textContent ?? '').replace(/\u00a0/g, ' ')) return;
     const heading = /^(#{1,5})$/.exec(prefix);
     const unordered = /^[-*+]$/.test(prefix);
     const ordered = /^1\.$/.test(prefix);
@@ -2401,6 +2404,12 @@ function PaperNoteEditor({ documentId, paperName, pendingQuote, onQuoteConsumed 
     const task = /^- \[(?: |x|X)\]$/.test(prefix);
     if (!heading && !unordered && !ordered && !quote && !task) return;
     event.preventDefault();
+    if (atRoot) {
+      const wrapper = document.createElement('div');
+      wrapper.append(...Array.from(editor.childNodes));
+      editor.append(wrapper);
+      block = wrapper;
+    }
     const range = document.createRange();
     range.selectNodeContents(block);
     selection.removeAllRanges(); selection.addRange(range);
