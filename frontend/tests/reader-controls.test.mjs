@@ -41,3 +41,24 @@ test('reading history preserves page, zoom, and offsets; deduplicates and prunes
   assert.deepEqual(readingHistory(), []);
   assert.doesNotThrow(() => saveReadingPosition(record('x', 1)));
 });
+
+const { sameHighlightLocation } = await load('../app/highlight-location.ts');
+test('identical words at different positions remain independent highlights', () => {
+  const selected = { page: 1, text: 'review', rects: [{ left: .1, top: .2, width: .04, height: .015 }] };
+  assert.equal(sameHighlightLocation(selected, structuredClone(selected)), true);
+  assert.equal(sameHighlightLocation(selected, { ...selected, page: 2 }), false);
+  for (const shift of [{ left: .3 }, { top: .4 }, { left: .145 }, { width: .08 }]) {
+    assert.equal(sameHighlightLocation(selected, { ...selected, rects: [{ ...selected.rects[0], ...shift }] }), false);
+  }
+  assert.equal(sameHighlightLocation(selected, { ...selected, rects: [{ ...selected.rects[0], left: .1001, top: .2001 }] }), true);
+  assert.equal(sameHighlightLocation(selected, { ...selected, rects: [] }), false);
+  assert.equal(sameHighlightLocation(selected, { ...selected, rects: [{ ...selected.rects[0], width: NaN }] }), false);
+});
+test('multiline highlights must match all line locations', () => {
+  const first = { left: .1, top: .2, width: .3, height: .015 };
+  const second = { left: .1, top: .23, width: .2, height: .015 };
+  const selected = { page: 1, text: 'repeated passage', rects: [first, second] };
+  assert.equal(sameHighlightLocation(selected, { ...selected, rects: [second, first] }), true);
+  assert.equal(sameHighlightLocation(selected, { ...selected, rects: [first] }), false);
+  assert.equal(sameHighlightLocation(selected, { ...selected, rects: [first, { ...second, top: .5 }] }), false);
+});
