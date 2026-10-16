@@ -12,6 +12,7 @@ os.environ.pop("ADAM_OPENCODE_API_KEY", None)
 from fastapi.testclient import TestClient  # noqa: E402
 
 from adam_server.main import app  # noqa: E402
+from adam_server.database import engine  # noqa: E402
 from adam_server import main as main_module  # noqa: E402
 from adam_server.services import web_search as web_search_module  # noqa: E402
 from adam_server.services.web_search import plan_search  # noqa: E402
@@ -637,6 +638,100 @@ def test_auto_title_uses_answer_and_preserves_chat_on_title_failure(monkeypatch)
         detail = client.get(f"/api/conversations/{conversation['id']}").json()
         assert detail["messages"][-1]["content"].startswith("Residual connections")
         assert detail["title"] == ("What does this do?" if mode == "failure" else "My residual connection notes")
+
+
+def test_slow_title_does_not_hold_answer_completion(monkeypatch) -> None:
+    uploaded = client.post("/api/documents", files={"file": ("slow-titles.pdf", BytesIO(sample_pdf("Layer normalization stabilizes training.")), "application/pdf")}).json()
+    monkeypatch.setattr(type(main_module.settings), "provider_api_key", lambda _self, _provider: "test-key")
+
+    class FakeProvider:
+        async def stream_answer(self, question, selected_text, images, page, history):
+            yield f"Answer to {question}"
+
+    monkeypatch.setattr(main_module, "make_provider", lambda *_args: FakeProvider())
+    title_requests: list[str] = []
+    release = {}
+    outcome = {}
+
+    async def slow_title(transcript, fallback):
+        title_requests.append(transcript)
+        await release[transcript.split("\n")[0]].wait()
+        if outcome.get("raise"):
+            raise RuntimeError("Title model crashed")
+        return "Layer Normalization Explained"
+
+    monkeypatch.setattr(main_module, "generate_configured_title", slow_title)
+
+    def stored(conversation_id):
+        with main_module.SessionLocal() as db:
+            conversation = db.get(main_module.Conversation, conversation_id)
+            return conversation.title, [message.role for message in conversation.messages]
+
+    async def open_stream(conversation_id, question):
+        response = await main_module.chat_stream(conversation_id, main_module.ChatRequest(question=question))
+        return response.body_iterator
+
+    async def next_event(stream):
+        chunk = await asyncio.wait_for(anext(stream), timeout=2)
+        return json.loads(chunk.removeprefix("data: "))
+
+    async def until(stream, kind):
+        while (event := await next_event(stream))["type"] != kind:
+            assert event["type"] != "error", event
+        return event
+
+    async def scenario(mode):
+        conversation_id = client.post(f"/api/documents/{uploaded['id']}/conversations", json={}).json()["id"]
+        question = f"Why normalize ({mode})?"
+        release[f"User: {question}"] = asyncio.Event()
+        outcome["raise"] = mode == "failure"
+        stream = await open_stream(conversation_id, question)
+        completed = await until(stream, "completed")
+        # The answer is durable and the composer can unlock while the title model is still running.
+        assert completed["title_pending"] is True
+        assert completed["title"] == question
+        assert stored(conversation_id) == (question, ["user", "assistant"])
+        assert conversation_id in main_module.title_jobs
+        await asyncio.sleep(0)
+        # Streams own short sessions only: none is checked out while the title model is pending.
+        assert engine.pool.checkedout() == 0
+        assert title_requests == [f"User: {question}\n\nAssistant: Answer to {question}"]
+
+        if mode == "followup":
+            # A next turn started before the title finishes completes on its own and never queues a second title job.
+            followup = await open_stream(conversation_id, "And dropout?")
+            events = [json.loads(chunk.removeprefix("data: ")) async for chunk in followup]
+            assert [event["type"] for event in events][-1] == "completed"
+            assert events[-1]["title_pending"] is False
+            assert len(title_requests) == 1
+            assert stored(conversation_id) == (question, ["user", "assistant", "user", "assistant"])
+        if mode == "rename":
+            with main_module.SessionLocal() as db_rename:
+                db_rename.get(main_module.Conversation, conversation_id).title = "My normalization notes"
+                db_rename.commit()
+        if mode == "disconnect":
+            await stream.aclose()
+
+        release[f"User: {question}"].set()
+        if mode == "disconnect":
+            for _ in range(100):
+                if conversation_id not in main_module.title_jobs:
+                    break
+                await asyncio.sleep(0.01)
+            assert stored(conversation_id)[0] == "Layer Normalization Explained"
+            return
+        remaining = [json.loads(chunk.removeprefix("data: ")) async for chunk in stream]
+        titles = [event["title"] for event in remaining if event["type"] == "title"]
+        assert all(event["type"] != "error" for event in remaining)
+        expected = {"followup": "Layer Normalization Explained", "rename": "My normalization notes", "failure": question}[mode]
+        assert titles == ([] if mode == "failure" else [expected])
+        assert stored(conversation_id)[0] == expected
+        assert conversation_id not in main_module.title_jobs
+
+    for mode in ("followup", "rename", "failure", "disconnect"):
+        title_requests.clear()
+        asyncio.run(scenario(mode))
+
 
 # Discovery/import regressions: external I/O is mocked; the real ingestion and DB run.
 def test_discovery_partial_failure_and_versions(monkeypatch) -> None:

@@ -1636,6 +1636,28 @@ export default function Home() {
     setSearchEnabled(false);
     setError('');
     setStreamStatus('connecting');
+    let finished = false;
+    let generatedTitle: string | null = null;
+    const applyTitle = (title: string) => {
+      generatedTitle = title;
+      setActiveConversation((current) => current?.id === sendingConversation.id ? { ...current, title } : current);
+      setConversations((current) => current.map((item) => item.id === sendingConversation.id ? { ...item, title } : item));
+    };
+    // The answer is saved once `completed` arrives; the stream may stay open only to deliver a slow title.
+    const finishAnswer = () => {
+      if (finished) return;
+      finished = true;
+      // Publish every buffered fragment before unlocking, so the next turn archives the full answer.
+      batcher.flush();
+      pending.status = 'complete';
+      if (isVisible()) { answerStore.set(pending.answer); setStreamStatus('complete'); setAsking(false); }
+      void fetch(`${API_BASE}/api/conversations/${sendingConversation.id}`).then((result) => result.ok ? result.json() as Promise<Conversation> : null).catch(() => null).then((savedConversation) => {
+        const updatedConversation = { ...sendingConversation, ...(savedConversation ?? {}), message_count: savedConversation?.message_count ?? sendingConversation.message_count + 2, updated_at: savedConversation?.updated_at ?? new Date().toISOString() };
+        if (generatedTitle) updatedConversation.title = generatedTitle;
+        if (isVisible()) setActiveConversation((current) => current?.id === updatedConversation.id ? updatedConversation : current);
+        setConversations((current) => current.map((item) => item.id === updatedConversation.id ? updatedConversation : item));
+      });
+    };
     try {
       const response = await fetch(`${API_BASE}/api/conversations/${sendingConversation.id}/messages/stream`, {
         method: 'POST', headers: { 'Content-Type': 'application/json' },
@@ -1684,16 +1706,15 @@ export default function Home() {
           if (data.type === 'completed') {
             pending.web = data.web as WebInfo;
             if (isVisible()) { setAnswerWeb(pending.web); if (!pending.searchNotice) setSearchNotice(''); }
+            finishAnswer();
           }
+          if (data.type === 'title' && data.title) applyTitle(data.title);
         }
       }
-      batcher.flush();
-      const savedConversation = await fetch(`${API_BASE}/api/conversations/${sendingConversation.id}`).then((result) => result.ok ? result.json() as Promise<Conversation> : null).catch(() => null);
-      const updatedConversation = { ...sendingConversation, ...(savedConversation ?? {}), message_count: savedConversation?.message_count ?? sendingConversation.message_count + 2, updated_at: savedConversation?.updated_at ?? new Date().toISOString() };
-      pending.status = 'complete';
-      if (isVisible()) { answerStore.set(pending.answer); setStreamStatus('complete'); setAsking(false); setActiveConversation((current) => current?.id === updatedConversation.id ? updatedConversation : current); }
-      setConversations((current) => current.map((item) => item.id === updatedConversation.id ? updatedConversation : item));
+      finishAnswer();
     } catch (reason) {
+      // A dropped connection while waiting for the title must not mark the saved answer failed.
+      if (finished) return;
       batcher.flush();
       pending.error = reason instanceof Error ? reason.message : 'The model request failed.';
       pending.status = 'error';

@@ -73,7 +73,8 @@ def test_sequential_streams_return_every_connection_without_gc(monkeypatch) -> N
         for index in range(20):
             response = client.post(f"/api/conversations/{conversation['id']}/messages/stream", json={"question": f"Question {index}?"})
             assert response.status_code == 200
-            assert sse_events(response.text)[-1]["type"] == "completed"
+            # The first turn may append a late `title` event after `completed`.
+            assert [event["type"] for event in sse_events(response.text)][-2:] in (["delta", "completed"], ["completed", "title"])
             assert engine.pool.checkedout() == 0
             quick = client.post(f"/api/conversations/{conversation['id']}/quick-ask/stream", json={"question": "What is this?", "selected_text": "Sequential streams"})
             assert sse_events(quick.text)[-1]["type"] == "completed"
@@ -120,7 +121,8 @@ def test_concurrent_streams_beyond_pool_size_complete_while_health_responds(monk
             responses = await asyncio.wait_for(asyncio.gather(*streams), timeout=30)
         for response in responses:
             assert response.status_code == 200
-            assert sse_events(response.text)[-1]["type"] == "completed"
+            # Each new chat completes first, then delivers its generated title.
+            assert [event["type"] for event in sse_events(response.text)][-2:] == ["completed", "title"]
 
     asyncio.run(run())
     assert engine.pool.checkedout() == 0

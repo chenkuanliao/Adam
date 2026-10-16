@@ -1,5 +1,6 @@
 import asyncio
 import json
+import logging
 import os
 from collections.abc import AsyncIterator
 from dataclasses import dataclass
@@ -28,6 +29,7 @@ from .services.paper_discovery import discover, download_pdf, existing_paper, re
 
 settings = get_settings()
 run_migrations()
+logger = logging.getLogger(__name__)
 
 app = FastAPI(title="Adam API", version="0.1.0")
 app.add_middleware(
@@ -95,6 +97,31 @@ async def generate_configured_title(transcript: str, fallback: str) -> str:
         if sum(map(len, parts)) > 1000:
             break
     return clean_title("".join(parts), fallback)
+
+
+# One title job per conversation; strong references keep running tasks alive.
+title_jobs: dict[str, asyncio.Task] = {}
+
+
+async def persist_generated_title(conversation_id: str, provisional_title: str, transcript: str) -> str | None:
+    try:
+        title = await generate_configured_title(transcript, provisional_title)
+        # Open the session only after the slow model call so no connection is held while waiting.
+        return await run_in_threadpool(save_generated_title, conversation_id, provisional_title, title)
+    except Exception:
+        # A failed title must never turn a saved answer into a chat error.
+        logger.warning("Automatic title generation failed for conversation %s", conversation_id, exc_info=True)
+        return None
+
+
+def start_title_job(conversation_id: str, provisional_title: str, transcript: str) -> asyncio.Task:
+    job = title_jobs.get(conversation_id)
+    if job and not job.done():
+        return job
+    job = asyncio.create_task(persist_generated_title(conversation_id, provisional_title, transcript))
+    title_jobs[conversation_id] = job
+    job.add_done_callback(lambda done: title_jobs.pop(conversation_id, None) if title_jobs.get(conversation_id) is done else None)
+    return job
 
 
 @app.get("/health")
@@ -792,22 +819,21 @@ async def chat_stream(conversation_id: str, request: ChatRequest) -> StreamingRe
                 complete += delta
                 yield sse({"type": "delta", "text": delta})
             await run_in_threadpool(save_assistant_message, setup, complete, web, bool(search_performed or sources))
-            completed_title = setup.title
+            title_job = None
             if setup.should_generate_title:
                 # Resolve vague questions from the answer instead of naming the request.
                 transcript = f"User: {request.question.strip()[:8000]}"
                 if request.selected_text:
                     transcript += f"\n\nSelected passage: {request.selected_text[:6000]}"
                 transcript += f"\n\nAssistant: {complete[:12000]}"
-                try:
-                    title = await generate_configured_title(transcript, setup.title)
-                    stored_title = await run_in_threadpool(save_generated_title, setup.conversation_id, setup.title, title)
-                    if stored_title is not None:
-                        completed_title = stored_title
-                except (httpx.HTTPError, ValueError, KeyError):
-                    # A failed title must never turn a saved answer into a chat error.
-                    pass
-            yield sse({"type": "completed", "web": web, "title": completed_title})
+                title_job = start_title_job(setup.conversation_id, setup.title, transcript)
+            # The answer is saved: release the composer now instead of waiting on the title model.
+            yield sse({"type": "completed", "web": web, "title": setup.title, "title_pending": title_job is not None})
+            if title_job:
+                # Shield the job so a client disconnect still lets the title finish and persist.
+                title = await asyncio.shield(title_job)
+                if title:
+                    yield sse({"type": "title", "title": title})
         except Exception as exc:
             yield sse({"type": "error", "message": str(exc)})
 
