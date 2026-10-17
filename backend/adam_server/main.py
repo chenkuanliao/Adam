@@ -663,6 +663,30 @@ def list_conversations(document_id: str, db: Session = Depends(get_db)) -> list[
     return [{**ConversationOut.model_validate(conversation).model_dump(), "message_count": count} for conversation, count in rows]
 
 
+@app.get("/api/documents/{document_id}/conversation-search")
+def search_conversations(document_id: str, q: str = Query(min_length=1, max_length=200), db: Session = Depends(get_db)) -> list[dict]:
+    if not db.get(Document, document_id):
+        raise HTTPException(404, "Document not found.")
+    needle = q.strip().casefold()
+    if not needle:
+        return []
+    # Read all message roles in one query; never fetch conversation details per card.
+    rows = db.execute(select(Conversation, Message.content).outerjoin(Message, Message.conversation_id == Conversation.id).where(Conversation.document_id == document_id).order_by(Conversation.updated_at.desc(), Message.created_at)).all()
+    matches = {}
+    for conversation, content in rows:
+        title_match = needle in conversation.title.casefold()
+        offset = (content or "").casefold().find(needle)
+        if not title_match and offset < 0:
+            continue
+        if conversation.id not in matches:
+            matches[conversation.id] = {"id": conversation.id, "snippet": "", "title_match": title_match}
+        if offset >= 0 and not matches[conversation.id]["snippet"]:
+            start = max(0, offset - 60)
+            end = min(len(content), offset + len(q) + 110)
+            matches[conversation.id]["snippet"] = ("…" if start else "") + content[start:end] + ("…" if end < len(content) else "")
+    return list(matches.values())
+
+
 @app.post("/api/documents/{document_id}/conversations", response_model=ConversationOut, status_code=201)
 def create_conversation(document_id: str, request: ConversationCreate, db: Session = Depends(get_db)) -> Conversation:
     if not db.get(Document, document_id):

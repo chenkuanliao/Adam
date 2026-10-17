@@ -10,6 +10,7 @@
     "build": "vinext build",
     "start": "vinext start",
     "lint": "eslint . --ignore-pattern dist --ignore-pattern .next",
+    "test:search": "node --test tests/find-text.test.mjs",
     "test:reader-controls": "node --test tests/reader-controls.test.mjs tests/page-window.test.mjs"
   },
   "dependencies": {

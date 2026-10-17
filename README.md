@@ -8,6 +8,8 @@ The current vertical slice supports:
 - online paper discovery from **Find papers** or the search dialog: search arXiv and the web, review source/PDF links, choose a folder, and download into the local reader; source failures leave other results available, and identical PDFs reuse existing library copies
 - nested folders with drag-and-drop folder and paper moves, root color inheritance, 12 selectable icons, folder-scoped uploads and search, and grid/list views; removing a folder keeps its papers, notes, and chats
 - in-browser PDF rendering and native text selection
+- PDF find with `Cmd/Ctrl + F` and chat find with `Cmd/Ctrl + Shift + F`, highlighted matches, next/previous navigation, and `Escape` to close; the chat shortcut focuses history search when chat history is open
+- chat history search across titles, questions, and answers for the current paper, with matching snippets and direct navigation into a matching chat
 - a floating reader dock with editable page and zoom controls, plus a matching editable chat text percentage
 - Continue reading with browser-local saved page, zoom, and reading position
 - full-window focus reading: click **Focus reading** or press `F` to hide the sidebar and anchored note cards while keeping note and chat-link icons available; use **Exit focus** or `Esc` to restore your workspace, zoom, and reading position

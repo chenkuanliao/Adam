@@ -1185,3 +1185,27 @@ kbd { display: inline-grid; place-items: center; min-width: 18px; height: 18px; 
 .folder-icon-option[aria-pressed=true] { background: var(--folder-tint); border-color: var(--folder-ink); color: var(--folder-ink); box-shadow: inset 0 0 0 1px var(--folder-ink) }
 .folder-icon-option:focus-visible { outline: 2px solid var(--folder-ink); outline-offset: 3px }
 .folder-icon-picker:disabled { opacity: .55 }
+
+/* Scoped find tools sit above the document and never reflow the PDF. */
+.pdf-find-position { position: absolute; top: 12px; left: 0; z-index: 25; padding: 0 18px; pointer-events: none; display: flex; justify-content: flex-end; }
+.pane-find { display: flex; align-items: center; gap: 4px; padding: 7px 9px; background: #fff; color: #343b36; border: 1px solid #dce2db; border-radius: 10px; box-shadow: 0 8px 28px #23332618; pointer-events: auto; max-width: 100%; }
+.pdf-find { width: 390px; }
+.chat-find { margin: 0 16px 10px; flex-shrink: 0; }
+.pane-find input, .history-search input { background: transparent; border: 0; outline: 0; min-width: 0; width: 100%; font-size: 13px; color: inherit; }
+.pane-find:focus-within, .history-search>div:focus-within { border-color: #68856c; box-shadow: 0 0 0 3px #68856c18; }
+.find-symbol { font-size: 23px; padding: 0 5px; color: #748172; }
+.find-count { white-space: nowrap; font-size: 11px; color: #6e776e; padding: 0 5px; }
+.pane-find button, .history-search button { border: 0; background: transparent; border-radius: 5px; color: inherit; padding: 3px 7px; font-size: 18px; cursor: pointer; }
+.pane-find button:hover, .history-search button:hover { background: #eef2ec; }
+.pane-find button:disabled { opacity: .3; cursor: default; }
+.find-trigger { display: flex; align-items: center; gap: 6px; border: 1px solid #dce2db; border-radius: 7px; padding: 7px 10px; background: white; color: #485b48; }
+.history-search { margin: 0 0 16px; }
+.history-search>div { display: flex; align-items: center; gap: 8px; padding: 9px 12px; border: 1px solid #dce2db; background: white; border-radius: 9px; }
+.history-search>div>span { font-size: 23px; color: #748172; }
+.history-search small { display: block; font-size: 11px; color: #7b8378; margin: 7px 3px; min-height: 15px; }
+.history-card .history-match-snippet { color: #405741; line-height: 1.6; font-size: 12px; white-space: normal; }
+::highlight(find-pdf), ::highlight(find-chat) { background-color: #ffe17499; color: inherit; }
+::highlight(find-pdf-active), ::highlight(find-chat-active) { background-color: #ff9d35cc; color: inherit; }
+@media (max-width: 850px) { .pdf-find-position { width: 100% !important; padding-inline: 10px; } }
+@media (max-width: 640px) { .find-trigger>span { display: none; } }
+.history-search-match { background: #ffe174b3; color: inherit; border-radius: 2px; padding: 0; box-decoration-break: clone; -webkit-box-decoration-break: clone; }
