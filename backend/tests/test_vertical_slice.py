@@ -1006,3 +1006,29 @@ def test_folder_and_discovery_migrations_upgrade_all_feature_branches(tmp_path) 
             assert 'discovery_json' in {column[1] for column in db.execute('PRAGMA table_info(documents)')}
             assert db.execute('SELECT version_num FROM alembic_version').fetchall() == [('0014_conversation_drafts',)]
             assert db.execute('PRAGMA foreign_key_check').fetchall() == []
+
+
+def test_conversation_search_titles_messages_and_scope() -> None:
+    from adam_server.database import SessionLocal
+    from adam_server.models import Message
+    paper = client.post('/api/documents', files={'file': ('search.pdf', BytesIO(sample_pdf('Search fixture')), 'application/pdf')}).json()
+    other = client.post('/api/documents', files={'file': ('other.pdf', BytesIO(sample_pdf('Other fixture')), 'application/pdf')}).json()
+    first = client.post(f"/api/documents/{paper['id']}/conversations", json={'title': 'Attention notes'}).json()
+    # Persist the first chat before creating another: blank workspaces are reused.
+    assert client.put(f"/api/conversations/{first['id']}/draft", json={'draft_text': 'Saved research draft'}).status_code == 200
+    second = client.post(f"/api/documents/{paper['id']}/conversations", json={'title': 'Another topic'}).json()
+    assert first['id'] != second['id']
+    third = client.post(f"/api/documents/{other['id']}/conversations", json={'title': 'Attention elsewhere'}).json()
+    with SessionLocal() as db:
+        for conversation in [second, third]:
+            db.add(Message(document_id=conversation['document_id'], conversation_id=conversation['id'], role='assistant', content='Sparse ATTENTION supports retrieval. Literal 100% and a_b.', context_json=None))
+        db.commit()
+    url = f"/api/documents/{paper['id']}/conversation-search"
+    results = client.get(url, params={'q': 'attention'}).json()
+    assert {item['id'] for item in results} == {first['id'], second['id']}
+    assert next(item for item in results if item['id'] == second['id'])['snippet'].startswith('Sparse ATTENTION')
+    assert client.get(url, params={'q': '100%'}).json()[0]['id'] == second['id']
+    assert client.get(url, params={'q': 'a_b'}).json()[0]['id'] == second['id']
+    assert client.get(url, params={'q': 'absent'}).json() == []
+    assert client.get(url, params={'q': '   '}).json() == []
+    assert client.get('/api/documents/missing/conversation-search', params={'q': 'test'}).status_code == 404
