@@ -39,7 +39,7 @@ type WebInfo = { searched: boolean; query: string | null; reused: boolean; sourc
 type ChatTurn = { id: string; question: string; answer: string; context: ContextSelection[]; importedQuickAsk?: boolean; web?: WebInfo | null };
 type PendingAnswer = { question: string; context: ContextSelection[]; answer: string; status: StreamStatus; error: string; web: WebInfo | null; searchNotice: string };
 type QuickTurn = { question: string; answer: string; web?: WebInfo | null };
-type Conversation = { id: string; document_id: string; title: string; provider: string; model_id: string; context_builder_version: string; updated_at: string; message_count: number };
+type Conversation = { id: string; document_id: string; title: string; draft_text: string; provider: string; model_id: string; context_builder_version: string; updated_at: string; message_count: number };
 type SavedMessage = { id: string; role: string; content: string; context_json: string | null };
 type ProviderId = 'zen' | 'openrouter' | 'openai' | 'anthropic' | 'google';
 type AppSettings = { provider: ProviderId; model: string; title_provider: ProviderId; title_model: string; selected_models: Partial<Record<ProviderId, string>>; providers: Record<ProviderId, boolean>; favorites: Partial<Record<ProviderId, string[]>>; system_prompt: string; quick_ask_prompt: string };
@@ -136,6 +136,9 @@ export default function Home() {
   const [chatHistory, setChatHistory] = useState<ChatTurn[]>([]);
   const [conversations, setConversations] = useState<Conversation[]>([]);
   const [activeConversation, setActiveConversation] = useState<Conversation | null>(null);
+  const draftBindingRef = useRef<Conversation | null>(null);
+  const draftFlushRef = useRef<() => Promise<void>>(async () => {});
+  const creatingConversationRef = useRef(false);
   const [historyOpen, setHistoryOpen] = useState(false);
   const [streamStatus, setStreamStatus] = useState<StreamStatus>('idle');
   const [searchEnabled, setSearchEnabled] = useState(false);
@@ -501,6 +504,52 @@ export default function Home() {
     setChatScale((current) => Math.min(MAX_CHAT_SCALE, Math.max(MIN_CHAT_SCALE, Number((current + delta).toFixed(2)))));
   }, []);
 
+  useEffect(() => {
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    let queue = Promise.resolve();
+    const flush = () => {
+      clearTimeout(timer);
+      const conversation = draftBindingRef.current;
+      if (!conversation) return queue;
+      const draft_text = questionStore.get();
+      const key = `adam.draft.${conversation.id}`;
+      if (draft_text === conversation.draft_text && window.localStorage.getItem(key) === null) return queue;
+      // Cache synchronously so a reload or a failed save never loses typed text.
+      window.localStorage.setItem(key, JSON.stringify({ ...conversation, draft_text }));
+      draftBindingRef.current = { ...conversation, draft_text };
+      queue = queue.catch(() => {}).then(async () => {
+        const response = await fetch(`${API_BASE}/api/conversations/${conversation.id}/draft`, { method: 'PUT', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ draft_text }), keepalive: true });
+        if (!response.ok) throw new Error('Could not save draft. Your text is kept in this browser.');
+        const updated = await response.json() as Conversation;
+        if (draftBindingRef.current?.id === updated.id) draftBindingRef.current = { ...draftBindingRef.current, message_count: updated.message_count };
+        const cached = window.localStorage.getItem(key);
+        if (cached && (JSON.parse(cached) as Conversation).draft_text === draft_text) window.localStorage.removeItem(key);
+        if (activePaperIdRef.current !== conversation.document_id) return;
+        setConversations((current) => {
+          const others = current.filter((item) => item.id !== updated.id);
+          return updated.message_count || updated.draft_text.trim() ? [updated, ...others] : others;
+        });
+      });
+      return queue;
+    };
+    draftFlushRef.current = flush;
+    const unsubscribe = questionStore.subscribe(() => {
+      const conversation = draftBindingRef.current;
+      if (!conversation) return;
+      window.localStorage.setItem(`adam.draft.${conversation.id}`, JSON.stringify({ ...conversation, draft_text: questionStore.get() }));
+      clearTimeout(timer);
+      timer = setTimeout(() => { void flush().catch((reason: Error) => setError(reason.message)); }, 300);
+    });
+    const leave = () => { void flush().catch(() => {}); };
+    window.addEventListener('pagehide', leave);
+    return () => { leave(); unsubscribe(); clearTimeout(timer); window.removeEventListener('pagehide', leave); };
+  }, [questionStore]);
+
+  function detachDraft() {
+    void draftFlushRef.current().catch((reason: Error) => setError(reason.message));
+    draftBindingRef.current = null;
+  }
+
   async function syncConversationDefaults(conversation: Conversation) {
     const response = await fetch(`${API_BASE}/api/conversations/${conversation.id}/sync-defaults`, { method: 'POST' });
     if (!response.ok) return conversation;
@@ -854,6 +903,7 @@ export default function Home() {
   }
 
   function openPaper(paper: Paper) {
+    detachDraft();
     persistReading();
     const saved = readingHistory().find((item) => item.id === paper.id);
     pendingReadingRef.current = saved ? { ...saved, page: Math.min(saved.page, Math.max(1, paper.page_count)) } : null;
@@ -911,6 +961,7 @@ export default function Home() {
   }
 
   function returnToLibrary() {
+    detachDraft();
     persistReading();
     pendingReadingRef.current = null;
     changeReadingMode(false);
@@ -928,15 +979,23 @@ export default function Home() {
       let response = await fetch(`${API_BASE}/api/documents/${documentId}/conversations`);
       if (!response.ok) throw new Error('Could not load saved chats.');
       let items = await response.json() as Conversation[];
+      // Include locally cached drafts when an earlier network save was interrupted.
+      for (const key of Object.keys(window.localStorage).filter((key) => key.startsWith('adam.draft.'))) {
+        try {
+          const cached = JSON.parse(window.localStorage.getItem(key)!) as Conversation;
+          if (cached.document_id === documentId) items = [...items.filter((item) => item.id !== cached.id), cached].filter((item) => item.message_count || item.draft_text.trim());
+        } catch { /* Ignore malformed browser cache. */ }
+      }
       if (items.length === 0) {
         response = await fetch(`${API_BASE}/api/documents/${documentId}/conversations`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: '{}' });
         if (!response.ok) throw new Error('Could not create a chat.');
         items = [await response.json() as Conversation];
       }
       if (paperLoadRef.current !== loadId || activePaperIdRef.current !== documentId) return;
-      setConversations(items);
+      setConversations(items.filter((item) => item.message_count || item.draft_text.trim()));
       const preferred = window.localStorage.getItem(`adam.conversation.${documentId}`);
       await openConversation(items.find((item) => item.id === preferred) ?? items[0]);
+      if (paperLoadRef.current === loadId && items.some((item) => item.message_count || item.draft_text.trim())) setHistoryOpen(true);
     } catch (reason) {
       if (paperLoadRef.current === loadId) setError(reason instanceof Error ? reason.message : 'Could not load saved chats.');
     }
@@ -944,6 +1003,8 @@ export default function Home() {
 
   async function openConversation(conversation: Conversation) {
     if (activePaperIdRef.current !== conversation.document_id) return;
+    detachDraft();
+    setActiveConversation(null);
     setLinkedTurn(null);
     activeConversationIdRef.current = conversation.id;
     const loadId = ++conversationLoadRef.current;
@@ -952,12 +1013,18 @@ export default function Home() {
     const detail = await response.json() as Conversation & { messages: SavedMessage[] };
     if (conversationLoadRef.current !== loadId || activeConversationIdRef.current !== conversation.id) return;
     window.localStorage.setItem(`adam.conversation.${conversation.document_id}`, conversation.id);
-    setActiveConversation(detail);
+    const { messages, ...metadata } = detail;
+    const cached = window.localStorage.getItem(`adam.draft.${conversation.id}`);
+    let draft = detail.draft_text;
+    try { if (cached) draft = (JSON.parse(cached) as Conversation).draft_text; } catch { /* Use server draft. */ }
+    questionStore.set(draft);
+    draftBindingRef.current = { ...metadata, draft_text: draft };
+    setActiveConversation(metadata);
     setHistoryOpen(false);
     const turns: ChatTurn[] = [];
-    for (let index = 0; index < detail.messages.length; index += 1) {
-      const user = detail.messages[index];
-      const assistant = detail.messages[index + 1];
+    for (let index = 0; index < messages.length; index += 1) {
+      const user = messages[index];
+      const assistant = messages[index + 1];
       if (user.role !== 'user' || assistant?.role !== 'assistant') continue;
       turns.push({ id: user.id, question: user.content, answer: assistant.content, context: contextFromJson(user.context_json), importedQuickAsk: contextScope(user.context_json) === 'quick_ask_saved', web: webFromJson(assistant.context_json) });
       index += 1;
@@ -971,17 +1038,27 @@ export default function Home() {
   }
 
   async function createNewConversation() {
-    if (!active) return;
-    const response = await fetch(`${API_BASE}/api/documents/${active.id}/conversations`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: '{}' });
-    if (!response.ok) { setError('Could not create a chat.'); return; }
-    const conversation = await response.json() as Conversation;
-    setConversations((current) => [conversation, ...current]);
-    await openConversation(conversation);
-    return conversation;
+    if (!active || creatingConversationRef.current) return;
+    creatingConversationRef.current = true;
+    const documentId = active.id;
+    try {
+      await draftFlushRef.current();
+      const response = await fetch(`${API_BASE}/api/documents/${documentId}/conversations`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: '{}' });
+      if (!response.ok) throw new Error('Could not create a chat.');
+      const conversation = await response.json() as Conversation;
+      if (activePaperIdRef.current !== documentId) return;
+      await openConversation(conversation);
+      return conversation;
+    } catch (reason) {
+      setError(reason instanceof Error ? reason.message : 'Could not create a chat.');
+    } finally { creatingConversationRef.current = false; }
   }
 
   async function deleteConversation(conversation: Conversation) {
     if (!await requestAppDialog({ title: `Delete “${conversation.title}”?`, message: 'This conversation will be permanently removed.', confirm: 'Delete chat', destructive: true })) return;
+    await draftFlushRef.current();
+    if (draftBindingRef.current?.id === conversation.id) draftBindingRef.current = null;
+    window.localStorage.removeItem(`adam.draft.${conversation.id}`);
     const response = await fetch(`${API_BASE}/api/conversations/${conversation.id}`, { method: 'DELETE' });
     if (!response.ok) { setError('Could not delete this chat.'); return; }
     setSelectedAiNote(null);
@@ -1722,7 +1799,7 @@ export default function Home() {
   async function ask(event: FormEvent) {
     event.preventDefault();
     const sentQuestion = questionStore.get().trim();
-    if (!active || !activeConversation || !sentQuestion || asking) return;
+    if (chatConfigured === false || !active || !activeConversation || !sentQuestion || asking) return;
     const originPaperId = active.id;
     const originConversationId = activeConversation.id;
     const existing = pendingAnswersRef.current.get(originConversationId);
@@ -1768,12 +1845,14 @@ export default function Home() {
       // Publish every buffered fragment before unlocking, so the next turn archives the full answer.
       batcher.flush();
       pending.status = 'complete';
+      if (isVisible()) void draftFlushRef.current().catch((reason: Error) => setError(reason.message));
       if (isVisible()) { answerStore.set(pending.answer); setStreamStatus('complete'); setAsking(false); }
       void fetch(`${API_BASE}/api/conversations/${sendingConversation.id}`).then((result) => result.ok ? result.json() as Promise<Conversation> : null).catch(() => null).then((savedConversation) => {
         const updatedConversation = { ...sendingConversation, ...(savedConversation ?? {}), message_count: savedConversation?.message_count ?? sendingConversation.message_count + 2, updated_at: savedConversation?.updated_at ?? new Date().toISOString() };
         if (generatedTitle) updatedConversation.title = generatedTitle;
+        if (draftBindingRef.current?.id === updatedConversation.id) draftBindingRef.current = { ...draftBindingRef.current, message_count: updatedConversation.message_count, title: updatedConversation.title };
         if (isVisible()) setActiveConversation((current) => current?.id === updatedConversation.id ? updatedConversation : current);
-        setConversations((current) => current.map((item) => item.id === updatedConversation.id ? updatedConversation : item));
+        setConversations((current) => [updatedConversation, ...current.filter((item) => item.id !== updatedConversation.id)]);
       });
     };
     try {
@@ -1836,7 +1915,7 @@ export default function Home() {
       batcher.flush();
       pending.error = reason instanceof Error ? reason.message : 'The model request failed.';
       pending.status = 'error';
-      if (isVisible()) { setError(pending.error); setStreamStatus('error'); setAsking(false); }
+      if (isVisible()) { questionStore.set(sentQuestion); setError(pending.error); setStreamStatus('error'); setAsking(false); }
     } finally {
       batcher.cancel();
       streamBatchersRef.current.delete(batcher);
@@ -1873,16 +1952,16 @@ export default function Home() {
           {paneMode === 'links' ? <ChatLinksPanel key={active.id} entries={highlightEntries} conversations={conversations} activeConversationId={activeConversation?.id} revealedLinkId={revealedLinkId} onShowInPdf={showLinkInPdf} onOpen={openAiConversation} /> : paneMode === 'notes' ? <PaperNoteEditor documentId={active.id} paperName={active.original_name.replace(/\.pdf$/i, '')} pendingQuote={pendingNoteQuote} onQuoteConsumed={() => setPendingNoteQuote(null)} /> : historyOpen ? <section className="history-view">
             <div className="history-header"><div><p>Conversations</p><h2>Chat history</h2><span>{conversations.length} saved for this paper</span></div><button type="button" onClick={() => setHistoryOpen(false)} aria-label="Close chat history">×</button></div>
             <button type="button" className="new-chat-card" onClick={() => void createNewConversation()}><span>＋</span><div><strong>Start a new chat</strong><small>Uses your current default model</small></div><i>→</i></button>
-            <div className="history-list">{conversations.map((item) => <article className={`history-card${item.id === activeConversation?.id ? ' current' : ''}`} key={item.id}>{renamingChatId === item.id ? <form className="chat-title-form history-title-form" onSubmit={(event) => void renameConversation(event, item)}><input autoFocus value={chatTitleValue} maxLength={200} aria-label="Chat title" onChange={(event) => setChatTitleValue(event.target.value)} onKeyDown={(event) => { if (event.key === 'Escape') setRenamingChatId(null); }} /><button type="submit" disabled={!chatTitleValue.trim() || titleSaving}>Save</button><button type="button" onClick={() => setRenamingChatId(null)}>Cancel</button></form> : <button type="button" className="history-card-main" onClick={() => void openConversation(item)}><div className="history-card-top"><span className="history-model-mark">✦</span><time>{formatConversationDate(item.updated_at)}</time></div><strong>{item.title}</strong><p>{item.provider} · {item.model_id}</p><div className="history-card-meta"><span>{Math.ceil(item.message_count / 2)} {Math.ceil(item.message_count / 2) === 1 ? 'exchange' : 'exchanges'}</span><span>{item.context_builder_version === 'quick-ask-v1' ? 'Selection only' : 'Full paper'}</span>{item.id === activeConversation?.id && <em>Current</em>}</div></button>}<div className="history-card-actions"><button type="button" aria-label={`Rename ${item.title}`} title="Rename chat" onClick={() => beginChatRename(item)}>✎</button>{item.message_count > 0 && <button type="button" aria-label={`Regenerate title for ${item.title}`} title="Regenerate title with the model selected in Settings" disabled={titleSaving} onClick={() => void regenerateConversationTitle(item)}>↻</button>}<button type="button" className="history-delete" aria-label={`Delete ${item.title}`} title="Delete chat" onClick={() => void deleteConversation(item)}><TrashIcon /></button></div></article>)}</div>
+            <div className="history-list">{conversations.length === 0 && <p className="empty-context">No saved chats yet. Start a chat; it stays here once you type a draft or send a message.</p>}{conversations.map((item) => <article className={`history-card${item.id === activeConversation?.id ? ' current' : ''}`} key={item.id}>{renamingChatId === item.id ? <form className="chat-title-form history-title-form" onSubmit={(event) => void renameConversation(event, item)}><input autoFocus value={chatTitleValue} maxLength={200} aria-label="Chat title" onChange={(event) => setChatTitleValue(event.target.value)} onKeyDown={(event) => { if (event.key === 'Escape') setRenamingChatId(null); }} /><button type="submit" disabled={!chatTitleValue.trim() || titleSaving}>Save</button><button type="button" onClick={() => setRenamingChatId(null)}>Cancel</button></form> : <button type="button" className="history-card-main" onClick={() => void openConversation(item)}><div className="history-card-top"><span className="history-model-mark">✦</span><time>{formatConversationDate(item.updated_at)}</time></div><strong>{item.message_count === 0 && item.draft_text.trim() && item.title === 'New chat' ? item.draft_text.trim().slice(0, 80) : item.title}</strong><p>{item.provider} · {item.model_id}</p><div className="history-card-meta"><span>{item.draft_text.trim() ? 'Draft' : `${Math.ceil(item.message_count / 2)} ${Math.ceil(item.message_count / 2) === 1 ? 'exchange' : 'exchanges'}`}</span><span>{item.context_builder_version === 'quick-ask-v1' ? 'Selection only' : 'Full paper'}</span>{item.id === activeConversation?.id && <em>Current</em>}</div></button>}<div className="history-card-actions"><button type="button" aria-label={`Rename ${item.title}`} title="Rename chat" onClick={() => beginChatRename(item)}>✎</button>{item.message_count > 0 && <button type="button" aria-label={`Regenerate title for ${item.title}`} title="Regenerate title with the model selected in Settings" disabled={titleSaving} onClick={() => void regenerateConversationTitle(item)}>↻</button>}<button type="button" className="history-delete" aria-label={`Delete ${item.title}`} title="Delete chat" onClick={() => void deleteConversation(item)}><TrashIcon /></button></div></article>)}</div>
           </section> : <>
-            <div className="conversation-header"><div>{activeConversation && renamingChatId === activeConversation.id ? <form className="chat-title-form" onSubmit={(event) => void renameConversation(event, activeConversation)}><input autoFocus value={chatTitleValue} maxLength={200} aria-label="Chat title" onChange={(event) => setChatTitleValue(event.target.value)} onKeyDown={(event) => { if (event.key === 'Escape') setRenamingChatId(null); }} /><button type="submit" disabled={!chatTitleValue.trim() || titleSaving}>Save</button></form> : <button type="button" className="chat-title-button" title="Rename chat" onClick={() => activeConversation && beginChatRename(activeConversation)}><strong>{activeConversation?.title ?? 'Loading chat…'}</strong><span>✎</span></button>}<small>{activeConversation ? `${activeConversation.provider} · ${activeConversation.model_id}` : 'Preparing paper context'}</small></div><div className="conversation-actions">{activeConversation && activeConversation.message_count > 0 && <button type="button" disabled={titleSaving} onClick={() => void regenerateConversationTitle(activeConversation)} title="Regenerate title with the model selected in Settings"><UiIcon kind="refresh" /><span>Title</span></button>}<button type="button" onClick={() => void createNewConversation()} title="Start a new chat"><UiIcon kind="plus" /><span>New</span></button><button type="button" onClick={() => { setLinkedTurn(null); setHistoryOpen(true); }} title="Browse chats for this paper"><UiIcon kind="history" /><span>History</span></button></div></div>
+            <div className="conversation-header"><div>{activeConversation && renamingChatId === activeConversation.id ? <form className="chat-title-form" onSubmit={(event) => void renameConversation(event, activeConversation)}><input autoFocus value={chatTitleValue} maxLength={200} aria-label="Chat title" onChange={(event) => setChatTitleValue(event.target.value)} onKeyDown={(event) => { if (event.key === 'Escape') setRenamingChatId(null); }} /><button type="submit" disabled={!chatTitleValue.trim() || titleSaving}>Save</button></form> : <button type="button" className="chat-title-button" title="Rename chat" onClick={() => activeConversation && beginChatRename(activeConversation)}><strong>{activeConversation?.title ?? 'Loading chat…'}</strong><span>✎</span></button>}<small>{activeConversation ? `${activeConversation.provider} · ${activeConversation.model_id}${activeConversation.message_count === 0 ? hasQuestion ? ' · Draft' : ' · Temporary' : ''}` : 'Preparing paper context'}</small></div><div className="conversation-actions">{activeConversation && activeConversation.message_count > 0 && <button type="button" disabled={titleSaving} onClick={() => void regenerateConversationTitle(activeConversation)} title="Regenerate title with the model selected in Settings"><UiIcon kind="refresh" /><span>Title</span></button>}<button type="button" onClick={() => void createNewConversation()} title="Start a new chat"><UiIcon kind="plus" /><span>New</span></button><button type="button" onClick={() => { void draftFlushRef.current().catch((reason: Error) => setError(reason.message)); setLinkedTurn(null); setHistoryOpen(true); }} title="Browse chats for this paper"><UiIcon kind="history" /><span>History</span></button></div></div>
             <div className="chat-body" ref={chatBodyRef} onWheelCapture={(event) => { if (event.deltaY < 0) pauseChatFollow(); }} onTouchMove={pauseChatFollow} onPointerDown={(event) => { if (event.target === event.currentTarget) pauseChatFollow(); }} onScroll={(event) => { const element = event.currentTarget; followOutputRef.current = element.scrollHeight - element.scrollTop - element.clientHeight < 40; }}><div className="chat-heading"><span className="spark">✦</span><div><strong>{activeConversation?.context_builder_version === 'quick-ask-v1' ? 'Saved Quick Ask' : 'Ask about this paper'}</strong><p>{activeConversation?.context_builder_version === 'quick-ask-v1' ? 'This saved thread uses only its original selection and Quick Ask prompt.' : 'The full paper is available automatically. Select text only when you want to focus the answer.'}</p></div></div>{chatConfigured === false && <button type="button" className="no-key-notice" onClick={() => setSettingsOpen(true)}><strong>No API key configured</strong><span>Choose a provider and add a key in Settings to enable chat.</span></button>}
               {chatHistory.map((turn) => <div className="chat-turn" data-question={turn.question} tabIndex={-1} key={turn.id}>{linkedTurn?.conversationId === activeConversation?.id && linkedTurn?.question === turn.question && <span key={linkedTurn.reveal} className="linked-turn-reveal" aria-hidden="true" onAnimationEnd={() => setLinkedTurn((current) => current === linkedTurn ? null : current)} />}{turn.importedQuickAsk && <div className="quick-import-badge">✦ Saved Quick Ask · selection only</div>}<ContextList selections={turn.context} />{activeConversation && turn.context.some((item) => item.rects?.length) && <button type="button" className={`turn-link-button${isAiLinked(activeConversation.id, turn.question) ? ' linked' : ''}`} onClick={() => void toggleAiLink(activeConversation, turn.question, turn.context)}>{isAiLinked(activeConversation.id, turn.question) ? '✦ Linked to PDF · click to unlink' : '✦ Link reference to PDF'}</button>}<div className="user-message"><span>You</span><p>{turn.question}</p></div><div className="answer-card complete"><div className="answer-meta"><span>Adam</span><span className="stream-state">Done</span></div><MarkdownAnswer web={turn.web}>{turn.answer}</MarkdownAnswer><WebEvidence web={turn.web} /></div></div>)}
               {submittedQuestion && <><ContextList selections={submittedContext} />{activeConversation && streamStatus === 'complete' && submittedContext.some((item) => item.rects?.length) && <button type="button" className={`turn-link-button${isAiLinked(activeConversation.id, submittedQuestion) ? ' linked' : ''}`} onClick={() => void toggleAiLink(activeConversation, submittedQuestion, submittedContext)}>{isAiLinked(activeConversation.id, submittedQuestion) ? '✦ Linked to PDF · click to unlink' : '✦ Link reference to PDF'}</button>}<div className="user-message"><span>You</span><p>{submittedQuestion}</p></div></>}
               {streamStatus !== 'idle' && streamStatus !== 'error' && <div className={`answer-card ${streamStatus}`} aria-live="polite"><div className="answer-meta"><span>Adam</span><span className="stream-state">{streamStatus === 'connecting' ? <>Thinking<span className="thinking-dots"><i /><i /><i /></span></> : streamStatus === 'streaming' ? 'Responding…' : 'Done'}</span></div>{searchNotice && <p className="search-notice" role="status">{searchNotice}</p>}<StreamingMarkdown store={answerStore} web={answerWeb} streaming={streamStatus === 'streaming'} onCommit={followChatOutput} /><WebEvidence web={answerWeb} /></div>}{error && <p className="error-banner compact">{error}</p>}
               {contextSelections.length > 0 ? <ContextList selections={contextSelections} onRemove={(id) => setContextSelections((current) => current.filter((item) => item.id !== id))} /> : !submittedQuestion && chatHistory.length === 0 && <div className="empty-context"><span>✦</span><p>Ask anything about the paper, or select a passage for precise focus.</p>{canAsk && activeConversation?.context_builder_version !== 'quick-ask-v1' && <div className="prompt-suggestions">{PROMPT_SUGGESTIONS.map((suggestion) => <button type="button" key={suggestion} onClick={() => { questionStore.set(suggestion); composerRef.current?.focus(); }}>{suggestion}</button>)}</div>}</div>}
             </div>
-            <form className="composer" onSubmit={ask}><div className="composer-scope"><span className={`scope-pill${contextSelections.length ? ' focused' : ''}`}><i aria-hidden="true" />{chatConfigured === false ? 'Chat unavailable' : activeConversation?.context_builder_version === 'quick-ask-v1' ? 'Selection-only context' : contextSelections.length ? `${contextSelections.length} context ${contextSelections.length === 1 ? 'item' : 'items'}` : 'Full paper context'}</span></div><DraftTextarea store={questionStore} ref={composerRef} onKeyDown={(event) => { if (event.key === 'Enter' && !event.shiftKey && !event.nativeEvent.isComposing) { event.preventDefault(); event.currentTarget.form?.requestSubmit(); } }} placeholder={chatConfigured === false ? 'Add an API key in Settings to chat…' : activeConversation?.context_builder_version === 'quick-ask-v1' ? 'Continue this saved Quick Ask…' : contextSelections.length ? 'Ask about your context…' : 'Ask anything about this paper…'} disabled={!canAsk || asking} rows={3} /><div><button type="button" className={`composer-search-toggle${searchEnabled ? ' active' : ''}`} aria-pressed={searchEnabled} onClick={() => setSearchEnabled((enabled) => !enabled)} title="Allow a web search for this question"><UiIcon kind="globe" />Search web</button><span className="composer-hint"><kbd>↵</kbd> send <kbd>⇧↵</kbd> new line</span><button type="submit" disabled={!canAsk || !hasQuestion || asking}>{asking ? '…' : <UiIcon kind="send" />}</button></div></form>
+            <form className="composer" onSubmit={ask}><div className="composer-scope"><span className={`scope-pill${contextSelections.length ? ' focused' : ''}`}><i aria-hidden="true" />{chatConfigured === false ? 'Chat unavailable' : activeConversation?.context_builder_version === 'quick-ask-v1' ? 'Selection-only context' : contextSelections.length ? `${contextSelections.length} context ${contextSelections.length === 1 ? 'item' : 'items'}` : 'Full paper context'}</span></div><DraftTextarea store={questionStore} ref={composerRef} onKeyDown={(event) => { if (event.key === 'Enter' && !event.shiftKey && !event.nativeEvent.isComposing) { event.preventDefault(); event.currentTarget.form?.requestSubmit(); } }} placeholder={chatConfigured === false ? 'Write a draft… Add an API key in Settings to send.' : activeConversation?.context_builder_version === 'quick-ask-v1' ? 'Continue this saved Quick Ask…' : contextSelections.length ? 'Ask about your context…' : 'Ask anything about this paper…'} disabled={!activeConversation || asking} maxLength={8000} rows={3} /><div><button type="button" className={`composer-search-toggle${searchEnabled ? ' active' : ''}`} aria-pressed={searchEnabled} onClick={() => setSearchEnabled((enabled) => !enabled)} title="Allow a web search for this question"><UiIcon kind="globe" />Search web</button><span className="composer-hint"><kbd>↵</kbd> send <kbd>⇧↵</kbd> new line</span><button type="submit" disabled={!canAsk || !hasQuestion || asking}>{asking ? '…' : <UiIcon kind="send" />}</button></div></form>
           </>}
         </aside>
       </div>

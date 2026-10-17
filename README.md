@@ -12,7 +12,7 @@ The current vertical slice supports:
 - Continue reading with browser-local saved page, zoom, and reading position
 - full-window focus reading: click **Focus reading** or press `F` to hide the sidebar and anchored note cards while keeping note and chat-link icons available; use **Exit focus** or `Esc` to restore your workspace, zoom, and reading position
 - local native-text extraction with PyMuPDF
-- durable per-paper chat histories with create, switch, delete, and reload restoration
+- per-paper chat histories with temporary empty chats, autosaved unsent drafts, switch, delete, and reload restoration
 - automatic full-paper context for every question, with selected passages and images treated as explicit focus
 - provider/model/system-prompt snapshots per conversation
 - streamed responses from OpenCode Zen, using GPT-5.6 Terra by default
@@ -98,3 +98,5 @@ Click a page number or percentage to edit it; Enter applies a valid value, and E
 Checks: `npm run lint`, `npm run build`, and `npm run test:reader-controls` from `frontend/`. The existing global Cloudflare/browser type collisions remain in the default TypeScript configuration; `npx tsc --noEmit --types node --incremental false` checks the browser code without those conflicting ambient globals.
 
 Paper search shortcuts: `Cmd/Ctrl + K` opens library search and switches between local and online search while the dialog is open. `Cmd/Ctrl + Shift + K` opens online paper discovery directly. Switching modes preserves the query and online results.
+
+New chats stay temporary until you type a draft or send a message. Repeated **New** clicks reuse an empty chat, and empty chats do not appear in history. Draft text autosaves locally on the server, with a browser recovery copy while saves are pending; it restores when you switch chats or reload. Clearing an unsent draft removes it from history. Opening a paper with saved chats shows its history first. You can write drafts before configuring an API key.

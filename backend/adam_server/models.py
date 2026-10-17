@@ -83,6 +83,7 @@ class Conversation(Base):
     id: Mapped[str] = mapped_column(String(36), primary_key=True, default=new_id)
     document_id: Mapped[str] = mapped_column(ForeignKey("documents.id", ondelete="CASCADE"), index=True)
     title: Mapped[str] = mapped_column(String(200), default="New chat")
+    draft_text: Mapped[str] = mapped_column(Text, default="", server_default="")
     provider: Mapped[str] = mapped_column(String(32))
     model_id: Mapped[str] = mapped_column(String(200))
     system_prompt: Mapped[str] = mapped_column(Text)

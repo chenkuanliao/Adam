@@ -94,7 +94,11 @@ def test_concurrent_streams_beyond_pool_size_complete_while_health_responds(monk
     # More streams than the default pool (5 + 10 overflow) can hand out at once.
     stream_count = 20
     paper = upload_paper("Concurrent streams must not exhaust the connection pool.")
-    conversations = [client.post(f"/api/documents/{paper['id']}/conversations", json={}).json() for _ in range(stream_count)]
+    conversations = []
+    for index in range(stream_count):
+        conversation = client.post(f"/api/documents/{paper['id']}/conversations", json={}).json()
+        client.put(f"/api/conversations/{conversation['id']}/draft", json={"draft_text": f"Question {index}"})
+        conversations.append(conversation)
 
     async def run() -> None:
         all_streaming = asyncio.Event()
