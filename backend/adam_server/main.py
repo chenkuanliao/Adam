@@ -12,14 +12,14 @@ from fastapi import Depends, FastAPI, HTTPException, Query, Request, Response, U
 from fastapi.concurrency import run_in_threadpool
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse, StreamingResponse
-from sqlalchemy import func, select
+from sqlalchemy import func, select, text
 from sqlalchemy.orm import Session
 import httpx
 
 from .config import Settings, get_settings
 from .database import SessionLocal, get_db, run_migrations
 from .models import Annotation, Conversation, Document, Folder, Message, ModelFavorite, Page, PaperNote
-from .schemas import AiNoteCreate, AiNoteUnlink, AnnotationIn, AnnotationOut, AnnotationUpdate, AppSettingsOut, AppSettingsUpdate, ChatRequest, ConversationCreate, ConversationDetail, ConversationOut, ConversationUpdate, DocumentMove, DocumentOut, DocumentUpdate, FolderIn, FolderOut, FolderUpdate, ModelFavoriteUpdate, PageTextOut, PaperNoteOut, PaperNoteUpdate, ProviderKeyUpdate, ProviderModelsOut, QuickAskImportRequest, QuickAskRequest, TitleModelUpdate
+from .schemas import AiNoteCreate, AiNoteUnlink, AnnotationIn, AnnotationOut, AnnotationUpdate, AppSettingsOut, AppSettingsUpdate, ChatRequest, ConversationCreate, ConversationDraftUpdate, ConversationDetail, ConversationOut, ConversationUpdate, DocumentMove, DocumentOut, DocumentUpdate, FolderIn, FolderOut, FolderUpdate, ModelFavoriteUpdate, PageTextOut, PaperNoteOut, PaperNoteUpdate, ProviderKeyUpdate, ProviderModelsOut, QuickAskImportRequest, QuickAskRequest, TitleModelUpdate
 from .schemas import ChatTurnIn, ContextImageIn
 from .services.context import build_paper_context
 from .services.documents import document_file_path, ingest_pdf
@@ -660,7 +660,7 @@ def list_conversations(document_id: str, db: Session = Depends(get_db)) -> list[
     if not db.get(Document, document_id):
         raise HTTPException(404, "Document not found.")
     rows = db.execute(select(Conversation, func.count(Message.id)).outerjoin(Message, Message.conversation_id == Conversation.id).where(Conversation.document_id == document_id).group_by(Conversation.id).order_by(Conversation.updated_at.desc())).all()
-    return [{**ConversationOut.model_validate(conversation).model_dump(), "message_count": count} for conversation, count in rows]
+    return [{**ConversationOut.model_validate(conversation).model_dump(), "message_count": count} for conversation, count in rows if count or conversation.draft_text.strip()]
 
 
 @app.get("/api/documents/{document_id}/conversation-search")
@@ -691,6 +691,23 @@ def search_conversations(document_id: str, q: str = Query(min_length=1, max_leng
 def create_conversation(document_id: str, request: ConversationCreate, db: Session = Depends(get_db)) -> Conversation:
     if not db.get(Document, document_id):
         raise HTTPException(404, "Document not found.")
+    # Serialize creation so double clicks and multiple tabs reuse one blank workspace.
+    # The document lookup already opened a transaction; restart it with a write lock.
+    db.rollback()
+    db.execute(text("BEGIN IMMEDIATE"))
+    empty = db.scalar(select(Conversation).where(
+        Conversation.document_id == document_id,
+        func.trim(Conversation.draft_text) == "",
+        ~select(Message.id).where(Message.conversation_id == Conversation.id).exists(),
+    ).order_by(Conversation.updated_at.desc()).limit(1))
+    if empty:
+        runtime = settings.runtime_settings
+        empty.provider = runtime.get("provider", "zen")
+        empty.model_id = settings.resolved_opencode_model
+        empty.system_prompt = settings.system_prompt
+        db.commit()
+        db.refresh(empty)
+        return empty
     runtime = settings.runtime_settings
     provider = runtime.get("provider", "zen")
     conversation = Conversation(document_id=document_id, title=request.title or "New chat", provider=provider,
@@ -702,11 +719,23 @@ def create_conversation(document_id: str, request: ConversationCreate, db: Sessi
 
 
 @app.get("/api/conversations/{conversation_id}", response_model=ConversationDetail)
-def get_conversation(conversation_id: str, db: Session = Depends(get_db)) -> Conversation:
+def get_conversation(conversation_id: str, db: Session = Depends(get_db)) -> ConversationDetail:
     conversation = db.get(Conversation, conversation_id)
     if not conversation:
         raise HTTPException(404, "Conversation not found.")
-    return conversation
+    return ConversationDetail.model_validate(conversation).model_copy(update={"message_count": len(conversation.messages)})
+
+
+@app.put("/api/conversations/{conversation_id}/draft", response_model=ConversationOut)
+def save_conversation_draft(conversation_id: str, request: ConversationDraftUpdate, db: Session = Depends(get_db)) -> ConversationOut:
+    conversation = db.get(Conversation, conversation_id)
+    if not conversation:
+        raise HTTPException(404, "Conversation not found.")
+    conversation.draft_text = request.draft_text if request.draft_text.strip() else ""
+    db.commit()
+    db.refresh(conversation)
+    count = db.scalar(select(func.count(Message.id)).where(Message.conversation_id == conversation.id)) or 0
+    return ConversationOut.model_validate(conversation).model_copy(update={"message_count": count})
 
 
 @app.patch("/api/conversations/{conversation_id}", response_model=ConversationOut)
@@ -844,6 +873,7 @@ def prepare_chat_stream(conversation_id: str, request: ChatRequest) -> ChatStrea
         scope = "quick_ask_followup" if conversation.context_builder_version == "quick-ask-v1" else ("selection" if request.selected_text or request.images else "paper")
         context = {"scope": scope, "page": request.page, "selected_text": request.selected_text, "images": [image.model_dump() for image in request.images], "anchors": [anchor.model_dump() for anchor in request.anchors], "context_mode": context_mode, "search_requested": request.allow_web_search}
         db.add(Message(document_id=conversation.document_id, conversation_id=conversation.id, role="user", content=request.question, context_json=json.dumps(context)))
+        conversation.draft_text = ""
         should_generate_title = conversation.title == "New chat" and bool(settings.provider_api_key(settings.title_provider))
         if conversation.title == "New chat":
             conversation.title = request.question.strip()[:80]

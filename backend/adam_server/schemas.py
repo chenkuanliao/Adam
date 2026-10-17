@@ -179,6 +179,10 @@ class ConversationUpdate(BaseModel):
     title: str = Field(min_length=1, max_length=200)
 
 
+class ConversationDraftUpdate(BaseModel):
+    draft_text: str = Field(max_length=8000)
+
+
 class MessageOut(BaseModel):
     model_config = ConfigDict(from_attributes=True)
     id: str
@@ -193,6 +197,7 @@ class ConversationOut(BaseModel):
     id: str
     document_id: str
     title: str
+    draft_text: str = ""
     provider: str
     model_id: str
     context_builder_version: str

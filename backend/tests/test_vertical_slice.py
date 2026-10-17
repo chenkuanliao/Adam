@@ -98,7 +98,7 @@ def test_upload_extract_reopen_and_missing_key() -> None:
     assert created_chat.status_code == 201
     conversation = created_chat.json()
     assert conversation["model_id"] == "gpt-5.6-terra"
-    assert client.get(f"/api/documents/{uploaded['id']}/conversations").json()[0]["id"] == conversation["id"]
+    assert client.get(f"/api/documents/{uploaded['id']}/conversations").json() == []
 
     chat = client.post(
         f"/api/conversations/{conversation['id']}/messages/stream",
@@ -427,6 +427,7 @@ def test_delete_paper_removes_file_and_related_records() -> None:
 def test_ai_notes_merge_overlapping_context_and_follow_chat_lifecycle() -> None:
     uploaded = client.post("/api/documents", files={"file": ("linked.pdf", BytesIO(sample_pdf("Linked AI note test.")), "application/pdf")}).json()
     first_chat = client.post(f"/api/documents/{uploaded['id']}/conversations", json={}).json()
+    client.put(f"/api/conversations/{first_chat['id']}/draft", json={"draft_text": "First chat draft"})
     second_chat = client.post(f"/api/documents/{uploaded['id']}/conversations", json={}).json()
     note_id = "33333333-3333-4333-8333-333333333333"
     note = client.post(f"/api/documents/{uploaded['id']}/annotations", json={"id": note_id, "page": 1, "text": "Linked AI note", "color": "#d6a629", "rects": [{"left": .1, "top": .1, "width": .3, "height": .03}], "note_text": "Keep this regular note."})
@@ -580,7 +581,7 @@ def test_folder_migration_preserves_existing_papers_and_children(tmp_path) -> No
             assert db.execute(f'SELECT COUNT(*) FROM {table}').fetchone()[0] == 1
         assert db.execute('SELECT color, icon FROM folders WHERE id = ?', ('old-folder',)).fetchone() == ('#8c9d65', 'folder')
         assert 'discovery_json' in {column[1] for column in db.execute('PRAGMA table_info(documents)')}
-        assert db.execute('SELECT version_num FROM alembic_version').fetchall() == [('0013_merge_discovery_folders',)]
+        assert db.execute('SELECT version_num FROM alembic_version').fetchall() == [('0014_conversation_drafts',)]
         assert db.execute('PRAGMA foreign_key_check').fetchall() == []
 
 
@@ -1003,7 +1004,7 @@ def test_folder_and_discovery_migrations_upgrade_all_feature_branches(tmp_path) 
             if revision in ['0011_nested_folders', '0012_merge_folder_features']:
                 assert db.execute("SELECT parent_id, icon FROM folders WHERE id = 'child'").fetchone() == ('root', 'folder')
             assert 'discovery_json' in {column[1] for column in db.execute('PRAGMA table_info(documents)')}
-            assert db.execute('SELECT version_num FROM alembic_version').fetchall() == [('0013_merge_discovery_folders',)]
+            assert db.execute('SELECT version_num FROM alembic_version').fetchall() == [('0014_conversation_drafts',)]
             assert db.execute('PRAGMA foreign_key_check').fetchall() == []
 
 
@@ -1013,7 +1014,10 @@ def test_conversation_search_titles_messages_and_scope() -> None:
     paper = client.post('/api/documents', files={'file': ('search.pdf', BytesIO(sample_pdf('Search fixture')), 'application/pdf')}).json()
     other = client.post('/api/documents', files={'file': ('other.pdf', BytesIO(sample_pdf('Other fixture')), 'application/pdf')}).json()
     first = client.post(f"/api/documents/{paper['id']}/conversations", json={'title': 'Attention notes'}).json()
+    # Persist the first chat before creating another: blank workspaces are reused.
+    assert client.put(f"/api/conversations/{first['id']}/draft", json={'draft_text': 'Saved research draft'}).status_code == 200
     second = client.post(f"/api/documents/{paper['id']}/conversations", json={'title': 'Another topic'}).json()
+    assert first['id'] != second['id']
     third = client.post(f"/api/documents/{other['id']}/conversations", json={'title': 'Attention elsewhere'}).json()
     with SessionLocal() as db:
         for conversation in [second, third]:
