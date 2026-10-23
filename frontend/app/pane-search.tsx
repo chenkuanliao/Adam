@@ -7,8 +7,16 @@ import { createSearchHighlights, type HighlightRegistry, type SearchHighlight } 
 type Hit = { page: number; index: number };
 const EMPTY_HITS: Hit[] = [];
 
-export default function PaneSearch({ kind, root, pdf, onPage, onClose, initialQuery = '' }: { kind: 'pdf' | 'chat'; root: RefObject<HTMLElement | null>; pdf?: PDFDocumentProxy | null; onPage?: (page: number) => void; onClose: () => void; initialQuery?: string }) {
-  const [query, setQuery] = useState(initialQuery);
+export default function PaneSearch({ kind, root, pdf, onPage, onClose, storageKey, initialQuery = '' }: { kind: 'pdf' | 'chat'; root: RefObject<HTMLElement | null>; pdf?: PDFDocumentProxy | null; onPage?: (page: number) => void; onClose: () => void; storageKey?: string; initialQuery?: string }) {
+  const [query, setQuery] = useState(() => {
+    try { return initialQuery || (storageKey ? window.localStorage.getItem(storageKey) ?? '' : ''); }
+    catch { return initialQuery; }
+  });
+  useEffect(() => {
+    if (!storageKey) return;
+    try { window.localStorage.setItem(storageKey, query); }
+    catch { /* Search still works when browser storage is unavailable. */ }
+  }, [storageKey, query]);
   const [texts, setTexts] = useState<string[]>([]);
   const [loading, setLoading] = useState(kind === 'pdf');
   const [error, setError] = useState('');

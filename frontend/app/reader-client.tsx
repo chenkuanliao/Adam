@@ -46,6 +46,16 @@ type SavedMessage = { id: string; role: string; content: string; context_json: s
 type ProviderId = 'zen' | 'openrouter' | 'openai' | 'anthropic' | 'google';
 type AppSettings = { provider: ProviderId; model: string; title_provider: ProviderId; title_model: string; selected_models: Partial<Record<ProviderId, string>>; providers: Record<ProviderId, boolean>; favorites: Partial<Record<ProviderId, string[]>>; system_prompt: string; quick_ask_prompt: string };
 type PaneMode = 'chat' | 'notes' | 'links';
+
+type ReaderView = { paneMode: PaneMode; historyOpen: boolean; historyQuery: string; chatFind: boolean };
+function readReaderView(documentId: string): ReaderView | null {
+  try {
+    const value = JSON.parse(window.localStorage.getItem(`adam.readerView.${documentId}`) ?? 'null');
+    if (!value || !['chat', 'notes', 'links'].includes(value.paneMode) || typeof value.historyOpen !== 'boolean') return null;
+    return { paneMode: value.paneMode, historyOpen: value.historyOpen, historyQuery: typeof value.historyQuery === 'string' ? value.historyQuery : '', chatFind: value.chatFind === true };
+  } catch { return null; }
+}
+
 type PaperNote = { document_id: string; content_html: string; plain_text: string; revision: number; updated_at: string | null };
 const PROVIDERS: Array<{ id: ProviderId; name: string; keyLabel: string }> = [
   { id: 'zen', name: 'OpenCode Zen', keyLabel: 'OpenCode Zen key' },
@@ -148,6 +158,7 @@ export default function Home() {
   const draftBindingRef = useRef<Conversation | null>(null);
   const draftFlushRef = useRef<() => Promise<void>>(async () => {});
   const creatingConversationRef = useRef(false);
+  const readerViewReadyRef = useRef(false);
   const [historyOpen, setHistoryOpen] = useState(false);
   const [streamStatus, setStreamStatus] = useState<StreamStatus>('idle');
   const [searchEnabled, setSearchEnabled] = useState(false);
@@ -911,7 +922,28 @@ export default function Home() {
     }
   }
 
+  useEffect(() => {
+    const save = () => persistReaderView();
+    window.addEventListener('pagehide', save);
+    return () => window.removeEventListener('pagehide', save);
+  });
+
+  function persistReaderView() {
+    if (!active || !readerViewReadyRef.current || activePaperIdRef.current !== active.id) return;
+    try {
+      window.localStorage.setItem(`adam.readerView.${active.id}`, JSON.stringify({ paneMode, historyOpen, historyQuery, chatFind } satisfies ReaderView));
+    } catch { /* Navigation still works when browser storage is unavailable. */ }
+  }
+
   function openPaper(paper: Paper) {
+    persistReaderView();
+    readerViewReadyRef.current = false;
+    const view = readReaderView(paper.id);
+    setPaneModeState(view?.paneMode ?? 'chat');
+    setHistoryQuery(view?.historyQuery ?? '');
+    setHistoryMatches(null);
+    setChatFind(view?.chatFind ?? false);
+    setChatFindQuery('');
     detachDraft();
     persistReading();
     const saved = readingHistory().find((item) => item.id === paper.id);
@@ -970,6 +1002,8 @@ export default function Home() {
   }
 
   function returnToLibrary() {
+    persistReaderView();
+    readerViewReadyRef.current = false;
     detachDraft();
     persistReading();
     pendingReadingRef.current = null;
@@ -1003,8 +1037,22 @@ export default function Home() {
       if (paperLoadRef.current !== loadId || activePaperIdRef.current !== documentId) return;
       setConversations(items.filter((item) => item.message_count || item.draft_text.trim()));
       const preferred = window.localStorage.getItem(`adam.conversation.${documentId}`);
-      await openConversation(items.find((item) => item.id === preferred) ?? items[0]);
-      if (paperLoadRef.current === loadId && items.some((item) => item.message_count || item.draft_text.trim())) setHistoryOpen(true);
+      let conversation = items.find((item) => item.id === preferred);
+      // Blank workspaces are omitted from history, but can still be the chat we left.
+      if (!conversation && preferred) {
+        const response = await fetch(`${API_BASE}/api/conversations/${preferred}`);
+        if (response.ok) {
+          const saved = await response.json() as Conversation;
+          if (saved.document_id === documentId) conversation = saved;
+        }
+      }
+      if (paperLoadRef.current !== loadId || activePaperIdRef.current !== documentId) return;
+      await openConversation(conversation ?? items[0]);
+      if (paperLoadRef.current === loadId && activePaperIdRef.current === documentId) {
+        const view = readReaderView(documentId);
+        setHistoryOpen(view?.historyOpen ?? items.some((item) => item.message_count || item.draft_text.trim()));
+        readerViewReadyRef.current = true;
+      }
     } catch (reason) {
       if (paperLoadRef.current === loadId) setError(reason instanceof Error ? reason.message : 'Could not load saved chats.');
     }
@@ -1985,12 +2033,12 @@ export default function Home() {
           <div className="mode-tabs"><button type="button" className="sheet-toggle" aria-expanded={sheetOpen} aria-label={sheetOpen ? 'Collapse assistant panel' : 'Expand assistant panel'} onClick={() => setSheetOpen((open) => !open)}><i aria-hidden="true" /></button><div className="tab-list"><button type="button" className={paneMode === 'chat' ? 'active' : ''} onClick={() => { setPaneMode('chat'); setSheetOpen(true); }}><UiIcon kind="chat" />Chat</button><button type="button" className={paneMode === 'notes' ? 'active' : ''} onClick={() => { setPaneMode('notes'); setSheetOpen(true); }}><UiIcon kind="pen" />Notes</button><button type="button" className={paneMode === 'links' ? 'active links-tab' : 'links-tab'} aria-pressed={paneMode === 'links'} onClick={() => { setPaneMode('links'); setSheetOpen(true); }}><UiIcon kind="link" />Links<span>{highlightEntries.reduce((count, entry) => count + (entry.ai_links?.length ?? 0), 0)}</span></button></div>{paneMode === 'chat' && <div className="chat-text-controls" role="group" aria-label="Chat text size"><span className="control-label">Text</span><div><button type="button" aria-label="Decrease chat text size" title="Decrease chat text size" disabled={chatScale <= MIN_CHAT_SCALE} onClick={() => changeChatScale(-CHAT_SCALE_STEP)}>A−</button><EditableNumber label="Text zoom percentage" value={Math.round(chatScale * 100)} min={MIN_CHAT_SCALE * 100} max={MAX_CHAT_SCALE * 100} suffix="%" onChange={(value) => setChatScale(value / 100)} /><button type="button" aria-label="Increase chat text size" title="Increase chat text size" disabled={chatScale >= MAX_CHAT_SCALE} onClick={() => changeChatScale(CHAT_SCALE_STEP)}>A+</button></div></div>}</div>
           {paneMode === 'links' ? <ChatLinksPanel key={active.id} entries={highlightEntries} conversations={conversations} activeConversationId={activeConversation?.id} revealedLinkId={revealedLinkId} onShowInPdf={showLinkInPdf} onOpen={openAiConversation} /> : paneMode === 'notes' ? <PaperNoteEditor documentId={active.id} paperName={active.original_name.replace(/\.pdf$/i, '')} pendingQuote={pendingNoteQuote} onQuoteConsumed={() => setPendingNoteQuote(null)} /> : historyOpen ? <section className="history-view">
             <div className="history-header"><div><p>Conversations</p><h2>Chat history</h2><span>{conversations.length} saved for this paper</span></div><button type="button" onClick={() => setHistoryOpen(false)} aria-label="Close chat history">×</button></div>
-            <HistorySearch key={active.id} documentId={active.id} onQuery={setHistoryQuery} onResults={setHistoryMatches} />
+            <HistorySearch key={active.id} documentId={active.id} initialQuery={historyQuery} onQuery={setHistoryQuery} onResults={setHistoryMatches} />
             <button type="button" className="new-chat-card" onClick={() => void createNewConversation()}><span>＋</span><div><strong>Start a new chat</strong><small>Uses your current default model</small></div><i>→</i></button>
             <div className="history-list">{conversations.length === 0 && <p className="empty-context">No saved chats yet. Start a chat; it stays here once you type a draft or send a message.</p>}{conversations.filter((item) => historyMatches === null || item.id in historyMatches).map((item) => <article className={`history-card${item.id === activeConversation?.id ? ' current' : ''}`} key={item.id}>{renamingChatId === item.id ? <form className="chat-title-form history-title-form" onSubmit={(event) => void renameConversation(event, item)}><input autoFocus value={chatTitleValue} maxLength={200} aria-label="Chat title" onChange={(event) => setChatTitleValue(event.target.value)} onKeyDown={(event) => { if (event.key === 'Escape') setRenamingChatId(null); }} /><button type="submit" disabled={!chatTitleValue.trim() || titleSaving}>Save</button><button type="button" onClick={() => setRenamingChatId(null)}>Cancel</button></form> : <button type="button" className="history-card-main" onClick={() => { void openConversation(item).then(() => { setChatFindQuery(historyQuery); setChatFind(Boolean(historyQuery)); }).catch((reason) => setError(reason.message)); }}><div className="history-card-top"><span className="history-model-mark">✦</span><time>{formatConversationDate(item.updated_at)}</time></div><strong><HistoryMatch text={item.message_count === 0 && item.draft_text.trim() && item.title === 'New chat' ? item.draft_text.trim().slice(0, 80) : item.title} query={historyQuery} /></strong>{historyMatches?.[item.id] && <p className="history-match-snippet"><HistoryMatch text={historyMatches[item.id]} query={historyQuery} /></p>}<p>{item.provider} · {item.model_id}</p><div className="history-card-meta"><span>{item.draft_text.trim() ? 'Draft' : `${Math.ceil(item.message_count / 2)} ${Math.ceil(item.message_count / 2) === 1 ? 'exchange' : 'exchanges'}`}</span><span>{item.context_builder_version === 'quick-ask-v1' ? 'Selection only' : 'Full paper'}</span>{item.id === activeConversation?.id && <em>Current</em>}</div></button>}<div className="history-card-actions"><button type="button" aria-label={`Rename ${item.title}`} title="Rename chat" onClick={() => beginChatRename(item)}>✎</button>{item.message_count > 0 && <button type="button" aria-label={`Regenerate title for ${item.title}`} title="Regenerate title with the model selected in Settings" disabled={titleSaving} onClick={() => void regenerateConversationTitle(item)}>↻</button>}<button type="button" className="history-delete" aria-label={`Delete ${item.title}`} title="Delete chat" onClick={() => void deleteConversation(item)}><TrashIcon /></button></div></article>)}</div>
           </section> : <>
             <div className="conversation-header"><div>{activeConversation && renamingChatId === activeConversation.id ? <form className="chat-title-form" onSubmit={(event) => void renameConversation(event, activeConversation)}><input autoFocus value={chatTitleValue} maxLength={200} aria-label="Chat title" onChange={(event) => setChatTitleValue(event.target.value)} onKeyDown={(event) => { if (event.key === 'Escape') setRenamingChatId(null); }} /><button type="submit" disabled={!chatTitleValue.trim() || titleSaving}>Save</button></form> : <button type="button" className="chat-title-button" title="Rename chat" onClick={() => activeConversation && beginChatRename(activeConversation)}><strong>{activeConversation?.title ?? 'Loading chat…'}</strong><span>✎</span></button>}<small>{activeConversation ? `${activeConversation.provider} · ${activeConversation.model_id}${activeConversation.message_count === 0 ? hasQuestion ? ' · Draft' : ' · Temporary' : ''}` : 'Preparing paper context'}</small></div><div className="conversation-actions"><button type="button" aria-label="Search this chat" aria-keyshortcuts="Meta+Shift+f Control+Shift+f" title="Find in chat · Ctrl/Cmd+Shift+F" onClick={() => setChatFind((value) => !value)}>⌕<span>Find</span></button>{activeConversation && activeConversation.message_count > 0 && <button type="button" disabled={titleSaving} onClick={() => void regenerateConversationTitle(activeConversation)} title="Regenerate title with the model selected in Settings"><UiIcon kind="refresh" /><span>Title</span></button>}<button type="button" onClick={() => void createNewConversation()} title="Start a new chat"><UiIcon kind="plus" /><span>New</span></button><button type="button" onClick={() => { void draftFlushRef.current().catch((reason: Error) => setError(reason.message)); setLinkedTurn(null); setHistoryOpen(true); }} title="Browse chats for this paper"><UiIcon kind="history" /><span>History</span></button></div></div>
-            {chatFind && <PaneSearch key={`${activeConversation?.id}-${chatFindQuery}`} kind="chat" initialQuery={chatFindQuery} root={chatBodyRef} onClose={() => setChatFind(false)} />}
+            {chatFind && <PaneSearch key={`${activeConversation?.id}-${chatFindQuery}`} kind="chat" storageKey={`adam.chatFind.${active.id}.${activeConversation?.id}`} initialQuery={chatFindQuery} root={chatBodyRef} onClose={() => setChatFind(false)} />}
             <div className="chat-body" ref={chatBodyRef} onWheelCapture={(event) => { if (event.deltaY < 0) pauseChatFollow(); }} onTouchMove={pauseChatFollow} onPointerDown={(event) => { if (event.target === event.currentTarget) pauseChatFollow(); }} onScroll={(event) => { const element = event.currentTarget; followOutputRef.current = element.scrollHeight - element.scrollTop - element.clientHeight < 40; }}><div className="chat-heading"><span className="spark">✦</span><div><strong>{activeConversation?.context_builder_version === 'quick-ask-v1' ? 'Saved Quick Ask' : 'Ask about this paper'}</strong><p>{activeConversation?.context_builder_version === 'quick-ask-v1' ? 'This saved thread uses only its original selection and Quick Ask prompt.' : 'The full paper is available automatically. Select text only when you want to focus the answer.'}</p></div></div>{chatConfigured === false && <button type="button" className="no-key-notice" onClick={() => setSettingsOpen(true)}><strong>No API key configured</strong><span>Choose a provider and add a key in Settings to enable chat.</span></button>}
               {chatHistory.map((turn) => <div className="chat-turn" data-question={turn.question} tabIndex={-1} key={turn.id}>{linkedTurn?.conversationId === activeConversation?.id && linkedTurn?.question === turn.question && <span key={linkedTurn.reveal} className="linked-turn-reveal" aria-hidden="true" onAnimationEnd={() => setLinkedTurn((current) => current === linkedTurn ? null : current)} />}{turn.importedQuickAsk && <div className="quick-import-badge">✦ Saved Quick Ask · selection only</div>}<ContextList selections={turn.context} />{activeConversation && turn.context.some((item) => item.rects?.length) && <button type="button" className={`turn-link-button${isAiLinked(activeConversation.id, turn.question) ? ' linked' : ''}`} onClick={() => void toggleAiLink(activeConversation, turn.question, turn.context)}>{isAiLinked(activeConversation.id, turn.question) ? '✦ Linked to PDF · click to unlink' : '✦ Link reference to PDF'}</button>}<div className="user-message"><span>You</span><p>{turn.question}</p></div><div className="answer-card complete"><div className="answer-meta"><span>Adam</span><span className="stream-state">Done</span></div><MarkdownAnswer web={turn.web}>{turn.answer}</MarkdownAnswer><WebEvidence web={turn.web} /></div></div>)}
               {submittedQuestion && <><ContextList selections={submittedContext} />{activeConversation && streamStatus === 'complete' && submittedContext.some((item) => item.rects?.length) && <button type="button" className={`turn-link-button${isAiLinked(activeConversation.id, submittedQuestion) ? ' linked' : ''}`} onClick={() => void toggleAiLink(activeConversation, submittedQuestion, submittedContext)}>{isAiLinked(activeConversation.id, submittedQuestion) ? '✦ Linked to PDF · click to unlink' : '✦ Link reference to PDF'}</button>}<div className="user-message"><span>You</span><p>{submittedQuestion}</p></div></>}

@@ -7,8 +7,8 @@ export function HistoryMatch({ text, query }: { text: string; query: string }) {
   return <>{matches.map(({ start, end }, index) => <Fragment key={start}>{text.slice(index ? matches[index - 1].end : 0, start)}<mark className="history-search-match">{text.slice(start, end)}</mark></Fragment>)}{text.slice(matches.length ? matches[matches.length - 1].end : 0)}</>;
 }
 
-export default function HistorySearch({ documentId, onResults, onQuery }: { documentId: string; onQuery: (query: string) => void; onResults: (matches: Record<string, string> | null) => void }) {
-  const [query, setQuery] = useState('');
+export default function HistorySearch({ documentId, onResults, onQuery, initialQuery = '' }: { documentId: string; initialQuery?: string; onQuery: (query: string) => void; onResults: (matches: Record<string, string> | null) => void }) {
+  const [query, setQuery] = useState(initialQuery);
   const [status, setStatus] = useState('');
   useEffect(() => {
     onQuery(query.trim());
