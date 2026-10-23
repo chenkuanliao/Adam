@@ -102,3 +102,16 @@ Checks: `npm run lint`, `npm run build`, and `npm run test:reader-controls` from
 Paper search shortcuts: `Cmd/Ctrl + K` opens library search and switches between local and online search while the dialog is open. `Cmd/Ctrl + Shift + K` opens online paper discovery directly. Switching modes preserves the query and online results.
 
 New chats stay temporary until you type a draft or send a message. Repeated **New** clicks reuse an empty chat, and empty chats do not appear in history. Draft text autosaves locally on the server, with a browser recovery copy while saves are pending; it restores when you switch chats or reload. Clearing an unsent draft removes it from history. Opening a paper with saved chats shows its history first. You can write drafts before configuring an API key.
+
+## Paper notes and source quotes
+
+Open **Notes** in the right pane and click where you want a quote. Select text in the PDF and press **Q** (or **Quote in note**): the quote inserts at the retained note cursor, splitting a paragraph when needed. Source quotes are protected blocks with their page citation. Drag the grip to move a quote, use its up/down buttons, or cut/copy/paste it with the surrounding writing. **+ Above** and **+ Below** add writing space beside a quote; empty paragraphs are also kept at document edges. Undo/redo includes quote insertion and moves. Existing cited quotes become protected blocks when opened; ordinary blockquotes remain editable.
+
+Editor regression tests: `npm run test:paper-notes` in `frontend/`. The browser test targets an isolated review server seeded with `scripts/seed-review-demo.py` and uses installed Google Chrome:
+
+```sh
+cd frontend
+ADAM_TEST_BASE_URL=http://localhost:7426 npm run test:paper-notes:browser
+```
+
+The browser tests rewrite the synthetic **Sparse Attention for Long-Context Retrieval** and **Reliable Tool Use in Research Assistants** notes. Use a demo instance rather than a library with personal notes.

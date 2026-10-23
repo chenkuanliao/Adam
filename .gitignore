@@ -26,6 +26,8 @@ frontend/out/
 frontend/.wrangler/
 frontend/.vercel/
 frontend/coverage/
+frontend/test-results/
+frontend/playwright-report/
 
 # Editor and operating-system metadata.
 .DS_Store
