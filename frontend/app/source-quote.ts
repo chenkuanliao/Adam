@@ -1,20 +1,36 @@
 import { Node, type Editor } from '@tiptap/core';
 import { Plugin } from '@tiptap/pm/state';
 
+export type QuoteSource = {
+  text: string;
+  page: number | null;
+  documentId?: string | null;
+  rects?: { left: number; top: number; width: number; height: number }[];
+};
+
+function sourceRects(value: string | null): QuoteSource['rects'] {
+  try {
+    const rects: unknown = JSON.parse(value ?? '[]');
+    if (!Array.isArray(rects)) return [];
+    return rects.filter((rect) => rect && ['left', 'top', 'width', 'height'].every((key) => typeof rect[key] === 'number' && Number.isFinite(rect[key]) && rect[key] >= 0 && rect[key] <= 1) && rect.width > 0 && rect.height > 0);
+  } catch { return []; }
+}
+
 function citation(page: number | null) {
   return page ? `Quoted from paper · Page ${page}` : 'Quoted from paper';
 }
 
 // Source text is stored as attributes on a leaf node, never as editable content.
 // Legacy quotes are recognized by their citation when loading older notes.
-export const SourceQuote = Node.create({
+export const SourceQuote = Node.create<{ onShowInPdf: ((quote: QuoteSource) => void) | null }>({
+  addOptions() { return { onShowInPdf: null }; },
   name: 'sourceQuote',
   group: 'block',
   atom: true,
   draggable: true,
   selectable: true,
   addAttributes() {
-    return { text: { default: '', rendered: false }, page: { default: null, rendered: false } };
+    return { text: { default: '', rendered: false }, page: { default: null, rendered: false }, documentId: { default: null, rendered: false }, rects: { default: [], rendered: false } };
   },
   parseHTML() {
     return [{
@@ -22,16 +38,17 @@ export const SourceQuote = Node.create({
       getAttrs: (element) => {
         if (!element.querySelector('cite') && !element.hasAttribute('data-source-quote')) return false;
         const page = /Page (\d+)/.exec(element.querySelector('cite')?.textContent ?? '');
-        return { text: element.querySelector('p')?.textContent ?? '', page: page ? Number(page[1]) : null };
+        return { text: element.querySelector('p')?.textContent ?? '', page: page ? Number(page[1]) : null, documentId: element.getAttribute('data-source-document'), rects: sourceRects(element.getAttribute('data-source-rects')) };
       },
     }];
   },
   renderHTML({ node }) {
-    return ['blockquote', { 'data-source-quote': '', class: 'paper-source-quote', contenteditable: 'false' },
+    return ['blockquote', { 'data-source-quote': '', 'data-source-document': node.attrs.documentId, 'data-source-rects': JSON.stringify(node.attrs.rects), class: 'paper-source-quote', contenteditable: 'false' },
       ['p', {}, node.attrs.text], ['cite', {}, citation(node.attrs.page)]];
   },
   renderText({ node }) { return `${node.attrs.text}\n${citation(node.attrs.page)}`; },
   addNodeView() {
+    const onShowInPdf = this.options.onShowInPdf;
     return ({ node, editor, getPos }) => {
       const dom = document.createElement('blockquote');
       dom.className = 'paper-source-quote';
@@ -70,6 +87,7 @@ export const SourceQuote = Node.create({
           return true;
         }).setNodeSelection(to).run();
       }
+      if (onShowInPdf && node.attrs.page) button('Show quote in PDF', '↗ Show in PDF', () => onShowInPdf(node.attrs as QuoteSource));
       button('Move quote up', '↑', () => move(-1));
       button('Move quote down', '↓', () => move(1));
       button('Write above quote', '+ Above', () => insertLine(false));
@@ -94,7 +112,7 @@ export const SourceQuote = Node.create({
   },
 });
 
-export function insertSourceQuote(editor: Editor, quote: { text: string; page: number | null }) {
+export function insertSourceQuote(editor: Editor, quote: QuoteSource) {
   // Editor state retains its selection while focus moves to the PDF. Collapse a
   // selected note range so quoting cannot accidentally erase the user's writing.
   const { from } = editor.state.selection;

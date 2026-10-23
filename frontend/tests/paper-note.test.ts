@@ -52,7 +52,7 @@ test('legacy quote and checklist migrate, ordinary blockquotes remain editable',
   const editor = make('<h2>Finding</h2><blockquote><p>Old excerpt</p><cite>Quoted from paper · Page 12</cite></blockquote><blockquote><p>My own quote</p></blockquote><ul><li><input type="checkbox" checked>Finished</li></ul>');
   const nodes = json(editor).content!;
   assert.equal(nodes[0].type, 'heading'); assert.equal(nodes[1].type, 'sourceQuote');
-  assert.deepEqual({ ...nodes[1].attrs }, { text: 'Old excerpt', page: 12 });
+  assert.deepEqual({ ...nodes[1].attrs }, { text: 'Old excerpt', page: 12, documentId: null, rects: [] });
   assert.equal(nodes[2].type, 'blockquote'); assert.equal(nodes[3].type, 'taskList');
   assert.equal(nodes[3].content![0].attrs!.checked, true); editor.destroy();
 });
@@ -80,4 +80,22 @@ test('move and write-above/below controls work', () => {
   click('Write below quote'); editor.commands.insertContent('Inserted below');
   assert.ok(editor.getHTML().includes('<p>Inserted above</p>'));
   assert.ok(editor.getHTML().includes('<p>Inserted below</p>')); editor.destroy();
+});
+
+
+test('source position survives save, reload and clipboard; navigation does not edit the note', () => {
+  const source = { ...quote, documentId: 'paper-a', rects: [{ left: .12, top: .34, width: .5, height: .02 }] };
+  let shown;
+  const editor = new Editor({ extensions: [StarterKit, SourceQuote.configure({ onShowInPdf: (quote) => { shown = quote; } })], content: '<p>Keep me</p>' });
+  insertSourceQuote(editor, source);
+  const html = editor.getHTML();
+  (editor.view.dom.querySelector('[aria-label="Show quote in PDF"]') as HTMLButtonElement).click();
+  assert.deepEqual(JSON.parse(JSON.stringify(shown)), source);
+  assert.equal(editor.getHTML(), html);
+  const restored = make(html);
+  assert.deepEqual({ ...json(restored).content!.find(n => n.type === 'sourceQuote')!.attrs }, source);
+  const { dom: clipboard } = editor.view.serializeForClipboard(editor.state.doc.slice(0, editor.state.doc.content.size));
+  const pasted = make(clipboard.innerHTML);
+  assert.deepEqual(json(pasted), json(editor));
+  editor.destroy(); restored.destroy(); pasted.destroy();
 });

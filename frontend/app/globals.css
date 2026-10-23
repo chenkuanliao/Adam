@@ -1220,9 +1220,9 @@ kbd { display: inline-grid; place-items: center; min-width: 18px; height: 18px; 
 .paper-note-editor .paper-source-quote { position: relative; cursor: grab }
 .paper-note-editor .paper-source-quote:active { cursor: grabbing }
 .paper-note-editor .paper-source-quote.ProseMirror-selectednode { outline: 2px solid var(--accent); outline-offset: 3px }
-.source-quote-tools { display: flex; align-items: center; gap: 4px; margin-bottom: 8px; font: 11px/1.4 var(--font-sans); color: var(--muted); user-select: none }
+.source-quote-tools { display: flex; flex-wrap: wrap; align-items: center; gap: 4px; margin-bottom: 8px; font: 11px/1.4 var(--font-sans); color: var(--muted); user-select: none }
 .source-quote-handle { margin-right: auto; font-size: 20px; line-height: 1; cursor: grab }
-.source-quote-tools button { padding: 3px 5px; border: 1px solid var(--rule); border-radius: 4px; background: var(--surface); color: var(--muted); cursor: pointer }
+.source-quote-tools button { white-space: nowrap; padding: 3px 5px; border: 1px solid var(--rule); border-radius: 4px; background: var(--surface); color: var(--muted); cursor: pointer }
 .source-quote-tools button:hover, .source-quote-tools button:focus-visible { color: var(--ink); background: var(--surface-2) }
 .paper-note-editor .ProseMirror-gapcursor { display: none; pointer-events: none; position: absolute }
 .paper-note-editor .ProseMirror-gapcursor:after { content: ''; display: block; position: absolute; top: -2px; width: 20px; border-top: 1px solid var(--ink); animation: note-cursor-blink 1.1s steps(2, start) infinite }
@@ -1233,3 +1233,7 @@ kbd { display: inline-grid; place-items: center; min-width: 18px; height: 18px; 
 .paper-note-editor li[data-type="taskItem"] > label { flex: none; user-select: none }
 .paper-note-editor li[data-type="taskItem"] > label input { margin: 0 }
 .paper-note-editor li[data-type="taskItem"] > div { flex: 1; min-width: 0 }
+
+@media (prefers-reduced-motion: reduce) {
+  .linked-passage-flash, .linked-passage-toast { animation: none }
+}
