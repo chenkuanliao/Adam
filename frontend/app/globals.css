@@ -407,7 +407,7 @@ kbd { display: inline-grid; place-items: center; min-width: 18px; height: 18px; 
 
 /* Assistant side pane */
 .side-pane { --chat-scale: 1.25; position: relative; min-width: 0; min-height: 0; height: 100%; display: flex; flex-direction: column; overflow: hidden; container-type: inline-size; border-left: 1px solid var(--rule); background: linear-gradient(160deg, #f0f5ef 0%, var(--surface) 42%, var(--surface-2) 100%) }
-.mode-tabs { flex: 0 0 52px; height: 52px; display: flex; align-items: center; justify-content: space-between; gap: 10px; padding: 0 12px; border-bottom: 1px solid var(--rule) }
+.mode-tabs { flex: none; min-height: 52px; display: flex; flex-wrap: wrap; align-items: center; justify-content: space-between; gap: 8px 10px; padding: 7px 12px; border-bottom: 1px solid var(--rule) }
 .sheet-toggle { display: none }
 .tab-list { display: flex; flex: none; gap: 2px; padding: 3px; border-radius: 11px; background: var(--sunken) }
 .tab-list > button { height: 32px; display: inline-flex; align-items: center; gap: 6px; padding: 0 11px; border: 0; border-radius: 8px; background: transparent; color: var(--muted); font-size: 13px; font-weight: 600; white-space: nowrap }
@@ -416,7 +416,7 @@ kbd { display: inline-grid; place-items: center; min-width: 18px; height: 18px; 
 .tab-list > button.active { background: var(--surface); color: var(--ink); box-shadow: var(--shadow-1) }
 .tab-list > button span { min-width: 18px; padding: 0 5px; border-radius: 999px; background: #16181d12; color: var(--muted); font: 600 10.5px/1.6 var(--font-mono); text-align: center }
 .tab-list > button.links-tab.active span { background: var(--accent-soft); color: var(--accent-ink) }
-.chat-text-controls { display: flex; align-items: center; gap: 6px }
+.chat-text-controls { flex: none; display: flex; align-items: center; gap: 6px; margin-left: auto }
 .chat-text-controls > div { height: 30px; display: flex; align-items: center; overflow: hidden; border: 1px solid var(--rule); border-radius: 8px }
 .chat-text-controls button { height: 100%; min-width: 30px; padding: 0 6px; border: 0; background: transparent; color: var(--ink-2); font-size: 12px; font-weight: 600 }
 .chat-text-controls button:hover:not(:disabled) { background: var(--sunken) }
@@ -639,11 +639,11 @@ kbd { display: inline-grid; place-items: center; min-width: 18px; height: 18px; 
 .paper-note-status { flex: none; padding: 2px 8px; border-radius: 999px; background: #2f7a521a; color: var(--success); font: 500 11px var(--font-mono) }
 .paper-note-status.saving, .paper-note-status.loading { background: var(--marker-soft); color: var(--marker-ink) }
 .paper-note-status.error { background: var(--danger-soft); color: var(--danger) }
-.paper-note-toolbar { flex: none; display: flex; align-items: center; gap: 2px; margin: 0 12px; padding: 4px; overflow-x: auto; border: 1px solid var(--rule); border-radius: 10px; background: var(--surface-2) }
-.paper-note-toolbar button { min-width: 30px; height: 30px; padding: 0 7px; border: 0; border-radius: 7px; background: transparent; color: var(--ink-2); font-size: 12px; white-space: nowrap }
+.paper-note-toolbar { flex: none; display: flex; flex-wrap: wrap; align-items: center; gap: 4px; margin: 0 12px; padding: 4px; border: 1px solid var(--rule); border-radius: 10px; background: var(--surface-2) }
+.paper-note-toolbar button { flex: none; min-width: 30px; height: 30px; padding: 0 7px; border: 0; border-radius: 7px; background: transparent; color: var(--ink-2); font-size: 12px; white-space: nowrap }
 .paper-note-toolbar button:hover { background: var(--surface); color: var(--ink); box-shadow: var(--shadow-1) }
-.paper-note-toolbar > i { width: 1px; height: 18px; margin: 0 3px; background: var(--rule-strong) }
-.paper-note-toolbar > span { flex: 1 }
+.paper-note-toolbar > i { flex: none; width: 1px; height: 18px; margin: 0 3px; background: var(--rule-strong) }
+.paper-note-history { display: flex; flex: none; gap: 4px; margin-left: auto }
 .paper-note-canvas { position: relative; flex: 1; min-height: 0; overflow-y: auto }
 .paper-note-editor { position: relative; z-index: 1; min-height: 100%; padding: 24px 26px max(120px, calc(100vh - 260px)); outline: none; color: var(--ink-2); font: 15px/1.7 var(--font-serif) }
 .paper-note-editor h1 { margin: 22px 0 8px; color: var(--ink); font: 600 28px/1.2 var(--font-serif) }
@@ -904,7 +904,7 @@ kbd { display: inline-grid; place-items: center; min-width: 18px; height: 18px; 
   /* The assistant becomes a bottom sheet so the paper keeps the full width. */
   .side-pane { position: fixed; z-index: 15; left: 0; right: 0; bottom: 0; height: min(78dvh, 680px); border: 1px solid var(--rule); border-bottom: 0; border-radius: 18px 18px 0 0; box-shadow: 0 -18px 50px #00000059; transform: translateY(calc(100% - 60px)); transition: transform .28s cubic-bezier(.2, .8, .2, 1) }
   .side-pane.sheet-open { transform: none }
-  .mode-tabs { position: relative; flex-basis: 60px; height: 60px; padding-top: 8px }
+  .mode-tabs { position: relative; min-height: 60px; padding-top: 16px }
   .sheet-toggle { position: absolute; left: 0; right: 0; top: 0; height: 16px; display: grid; place-items: center; border: 0; background: transparent }
   .sheet-toggle i { width: 40px; height: 4px; border-radius: 2px; background: var(--rule-strong) }
 }
@@ -1215,12 +1215,13 @@ kbd { display: inline-grid; place-items: center; min-width: 18px; height: 18px; 
 .history-search-match { background: #ffe174b3; color: inherit; border-radius: 2px; padding: 0; box-decoration-break: clone; -webkit-box-decoration-break: clone; }
 
 /* Source quotes are atomic editor nodes; the controls are absent from saved HTML. */
+.paper-note-page { position: relative; min-height: 100%; overflow-wrap: anywhere }
 .paper-note-content { min-height: 100% }
 .paper-note-canvas:focus-within .paper-note-placeholder { display: none }
 .paper-note-editor .paper-source-quote { position: relative; cursor: grab }
 .paper-note-editor .paper-source-quote:active { cursor: grabbing }
 .paper-note-editor .paper-source-quote.ProseMirror-selectednode { outline: 2px solid var(--accent); outline-offset: 3px }
-.source-quote-tools { display: flex; align-items: center; gap: 4px; margin-bottom: 8px; font: 11px/1.4 var(--font-sans); color: var(--muted); user-select: none }
+.source-quote-tools { display: flex; flex-wrap: wrap; align-items: center; gap: 4px; margin-bottom: 8px; font: 11px/1.4 var(--font-sans); color: var(--muted); user-select: none }
 .source-quote-handle { margin-right: auto; font-size: 20px; line-height: 1; cursor: grab }
 .source-quote-tools button { padding: 3px 5px; border: 1px solid var(--rule); border-radius: 4px; background: var(--surface); color: var(--muted); cursor: pointer }
 .source-quote-tools button:hover, .source-quote-tools button:focus-visible { color: var(--ink); background: var(--surface-2) }

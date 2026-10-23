@@ -11,12 +11,12 @@ import { SourceQuote, insertSourceQuote, migrateNoteHtml } from './source-quote'
 type Quote = { id: string; text: string; page: number | null };
 type PaperNote = { content_html: string; revision: number; detail?: string };
 
-export default function PaperNoteEditor(props: { documentId: string; paperName: string; pendingQuote: Quote | null; onQuoteConsumed: () => void }) {
+export default function PaperNoteEditor(props: { documentId: string; paperName: string; textScale: number; pendingQuote: Quote | null; onQuoteConsumed: () => void }) {
   // A new document gets its own editor, load request, and save queue.
   return <DocumentNote key={props.documentId} {...props} />;
 }
 
-function DocumentNote({ documentId, paperName, pendingQuote, onQuoteConsumed }: { documentId: string; paperName: string; pendingQuote: Quote | null; onQuoteConsumed: () => void }) {
+function DocumentNote({ documentId, paperName, textScale, pendingQuote, onQuoteConsumed }: { documentId: string; paperName: string; textScale: number; pendingQuote: Quote | null; onQuoteConsumed: () => void }) {
   const [status, setStatus] = useState<'loading' | 'saved' | 'saving' | 'error'>('loading');
   const [errorMessage, setErrorMessage] = useState('');
   const [empty, setEmpty] = useState(true);
@@ -103,9 +103,9 @@ function DocumentNote({ documentId, paperName, pendingQuote, onQuoteConsumed }: 
       <button type="button" title="Heading 1" onClick={() => editor?.chain().focus().toggleHeading({ level: 1 }).run()}>H1</button><button type="button" title="Heading 2" onClick={() => editor?.chain().focus().toggleHeading({ level: 2 }).run()}>H2</button><button type="button" title="Paragraph" onClick={() => editor?.chain().focus().setParagraph().run()}>¶</button><i />
       <button type="button" title="Bold" onClick={() => editor?.chain().focus().toggleBold().run()}><strong>B</strong></button><button type="button" title="Italic" onClick={() => editor?.chain().focus().toggleItalic().run()}><em>I</em></button><button type="button" title="Link" onClick={addLink}>↗</button><i />
       <button type="button" title="Bulleted list" onClick={() => editor?.chain().focus().toggleBulletList().run()}>• List</button><button type="button" title="Numbered list" onClick={() => editor?.chain().focus().toggleOrderedList().run()}>1. List</button><button type="button" title="Checklist" onClick={() => editor?.chain().focus().toggleTaskList().run()}>☐</button><button type="button" title="Quote" onClick={() => editor?.chain().focus().toggleBlockquote().run()}>❝</button>
-      <span /><button type="button" title="Undo" aria-label="Undo" onClick={() => editor?.chain().focus().undo().run()}>↶</button><button type="button" title="Redo" aria-label="Redo" onClick={() => editor?.chain().focus().redo().run()}>↷</button>
+      <div className="paper-note-history"><button type="button" title="Undo" aria-label="Undo" onClick={() => editor?.chain().focus().undo().run()}>↶</button><button type="button" title="Redo" aria-label="Redo" onClick={() => editor?.chain().focus().redo().run()}>↷</button></div>
     </div>
-    <div className="paper-note-canvas"><EditorContent editor={editor} className="paper-note-content" /><div className={`paper-note-placeholder${empty ? ' visible' : ''}`} aria-hidden="true"><strong>Start writing about this paper…</strong><span>Use # for headings, - for bullets, 1. for numbers, or - [ ] for tasks. Click here to place your cursor, then select PDF text and press Q.</span></div></div>
+    <div className="paper-note-canvas"><div className="paper-note-page" style={{ zoom: textScale }}><EditorContent editor={editor} className="paper-note-content" /><div className={`paper-note-placeholder${empty ? ' visible' : ''}`} aria-hidden="true"><strong>Start writing about this paper…</strong><span>Use # for headings, - for bullets, 1. for numbers, or - [ ] for tasks. Click here to place your cursor, then select PDF text and press Q.</span></div></div></div>
     {errorMessage && <button type="button" className="paper-note-error" onClick={save}>{errorMessage} Click to retry.</button>}
   </section>;
 }

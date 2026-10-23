@@ -70,6 +70,7 @@ const MAX_ZOOM = 32;
 // Keep layout zoom independent of raster resolution to avoid enormous canvases.
 const BASE_RENDER_SCALE = 1.8;
 const DEFAULT_ZOOM = BASE_RENDER_SCALE;
+const MIN_NOTE_SCALE = .5;
 const MIN_CHAT_SCALE = 1;
 const MAX_CHAT_SCALE = 2;
 const CHAT_SCALE_STEP = .1;
@@ -98,6 +99,7 @@ const SHORTCUTS: Array<[string, string]> = [
   ['⌘ / Ctrl K', 'Search your library'],
   ['⌘ / Ctrl ,', 'Open settings'],
   ['⌘ / Ctrl scroll', 'Zoom the paper'],
+  ['⌘ / Ctrl + / −', 'Zoom the focused PDF, chat, or Notes pane'],
 ];
 const NOTE_COLORS = [
   { color: '#d6a629', label: 'Gold' },
@@ -169,6 +171,7 @@ export default function Home() {
   const [zoom, setZoom] = useState(DEFAULT_ZOOM);
   const [rasterZoom, setRasterZoom] = useState(DEFAULT_ZOOM);
   const [chatScale, setChatScale] = useState(DEFAULT_CHAT_SCALE);
+  const [noteScale, setNoteScale] = useState(1);
   const [paperPercent, setPaperPercent] = useState(DEFAULT_PAPER_PERCENT);
   const [uploading, setUploading] = useState(false);
   const [renaming, setRenaming] = useState(false);
@@ -536,6 +539,46 @@ export default function Home() {
   const changeChatScale = useCallback((delta: number) => {
     setChatScale((current) => Math.min(MAX_CHAT_SCALE, Math.max(MIN_CHAT_SCALE, Number((current + delta).toFixed(2)))));
   }, []);
+
+  const zoomPanelRef = useRef<'pdf' | 'side' | null>(null);
+  useEffect(() => {
+    zoomPanelRef.current = null;
+    function trackPanel(event: Event) {
+      const target = event.target instanceof Element ? event.target : null;
+      // Pointer tracking also covers PDF pages and chat text that cannot take
+      // keyboard focus, even when the note editor still owns the text caret.
+      zoomPanelRef.current = target?.closest('.pdf-pane, .reader-dock') ? 'pdf' : target?.closest('.side-pane') ? 'side' : null;
+    }
+    document.addEventListener('pointerdown', trackPanel, true);
+    document.addEventListener('focusin', trackPanel, true);
+    return () => {
+      document.removeEventListener('pointerdown', trackPanel, true);
+      document.removeEventListener('focusin', trackPanel, true);
+    };
+  }, [active?.id]);
+
+  useEffect(() => {
+    function zoomFocusedPanel(event: KeyboardEvent) {
+      const modifier = /Mac|iPhone|iPad|iPod/i.test(navigator.platform) ? event.metaKey : event.ctrlKey;
+      if (!active || !modifier || event.altKey || event.isComposing || event.defaultPrevented || settingsOpen || paperSearchOpen || document.querySelector('dialog[open]')) return;
+      const direction = event.key === '+' || event.key === '=' ? 1 : event.key === '-' ? -1 : 0;
+      const panel = zoomPanelRef.current;
+      if (!direction || !panel || (panel === 'side' && (focusReading || paneMode === 'links'))) return;
+      event.preventDefault();
+      event.stopPropagation();
+      if (panel === 'pdf') {
+        changeZoom(zoomRef.current * (direction > 0 ? .2 : 1 / 1.2 - 1));
+        requestAnimationFrame(persistReading);
+      } else if (paneMode === 'notes') {
+        setNoteScale((current) => Math.min(MAX_CHAT_SCALE, Math.max(MIN_NOTE_SCALE, Number((current + direction * CHAT_SCALE_STEP).toFixed(2)))));
+      } else {
+        changeChatScale(direction * CHAT_SCALE_STEP);
+      }
+    }
+    // Capture before editor shortcuts and suppress the browser's page zoom.
+    window.addEventListener('keydown', zoomFocusedPanel, true);
+    return () => window.removeEventListener('keydown', zoomFocusedPanel, true);
+  }, [active, paneMode, focusReading, settingsOpen, paperSearchOpen, changeZoom, changeChatScale, persistReading]);
 
   useEffect(() => {
     let timer: ReturnType<typeof setTimeout> | undefined;
@@ -2027,6 +2070,14 @@ export default function Home() {
   </>);
 
   const aspects = pageAspects(pageSizes, pages);
+  const textPane = paneMode === 'notes' ? 'note' : 'chat';
+  const textScale = paneMode === 'notes' ? noteScale : chatScale;
+  const minTextScale = paneMode === 'notes' ? MIN_NOTE_SCALE : MIN_CHAT_SCALE;
+  const setTextScale = paneMode === 'notes' ? setNoteScale : setChatScale;
+  const changeTextScale = (delta: number) => {
+    if (paneMode === 'chat') { changeChatScale(delta); return; }
+    setNoteScale((scale) => Math.min(MAX_CHAT_SCALE, Math.max(MIN_NOTE_SCALE, Number((scale + delta).toFixed(2)))));
+  };
   return (
     <main className={`reader-shell${focusReading ? ' focus-reading' : ''}`}>
       <ActionTooltips />
@@ -2044,8 +2095,8 @@ export default function Home() {
         <div className="reader-dock" style={{ '--dock-center': `${focusReading ? 50 : paperPercent / 2}%` } as CSSProperties} role="toolbar" aria-label="Reading controls"><div className="dock-group dock-pages"><button type="button" aria-label="Previous page" data-tooltip="Previous page" disabled={currentPage <= 1} onClick={() => goToPage(currentPage - 1)}>‹</button><span><EditableNumber label="Page number" value={currentPage} min={1} max={pages || active.page_count} integer disabled={!pages} onChange={goToPage} /><small>/ {pages || active.page_count}</small></span><button type="button" aria-label="Next page" data-tooltip="Next page" disabled={!pages || currentPage >= pages} onClick={() => goToPage(currentPage + 1)}>›</button></div><div className="dock-group header-actions" role="group" aria-label="Paper zoom"><button data-tooltip="Zoom paper out" aria-label="Zoom paper out" disabled={zoom <= MIN_ZOOM} onClick={() => changeZoom(zoom * (1 / 1.2 - 1))}>−</button><EditableNumber label="Paper zoom percentage" value={Math.round(zoom * 100)} min={MIN_ZOOM * 100} max={MAX_ZOOM * 100} suffix="%" onChange={(value) => { changeZoom(value / 100 - zoomRef.current); requestAnimationFrame(persistReading); }} /><button data-tooltip="Zoom paper in" aria-label="Zoom paper in" disabled={zoom >= MAX_ZOOM} onClick={() => changeZoom(zoom * .2)}>+</button><button className="zoom-fit" data-tooltip="Fit paper to pane" aria-label="Fit paper to pane" onClick={fitPaperToPane}>Fit</button></div><button type="button" className={`dock-tool${screenshotMode ? ' active' : ''}`} aria-pressed={screenshotMode} data-tooltip={screenshotMode ? 'Cancel region capture (Esc)' : 'Drag over a figure or equation to ask about it (R)'} onClick={() => screenshotMode ? cancelScreenshotMode() : startScreenshotMode()}><UiIcon kind="region" /><span>Region</span><kbd>R</kbd></button><button type="button" className={`dock-tool dock-help${shortcutsOpen ? ' active' : ''}`} aria-label="Keyboard shortcuts" aria-expanded={shortcutsOpen} data-tooltip="Keyboard shortcuts" onClick={() => setShortcutsOpen((open) => !open)}>?</button>{shortcutsOpen && <ShortcutSheet onClose={() => setShortcutsOpen(false)} />}</div>
         <div className="pane-resizer" hidden={focusReading} style={{ left: `${paperPercent}%` }} role="separator" aria-label="Resize paper and chat panes" aria-orientation="vertical" aria-valuemin={MIN_PAPER_PERCENT} aria-valuemax={80} aria-valuenow={Math.round(paperPercent)} tabIndex={0} onPointerDown={beginWorkspaceResize} onPointerMove={moveWorkspaceResize} onPointerUp={finishWorkspaceResize} onPointerCancel={() => { resizingRef.current = false; }} onDoubleClick={resetWorkspaceResize}><span /></div>
         <aside className={`side-pane${sheetOpen ? ' sheet-open' : ''}`} inert={focusReading} aria-hidden={focusReading} style={{ '--chat-scale': chatScale } as CSSProperties}>
-          <div className="mode-tabs"><button type="button" className="sheet-toggle" aria-expanded={sheetOpen} aria-label={sheetOpen ? 'Collapse assistant panel' : 'Expand assistant panel'} onClick={() => setSheetOpen((open) => !open)}><i aria-hidden="true" /></button><div className="tab-list"><button type="button" className={paneMode === 'chat' ? 'active' : ''} onClick={() => { setPaneMode('chat'); setSheetOpen(true); }}><UiIcon kind="chat" />Chat</button><button type="button" className={paneMode === 'notes' ? 'active' : ''} onClick={() => { setPaneMode('notes'); setSheetOpen(true); }}><UiIcon kind="pen" />Notes</button><button type="button" className={paneMode === 'links' ? 'active links-tab' : 'links-tab'} aria-pressed={paneMode === 'links'} onClick={() => { setPaneMode('links'); setSheetOpen(true); }}><UiIcon kind="link" />Links<span>{highlightEntries.reduce((count, entry) => count + (entry.ai_links?.length ?? 0), 0)}</span></button></div>{paneMode === 'chat' && <div className="chat-text-controls" role="group" aria-label="Chat text size"><span className="control-label">Text</span><div><button type="button" aria-label="Decrease chat text size" title="Decrease chat text size" disabled={chatScale <= MIN_CHAT_SCALE} onClick={() => changeChatScale(-CHAT_SCALE_STEP)}>A−</button><EditableNumber label="Text zoom percentage" value={Math.round(chatScale * 100)} min={MIN_CHAT_SCALE * 100} max={MAX_CHAT_SCALE * 100} suffix="%" onChange={(value) => setChatScale(value / 100)} /><button type="button" aria-label="Increase chat text size" title="Increase chat text size" disabled={chatScale >= MAX_CHAT_SCALE} onClick={() => changeChatScale(CHAT_SCALE_STEP)}>A+</button></div></div>}</div>
-          {paneMode === 'links' ? <ChatLinksPanel key={active.id} entries={highlightEntries} conversations={conversations} activeConversationId={activeConversation?.id} revealedLinkId={revealedLinkId} onShowInPdf={showLinkInPdf} onOpen={openAiConversation} /> : paneMode === 'notes' ? <PaperNoteEditor documentId={active.id} paperName={active.original_name.replace(/\.pdf$/i, '')} pendingQuote={pendingNoteQuote} onQuoteConsumed={() => setPendingNoteQuote(null)} /> : historyOpen ? <section className="history-view">
+          <div className="mode-tabs"><button type="button" className="sheet-toggle" aria-expanded={sheetOpen} aria-label={sheetOpen ? 'Collapse assistant panel' : 'Expand assistant panel'} onClick={() => setSheetOpen((open) => !open)}><i aria-hidden="true" /></button><div className="tab-list"><button type="button" className={paneMode === 'chat' ? 'active' : ''} onClick={() => { setPaneMode('chat'); setSheetOpen(true); }}><UiIcon kind="chat" />Chat</button><button type="button" className={paneMode === 'notes' ? 'active' : ''} onClick={() => { setPaneMode('notes'); setSheetOpen(true); }}><UiIcon kind="pen" />Notes</button><button type="button" className={paneMode === 'links' ? 'active links-tab' : 'links-tab'} aria-pressed={paneMode === 'links'} onClick={() => { setPaneMode('links'); setSheetOpen(true); }}><UiIcon kind="link" />Links<span>{highlightEntries.reduce((count, entry) => count + (entry.ai_links?.length ?? 0), 0)}</span></button></div>{(paneMode === 'chat' || paneMode === 'notes') && <div className="chat-text-controls" role="group" aria-label={paneMode === 'notes' ? 'Note text size' : 'Chat text size'}><span className="control-label">Text</span><div><button type="button" aria-label={`Decrease ${textPane} text size`} title={`Decrease ${textPane} text size`} disabled={textScale <= minTextScale} onClick={() => changeTextScale(-CHAT_SCALE_STEP)}>A−</button><EditableNumber label={paneMode === 'notes' ? 'Note zoom percentage' : 'Text zoom percentage'} value={Math.round(textScale * 100)} min={minTextScale * 100} max={MAX_CHAT_SCALE * 100} suffix="%" onChange={(value) => setTextScale(value / 100)} /><button type="button" aria-label={`Increase ${textPane} text size`} title={`Increase ${textPane} text size`} disabled={textScale >= MAX_CHAT_SCALE} onClick={() => changeTextScale(CHAT_SCALE_STEP)}>A+</button></div></div>}</div>
+          {paneMode === 'links' ? <ChatLinksPanel key={active.id} entries={highlightEntries} conversations={conversations} activeConversationId={activeConversation?.id} revealedLinkId={revealedLinkId} onShowInPdf={showLinkInPdf} onOpen={openAiConversation} /> : paneMode === 'notes' ? <PaperNoteEditor textScale={noteScale} documentId={active.id} paperName={active.original_name.replace(/\.pdf$/i, '')} pendingQuote={pendingNoteQuote} onQuoteConsumed={() => setPendingNoteQuote(null)} /> : historyOpen ? <section className="history-view">
             <div className="history-header"><div><p>Conversations</p><h2>Chat history</h2><span>{conversations.length} saved for this paper</span></div><button type="button" onClick={() => setHistoryOpen(false)} aria-label="Close chat history">×</button></div>
             <HistorySearch key={active.id} documentId={active.id} initialQuery={historyQuery} onQuery={setHistoryQuery} onResults={setHistoryMatches} />
             <button type="button" className="new-chat-card" onClick={() => void createNewConversation()}><span>＋</span><div><strong>Start a new chat</strong><small>Uses your current default model</small></div><i>→</i></button>
