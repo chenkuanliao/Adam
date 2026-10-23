@@ -41,6 +41,16 @@ class PaperImportIn(BaseModel):
     folder_id: str | None = None
 
 
+class PdfLinkIn(BaseModel):
+    url: str = Field(min_length=1, max_length=4000)
+
+
+class PdfLinkOut(BaseModel):
+    paper: PaperCandidate
+    page_count: int
+    byte_size: int
+
+
 class DocumentUpdate(BaseModel):
     name: str = Field(min_length=1, max_length=512)
 

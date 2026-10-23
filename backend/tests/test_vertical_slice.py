@@ -1032,3 +1032,51 @@ def test_conversation_search_titles_messages_and_scope() -> None:
     assert client.get(url, params={'q': 'absent'}).json() == []
     assert client.get(url, params={'q': '   '}).json() == []
     assert client.get('/api/documents/missing/conversation-search', params={'q': 'test'}).status_code == 404
+
+
+def test_direct_pdf_link_verification_and_import(monkeypatch) -> None:
+    from contextlib import asynccontextmanager
+    from adam_server.services import paper_discovery as discovery
+    import httpx
+
+    doc = fitz.open(stream=sample_pdf('Direct link document for verification.'), filetype='pdf')
+    doc.set_metadata({'title': 'A linked research document'})
+    content = doc.tobytes()
+    doc.close()
+    encrypted = fitz.open(stream=content, filetype='pdf')
+    locked = encrypted.tobytes(encryption=fitz.PDF_ENCRYPT_AES_256, owner_pw='owner', user_pw='reader')
+    encrypted.close()
+
+    @asynccontextmanager
+    async def source(url):
+        path = httpx.URL(url).path
+        if path == '/offline':
+            raise httpx.ConnectError('offline')
+        body = {'/html.pdf': b'<html>Not a PDF</html>', '/broken.pdf': b'%PDF-invalid', '/locked': locked}.get(path, content)
+        # Deliberately misleading MIME and extension: verification must inspect bytes.
+        yield httpx.Response(200, content=body, headers={'content-type': 'text/html'}), url
+    monkeypatch.setattr(discovery, 'public_stream', source)
+    before = {paper['id'] for paper in client.get('/api/documents').json()}
+    result = client.post('/api/paper-discovery/verify-link', json={'url': '  https://papers.example/download?id=7  '})
+    assert result.status_code == 200, result.text
+    checked = result.json()
+    assert checked['page_count'] == 1
+    assert checked['byte_size'] == len(content)
+    assert checked['paper']['title'] == 'A linked research document'
+    assert checked['paper']['pdf_urls'] == ['https://papers.example/download?id=7']
+    assert {paper['id'] for paper in client.get('/api/documents').json()} == before
+    for path, status in [('/html.pdf', 400), ('/broken.pdf', 400), ('/locked', 400), ('/offline', 502)]:
+        response = client.post('/api/paper-discovery/verify-link', json={'url': 'https://papers.example' + path})
+        assert response.status_code == status, response.text
+    assert client.post('/api/paper-discovery/verify-link', json={'url': 'file:///tmp/paper.pdf'}).status_code == 400
+    folder = client.post('/api/folders', json={'name': 'Linked PDFs'}).json()
+    request = {'paper': checked['paper'], 'pdf_url': checked['paper']['pdf_urls'][0], 'folder_id': folder['id']}
+    saved = client.post('/api/paper-discovery/import', json=request)
+    assert saved.status_code == 200, saved.text
+    assert saved.json()['folder_id'] == folder['id']
+    assert client.get(f"/api/documents/{saved.json()['id']}/file").content == content
+    repeated = client.post('/api/paper-discovery/import', json={**request, 'folder_id': None})
+    assert repeated.json()['id'] == saved.json()['id']
+    assert repeated.json()['folder_id'] == folder['id']
+    rechecked = client.post('/api/paper-discovery/verify-link', json={'url': request['pdf_url']})
+    assert rechecked.json()['paper']['existing_document_id'] == saved.json()['id']

@@ -1148,6 +1148,7 @@ kbd { display: inline-grid; place-items: center; min-width: 18px; height: 18px; 
 .discovery-url { margin: -4px 0 18px; overflow-wrap: anywhere; font: 12px/1.6 var(--font-mono); color: var(--muted) }
 .discovery-import > select { width: 100%; max-width: 100%; margin-bottom: 16px; border: 1px solid var(--rule-strong); border-radius: 8px; padding: 9px; background: var(--surface); color: var(--ink) }
 .discovery-footnote { margin: 10px 0 0; font-size: 12px; color: var(--muted) }
+.discovery-verified { color: var(--accent); font-size: 13px; line-height: 1.5 }
 .discovery-ready strong { color: var(--ink); font: 500 21px var(--font-serif) }
 .discovery-warnings { padding: 8px 20px; background: var(--surface-2); color: var(--muted); font-size: 12px; line-height: 1.5 }
 .discovery-warnings p { margin: 4px 0 }
@@ -1223,7 +1224,7 @@ kbd { display: inline-grid; place-items: center; min-width: 18px; height: 18px; 
 .paper-note-editor .paper-source-quote.ProseMirror-selectednode { outline: 2px solid var(--accent); outline-offset: 3px }
 .source-quote-tools { display: flex; flex-wrap: wrap; align-items: center; gap: 4px; margin-bottom: 8px; font: 11px/1.4 var(--font-sans); color: var(--muted); user-select: none }
 .source-quote-handle { margin-right: auto; font-size: 20px; line-height: 1; cursor: grab }
-.source-quote-tools button { padding: 3px 5px; border: 1px solid var(--rule); border-radius: 4px; background: var(--surface); color: var(--muted); cursor: pointer }
+.source-quote-tools button { white-space: nowrap; padding: 3px 5px; border: 1px solid var(--rule); border-radius: 4px; background: var(--surface); color: var(--muted); cursor: pointer }
 .source-quote-tools button:hover, .source-quote-tools button:focus-visible { color: var(--ink); background: var(--surface-2) }
 .paper-note-editor .ProseMirror-gapcursor { display: none; pointer-events: none; position: absolute }
 .paper-note-editor .ProseMirror-gapcursor:after { content: ''; display: block; position: absolute; top: -2px; width: 20px; border-top: 1px solid var(--ink); animation: note-cursor-blink 1.1s steps(2, start) infinite }
@@ -1234,3 +1235,7 @@ kbd { display: inline-grid; place-items: center; min-width: 18px; height: 18px; 
 .paper-note-editor li[data-type="taskItem"] > label { flex: none; user-select: none }
 .paper-note-editor li[data-type="taskItem"] > label input { margin: 0 }
 .paper-note-editor li[data-type="taskItem"] > div { flex: 1; min-width: 0 }
+
+@media (prefers-reduced-motion: reduce) {
+  .linked-passage-flash, .linked-passage-toast { animation: none }
+}

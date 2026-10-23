@@ -16,10 +16,11 @@ async function payload<T>(response: Response): Promise<T> {
   return body as T;
 }
 
-export default function PaperDiscovery({ query, folders, papers, initialFolderId, onImported, onOpen }: {
-  query: string; folders: Folder[]; papers: LibraryPaper[]; initialFolderId: string | null;
+export default function PaperDiscovery({ directLink = false, query, folders, papers, initialFolderId, onImported, onOpen }: {
+  directLink?: boolean; query: string; folders: Folder[]; papers: LibraryPaper[]; initialFolderId: string | null;
   onImported: (paper: LibraryPaper) => void; onOpen: (paper: LibraryPaper) => void;
 }) {
+  const [verified, setVerified] = useState<{ page_count: number; byte_size: number } | null>(null);
   const [results, setResults] = useState<DiscoveredPaper[]>([]);
   const [warnings, setWarnings] = useState<string[]>([]);
   const [searched, setSearched] = useState<string | null>(null);
@@ -41,8 +42,14 @@ export default function PaperDiscovery({ query, folders, papers, initialFolderId
     if (!query.trim() || importing) return;
     request.current?.abort();
     const controller = new AbortController(); request.current = controller;
-    setSearching(true); setError(''); setReview(null); setReady(null); setWarnings([]);
+    setSearching(true); setError(''); setReview(null); setReady(null); setWarnings([]); setVerified(null);
     try {
+      if (directLink) {
+        const checked = await payload<{ paper: DiscoveredPaper; page_count: number; byte_size: number }>(await fetch('/api/paper-discovery/verify-link', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ url: query.trim() }), signal: controller.signal }));
+        if (controller.signal.aborted) return;
+        setReview(checked.paper); setPdfUrl(checked.paper.pdf_urls[0]); setVerified(checked);
+        return;
+      }
       const data = await payload<{ results: DiscoveredPaper[]; warnings: string[] }>(await fetch(`/api/paper-discovery/search?q=${encodeURIComponent(query.trim())}`, { signal: controller.signal }));
       if (controller.signal.aborted) return;
       setResults(data.results); setWarnings(data.warnings); setSearched(query.trim());
@@ -84,16 +91,17 @@ export default function PaperDiscovery({ query, folders, papers, initialFolderId
   const saved = ready ?? papers.find((paper) => paper.id === review?.existing_document_id);
   return <div className="paper-discovery">
     <form className="discovery-search" onSubmit={(event) => { event.preventDefault(); void search(); }}>
-      <div><strong>Find your next paper</strong><p>Search arXiv and the web by title, keywords, DOI, or arXiv link. Queries are sent online only when you search.</p></div>
-      <button className="primary-button" type="submit" disabled={!query.trim() || searching || importing}>{searching ? 'Searching…' : 'Search online'}</button>
+      <div><strong>{directLink ? 'Bring a PDF to your library' : 'Find your next paper'}</strong><p>{directLink ? 'Found a document elsewhere? Paste its public PDF link above. Check the file, then choose where to save it.' : 'Search arXiv and the web by title, keywords, DOI, or arXiv link. Queries are sent online only when you search.'}</p></div>
+      <button className="primary-button" type="submit" disabled={!query.trim() || searching || importing}>{searching ? directLink ? 'Checking PDF…' : 'Searching…' : directLink ? 'Check PDF link' : 'Search online'}</button>
     </form>
     {error && <p className="error-banner" role="alert">{error}</p>}
     {warnings.length > 0 && <div className="discovery-warnings" role="status">{warnings.map((warning) => <p key={warning}>{warning}</p>)}</div>}
     <div className="discovery-body" aria-busy={searching || resolving || importing}>
-      {searching ? <div className="spotlight-empty" role="status"><strong>Searching for papers…</strong><span>Checking arXiv and web sources.</span></div> : review ? <section className="discovery-review" aria-label="Review paper">
-        <button type="button" className="discovery-back" disabled={importing} onClick={() => { request.current?.abort(); setReview(null); setError(''); setResolving(false); }}>← Back to results</button>
+      {searching ? <div className="spotlight-empty" role="status"><strong>{directLink ? 'Checking your PDF…' : 'Searching for papers…'}</strong><span>{directLink ? 'Downloading a temporary copy and checking that it opens. Your library stays unchanged until you add it.' : 'Checking arXiv and web sources.'}</span></div> : review ? <section className="discovery-review" aria-label="Review paper">
+        <button type="button" className="discovery-back" disabled={importing} onClick={() => { request.current?.abort(); setReview(null); setError(''); setResolving(false); }}>{directLink ? '← Check another link' : '← Back to results'}</button>
         <div className="discovery-source">{review.source}{review.year && ` · ${review.year}`}{review.arxiv_id && ` · ${review.arxiv_id}`}</div>
         <h2>{review.title}</h2>
+        {verified && <p className="discovery-verified" role="status">✓ PDF verified · {verified.page_count} {verified.page_count === 1 ? 'page' : 'pages'} · {Math.max(1, Math.round(verified.byte_size / 1024))} KB</p>}
         {review.authors.length > 0 && <p className="discovery-authors">{review.authors.join(', ')}</p>}
         {review.doi && <p className="discovery-authors">DOI: {review.doi}</p>}
         {review.abstract && <p className="discovery-abstract">{review.abstract}</p>}
@@ -104,14 +112,14 @@ export default function PaperDiscovery({ query, folders, papers, initialFolderId
             {review.pdf_urls.length > 1 ? <select id="discovery-pdf" value={pdfUrl} disabled={importing} onChange={(event) => setPdfUrl(event.target.value)}>{review.pdf_urls.map((url) => <option value={url} key={url}>{url}</option>)}</select> : <p className="discovery-url">{pdfUrl}</p>}
             <label className="discovery-label">Add to folder<AppSelect disabled={importing} label="Destination folder" value={folderId} onChange={setChosenFolder} options={[{ value: '', label: 'Unfiled' }, ...folders.map((folder) => ({ value: folder.id, label: folder.name }))]} /></label>
             <button className="primary-button" type="button" disabled={importing || !pdfUrl} onClick={() => void add()}>{importing ? 'Downloading & processing…' : 'Download & add to library'}</button>
-            <p className="discovery-footnote" role="status">{importing ? 'Keep this window open while Adam saves the PDF and extracts its text.' : 'Review the PDF before adding it. The file will be stored locally.'}</p>
+            <p className="discovery-footnote" role="status">{importing ? 'Keep this window open while Adam saves the PDF and extracts its text.' : directLink ? 'The file will be stored locally. Existing copies keep their notes, chats, and folder.' : 'Review the PDF before adding it. The file will be stored locally.'}</p>
           </> : <><strong>No downloadable PDF found</strong><p>Open the source to check for an accessible copy. You can download it yourself and use Add PDF in the library.</p><button className="files-secondary" type="button" onClick={() => void reviewPaper(review)}>Check for PDF again</button></>}
         </div>
       </section> : searched !== null ? <>
         <div className="discovery-result-heading">{results.length} {results.length === 1 ? 'result' : 'results'} for “{searched}”</div>
         {results.map((paper) => <button type="button" className="discovery-result" key={paper.source_url} onClick={() => void reviewPaper(paper)}><span className="discovery-source">{paper.source}{paper.year && ` · ${paper.year}`}{paper.arxiv_id && ` · ${paper.arxiv_id}`}{paper.existing_document_id ? ' · In library' : paper.pdf_urls.length ? ' · PDF link available' : ' · Check source for PDF'}</span><strong>{paper.title}</strong>{paper.authors.length > 0 && <span className="discovery-authors">{paper.authors.slice(0, 4).join(', ')}{paper.authors.length > 4 ? ' et al.' : ''}</span>}{paper.abstract && <span className="discovery-snippet">{paper.abstract}</span>}<span className="discovery-review-action">Review paper →</span></button>)}
         {results.length === 0 && <div className="spotlight-empty"><strong>No papers found</strong><span>Try a shorter title, author name, or arXiv identifier.{warnings.length > 0 ? ' Some search sources are currently unavailable.' : ''}</span></div>}
-      </> : <div className="spotlight-empty"><strong>A paper title is a good place to start</strong><span>Try “Attention Is All You Need” or paste an arXiv link.<br />You choose what to download after reviewing the results.</span></div>}
+      </> : directLink ? <div className="spotlight-empty"><strong>Already have a PDF link?</strong><span>Paste it above and select Check PDF link.<br />Public download links work even when the URL does not end in .pdf.</span></div> : <div className="spotlight-empty"><strong>A paper title is a good place to start</strong><span>Try “Attention Is All You Need” or paste an arXiv link.<br />You choose what to download after reviewing the results.</span></div>}
     </div>
   </div>;
 }

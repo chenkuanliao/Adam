@@ -8,15 +8,18 @@ import time
 import xml.etree.ElementTree as ET
 from contextlib import asynccontextmanager
 from html.parser import HTMLParser
-from urllib.parse import urljoin, urlparse
+from urllib.parse import unquote, urljoin, urlparse
 
+import fitz
 import httpx
 from fastapi import HTTPException, UploadFile
+from fastapi.concurrency import run_in_threadpool
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
 from ..models import Document
 from ..schemas import PaperCandidate
+from .documents import PDF_ENGINE_LOCK
 
 ARXIV_ID = re.compile(r"(?:arxiv:|arxiv\.org/(?:abs|pdf)/)?((?:\d{4}\.\d{4,5}|[a-z-]+(?:\.[A-Z]{2})?/\d{7})(?:v\d+)?)(?:\.pdf)?$", re.I)
 ATOM = {"a": "http://www.w3.org/2005/Atom", "ar": "http://arxiv.org/schemas/atom"}
@@ -262,3 +265,27 @@ async def download_pdf(url: str, title: str, max_bytes: int) -> UploadFile:
     except BaseException:
         spool.close()
         raise
+
+
+async def verify_pdf_link(url: str, max_bytes: int) -> dict:
+    """Check actual PDF bytes without adding anything to the library."""
+    url = public_url(url.strip())
+    title = unquote(urlparse(url).path.rsplit('/', 1)[-1]).removesuffix('.pdf') or 'Linked document'
+    upload = await download_pdf(url, title, max_bytes)
+    try:
+        def inspect():
+            data = upload.file.read()
+            try:
+                with PDF_ENGINE_LOCK, fitz.open(stream=data, filetype='pdf') as pdf:
+                    if pdf.needs_pass or not pdf.page_count:
+                        raise ValueError('Locked or empty PDF')
+                    # Access each page to reject unreadable page trees before offering import.
+                    for page in pdf:
+                        _ = page.rect
+                    return (pdf.metadata.get('title') or title).strip()[:1000] or 'Linked document', pdf.page_count, len(data)
+            except Exception:
+                raise HTTPException(400, 'This PDF is damaged, empty, or password-protected. Try another PDF link.') from None
+        title, pages, size = await run_in_threadpool(inspect)
+        return {'paper': PaperCandidate(title=title, source='PDF link', source_url=url, pdf_urls=[url]), 'page_count': pages, 'byte_size': size}
+    finally:
+        await upload.close()

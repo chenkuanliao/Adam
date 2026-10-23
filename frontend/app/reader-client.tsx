@@ -7,6 +7,8 @@ import type { PDFDocumentProxy, PDFPageProxy, TextContent } from 'pdfjs-dist/typ
 import AppSelect from './app-select';
 import PaneSearch from './pane-search';
 import PaperNoteEditor from './paper-note-editor';
+import type { QuoteSource } from './source-quote';
+import { textRanges } from './find-text';
 import HistorySearch, { HistoryMatch } from './history-search';
 import { sameHighlightLocation } from './highlight-location';
 import EditableNumber from './editable-number';
@@ -129,6 +131,8 @@ export default function Home() {
   const [quickAsking, setQuickAsking] = useState(false);
   const [quickImporting, setQuickImporting] = useState(false);
   const [quickError, setQuickError] = useState('');
+  const [revealedQuote, setRevealedQuote] = useState<HighlightEntry | null>(null);
+  const quoteJumpRef = useRef(0);
   const [revealedLinkId, setRevealedLinkId] = useState<string | null>(null);
   const [linkRevealVersion, setLinkRevealVersion] = useState(0);
   const linkedTurnRevealRef = useRef(0);
@@ -1016,6 +1020,8 @@ export default function Home() {
     setActive(paper);
     setLinkedTurn(null);
     setRevealedLinkId(null);
+    setRevealedQuote(null);
+    quoteJumpRef.current += 1;
     setSelectedAiNote(null);
     changeReadingMode(false);
     setPages(0);
@@ -1295,8 +1301,9 @@ export default function Home() {
 
   function addSelectionToPaperNote() {
     if (!pendingSelection) return;
-    const { id, text, page } = pendingSelection;
-    setPendingNoteQuote({ id, text, page });
+    const { id, text, page, range } = pendingSelection;
+    const pageElement = (range.startContainer.nodeType === Node.ELEMENT_NODE ? range.startContainer as Element : range.startContainer.parentElement)?.closest<HTMLElement>('.react-pdf__Page');
+    setPendingNoteQuote({ id, text, page, rects: pageElement ? getHighlightRects(range, pageElement) : [] });
     setPaneMode('notes');
     changeReadingMode(false);
     clearBrowserSelection();
@@ -1442,7 +1449,35 @@ export default function Home() {
     paintHighlights(next);
   }
 
-  function showLinkInPdf(entry: HighlightEntry) {
+  async function showQuoteInPdf(quote: QuoteSource) {
+    const request = ++quoteJumpRef.current;
+    const paperId = activePaperIdRef.current;
+    if (quote.documentId && quote.documentId !== paperId) {
+      setError('This quote belongs to another paper. Open its original paper to view the source.');
+      return;
+    }
+    if (!quote.page || quote.page > pages) {
+      setError('The quoted PDF page is unavailable.');
+      return;
+    }
+    const entry: HighlightEntry = { ...quote, id: crypto.randomUUID(), rects: quote.rects ?? [], color: '#ffe174', range: null };
+    if (entry.rects.length) { showLinkInPdf(entry, true); return; }
+    // Older notes have page/text only. Jump to mount the page before locating its text.
+    showLinkInPdf(entry, true);
+    for (let attempt = 0; attempt < 50; attempt += 1) {
+      if (request !== quoteJumpRef.current || paperId !== activePaperIdRef.current) return;
+      const page = viewerRef.current?.querySelector<HTMLElement>(`[data-page-number="${quote.page}"] .react-pdf__Page`);
+      const range = page && textRanges(page, quote.text, '.react-pdf__Page__textContent')[0];
+      if (page && range) {
+        const rects = getHighlightRects(range, page);
+        if (rects.length) { showLinkInPdf({ ...entry, rects }, true); return; }
+      }
+      await new Promise((resolve) => setTimeout(resolve, 100));
+    }
+    if (request === quoteJumpRef.current && paperId === activePaperIdRef.current) setError('Opened the cited page, but could not locate the exact quoted text.');
+  }
+
+  function showLinkInPdf(entry: HighlightEntry, fromQuote = false) {
     const viewer = viewerRef.current;
     // Placeholders share the rendered page geometry, so distant links can scroll before mounting.
     const page = viewer?.querySelector<HTMLElement>(`[data-page-number="${entry.page}"] .pdf-raster-surface`);
@@ -1455,7 +1490,8 @@ export default function Home() {
     const first = entry.rects[0];
     const x = first ? first.left + first.width / 2 : .5;
     const y = first ? first.top + first.height / 2 : 0;
-    setRevealedLinkId(entry.id);
+    if (fromQuote) { setRevealedQuote(entry); setRevealedLinkId(null); }
+    else { quoteJumpRef.current += 1; setRevealedQuote(null); setRevealedLinkId(entry.id); }
     setLinkRevealVersion((version) => version + 1);
     setError('');
     viewer.scrollTo({
@@ -2087,7 +2123,7 @@ export default function Home() {
         {pdfFind && <div className="pdf-find-position" style={{ width: `${focusReading ? 100 : paperPercent}%` }}><PaneSearch key={active.id} kind="pdf" root={viewerRef} pdf={pdfDocument} onPage={goToPage} onClose={() => setPdfFind(false)} /></div>}
         <section className={`pdf-pane${screenshotMode ? ' screenshot-mode' : ''}`} ref={viewerRef} onScroll={trackCurrentPage} onMouseUp={() => { if (!screenshotMode) captureSelection(); }} onPointerDown={beginScreenshot} onPointerMove={moveScreenshot} onPointerUp={finishScreenshot} onPointerCancel={() => { screenshotPointerRef.current = null; setScreenshotDrag(null); setScreenshotMode(false); }}>
           <PdfDocument key={active.id} file={`${API_BASE}/api/documents/${active.id}/file`} onLoadSuccess={(pdf) => { setPdfDocument(pdf); setPages(pdf.numPages); }} loading={<div className="viewer-message">Rendering paper…</div>} error={<div className="viewer-message error-banner">Could not render this PDF.</div>}>
-            {Array.from({ length: pages }, (_, index) => { const pageEntries = highlightEntries.filter((entry) => entry.page === index + 1); const pageNotes = pageEntries.filter((entry) => entry.note_text).sort(compareNotePosition); const aiNotes = pageEntries.filter((entry) => entry.ai_links?.length).sort(compareNotePosition); const markers = pageEntries.filter((entry) => entry.note_text || entry.ai_links?.length).sort(compareNotePosition); const pageScale = zoom / BASE_RENDER_SCALE; const surfaceHeight = BASE_PAGE_WIDTH * BASE_RENDER_SCALE * aspects[index]; const mounted = isPageMounted(pageWindow, index + 1); return <div className="pdf-page-stage" data-page-number={index + 1} key={index + 1}><div className="pdf-page-wrap" style={{ zoom: pageScale, '--page-scale': pageScale } as CSSProperties}>{mounted ? <PdfPageWithHighlights pageNumber={index + 1} highlights={pageEntries} zoom={rasterZoom} height={surfaceHeight} onSize={recordPageSize} /> : <div className="pdf-raster-surface pdf-page-placeholder" style={{ width: BASE_PAGE_WIDTH * BASE_RENDER_SCALE, height: surfaceHeight }} aria-hidden="true" />}{pageEntries.filter((entry) => entry.id === revealedLinkId).map((entry) => <LinkedPassageReveal key={`${entry.id}-${linkRevealVersion}`} entry={entry} viewerRef={viewerRef} />)}{aiNotes.map((note) => <button type="button" className="ai-note-anchor" style={{ top: `${noteMarkerTop(markers, markers.indexOf(note)) * 100}%` }} title={`${note.ai_links!.length} linked AI ${note.ai_links!.length === 1 ? 'note' : 'notes'}`} aria-label="Open linked AI notes" onClick={() => { changeReadingMode(false); setPaneMode('links'); setSelectedAiNote(note); }} key={`ai-${note.id}`}>✦<small>{note.ai_links!.length}</small></button>)}{!visibleNotes && pageNotes.map((note) => <button type="button" className="note-anchor" style={{ top: `${noteMarkerTop(markers, markers.indexOf(note)) * 100}%`, '--note-color': note.color } as CSSProperties} title="Open note" aria-label="Open note" onClick={() => openSavedNote(note)} key={note.id}>▰</button>)}{visibleNotes && <aside className="page-notes" aria-label={`Notes for page ${index + 1}`}>{pageNotes.map((note, noteIndex) => <button type="button" className="page-note-card" style={{ top: `${noteCardTop(pageNotes, noteIndex) * 100}%`, '--note-color': note.color } as CSSProperties} onClick={() => openSavedNote(note)} key={note.id}><span>Page {index + 1}</span><p>{note.note_text}</p><small>{note.text}</small></button>)}</aside>}<span className="page-label">{index + 1}</span></div></div>; })}
+            {Array.from({ length: pages }, (_, index) => { const pageEntries = highlightEntries.filter((entry) => entry.page === index + 1); const pageNotes = pageEntries.filter((entry) => entry.note_text).sort(compareNotePosition); const aiNotes = pageEntries.filter((entry) => entry.ai_links?.length).sort(compareNotePosition); const markers = pageEntries.filter((entry) => entry.note_text || entry.ai_links?.length).sort(compareNotePosition); const pageScale = zoom / BASE_RENDER_SCALE; const surfaceHeight = BASE_PAGE_WIDTH * BASE_RENDER_SCALE * aspects[index]; const mounted = isPageMounted(pageWindow, index + 1); return <div className="pdf-page-stage" data-page-number={index + 1} key={index + 1}><div className="pdf-page-wrap" style={{ zoom: pageScale, '--page-scale': pageScale } as CSSProperties}>{mounted ? <PdfPageWithHighlights pageNumber={index + 1} highlights={pageEntries} zoom={rasterZoom} height={surfaceHeight} onSize={recordPageSize} /> : <div className="pdf-raster-surface pdf-page-placeholder" style={{ width: BASE_PAGE_WIDTH * BASE_RENDER_SCALE, height: surfaceHeight }} aria-hidden="true" />}{revealedQuote?.page === index + 1 && <LinkedPassageReveal key={`quote-${revealedQuote.id}-${linkRevealVersion}`} entry={revealedQuote} viewerRef={viewerRef} fromQuote />}{pageEntries.filter((entry) => entry.id === revealedLinkId).map((entry) => <LinkedPassageReveal key={`${entry.id}-${linkRevealVersion}`} entry={entry} viewerRef={viewerRef} />)}{aiNotes.map((note) => <button type="button" className="ai-note-anchor" style={{ top: `${noteMarkerTop(markers, markers.indexOf(note)) * 100}%` }} title={`${note.ai_links!.length} linked AI ${note.ai_links!.length === 1 ? 'note' : 'notes'}`} aria-label="Open linked AI notes" onClick={() => { changeReadingMode(false); setPaneMode('links'); setSelectedAiNote(note); }} key={`ai-${note.id}`}>✦<small>{note.ai_links!.length}</small></button>)}{!visibleNotes && pageNotes.map((note) => <button type="button" className="note-anchor" style={{ top: `${noteMarkerTop(markers, markers.indexOf(note)) * 100}%`, '--note-color': note.color } as CSSProperties} title="Open note" aria-label="Open note" onClick={() => openSavedNote(note)} key={note.id}>▰</button>)}{visibleNotes && <aside className="page-notes" aria-label={`Notes for page ${index + 1}`}>{pageNotes.map((note, noteIndex) => <button type="button" className="page-note-card" style={{ top: `${noteCardTop(pageNotes, noteIndex) * 100}%`, '--note-color': note.color } as CSSProperties} onClick={() => openSavedNote(note)} key={note.id}><span>Page {index + 1}</span><p>{note.note_text}</p><small>{note.text}</small></button>)}</aside>}<span className="page-label">{index + 1}</span></div></div>; })}
           </PdfDocument>
           {screenshotMode && !screenshotDrag && <div className="screenshot-hint">Drag over the PDF to ask about it · Esc to cancel</div>}
           {screenshotDrag && <div className="screenshot-region" style={{ left: screenshotDrag.overlayLeft, top: screenshotDrag.overlayTop, width: screenshotDrag.overlayWidth, height: screenshotDrag.overlayHeight }} />}
@@ -2096,7 +2132,7 @@ export default function Home() {
         <div className="pane-resizer" hidden={focusReading} style={{ left: `${paperPercent}%` }} role="separator" aria-label="Resize paper and chat panes" aria-orientation="vertical" aria-valuemin={MIN_PAPER_PERCENT} aria-valuemax={80} aria-valuenow={Math.round(paperPercent)} tabIndex={0} onPointerDown={beginWorkspaceResize} onPointerMove={moveWorkspaceResize} onPointerUp={finishWorkspaceResize} onPointerCancel={() => { resizingRef.current = false; }} onDoubleClick={resetWorkspaceResize}><span /></div>
         <aside className={`side-pane${sheetOpen ? ' sheet-open' : ''}`} inert={focusReading} aria-hidden={focusReading} style={{ '--chat-scale': chatScale } as CSSProperties}>
           <div className="mode-tabs"><button type="button" className="sheet-toggle" aria-expanded={sheetOpen} aria-label={sheetOpen ? 'Collapse assistant panel' : 'Expand assistant panel'} onClick={() => setSheetOpen((open) => !open)}><i aria-hidden="true" /></button><div className="tab-list"><button type="button" className={paneMode === 'chat' ? 'active' : ''} onClick={() => { setPaneMode('chat'); setSheetOpen(true); }}><UiIcon kind="chat" />Chat</button><button type="button" className={paneMode === 'notes' ? 'active' : ''} onClick={() => { setPaneMode('notes'); setSheetOpen(true); }}><UiIcon kind="pen" />Notes</button><button type="button" className={paneMode === 'links' ? 'active links-tab' : 'links-tab'} aria-pressed={paneMode === 'links'} onClick={() => { setPaneMode('links'); setSheetOpen(true); }}><UiIcon kind="link" />Links<span>{highlightEntries.reduce((count, entry) => count + (entry.ai_links?.length ?? 0), 0)}</span></button></div>{(paneMode === 'chat' || paneMode === 'notes') && <div className="chat-text-controls" role="group" aria-label={paneMode === 'notes' ? 'Note text size' : 'Chat text size'}><span className="control-label">Text</span><div><button type="button" aria-label={`Decrease ${textPane} text size`} title={`Decrease ${textPane} text size`} disabled={textScale <= minTextScale} onClick={() => changeTextScale(-CHAT_SCALE_STEP)}>A−</button><EditableNumber label={paneMode === 'notes' ? 'Note zoom percentage' : 'Text zoom percentage'} value={Math.round(textScale * 100)} min={minTextScale * 100} max={MAX_CHAT_SCALE * 100} suffix="%" onChange={(value) => setTextScale(value / 100)} /><button type="button" aria-label={`Increase ${textPane} text size`} title={`Increase ${textPane} text size`} disabled={textScale >= MAX_CHAT_SCALE} onClick={() => changeTextScale(CHAT_SCALE_STEP)}>A+</button></div></div>}</div>
-          {paneMode === 'links' ? <ChatLinksPanel key={active.id} entries={highlightEntries} conversations={conversations} activeConversationId={activeConversation?.id} revealedLinkId={revealedLinkId} onShowInPdf={showLinkInPdf} onOpen={openAiConversation} /> : paneMode === 'notes' ? <PaperNoteEditor textScale={noteScale} documentId={active.id} paperName={active.original_name.replace(/\.pdf$/i, '')} pendingQuote={pendingNoteQuote} onQuoteConsumed={() => setPendingNoteQuote(null)} /> : historyOpen ? <section className="history-view">
+          {paneMode === 'links' ? <ChatLinksPanel key={active.id} entries={highlightEntries} conversations={conversations} activeConversationId={activeConversation?.id} revealedLinkId={revealedLinkId} onShowInPdf={showLinkInPdf} onOpen={openAiConversation} /> : paneMode === 'notes' ? <PaperNoteEditor onShowInPdf={showQuoteInPdf} textScale={noteScale} documentId={active.id} paperName={active.original_name.replace(/\.pdf$/i, '')} pendingQuote={pendingNoteQuote} onQuoteConsumed={() => setPendingNoteQuote(null)} /> : historyOpen ? <section className="history-view">
             <div className="history-header"><div><p>Conversations</p><h2>Chat history</h2><span>{conversations.length} saved for this paper</span></div><button type="button" onClick={() => setHistoryOpen(false)} aria-label="Close chat history">×</button></div>
             <HistorySearch key={active.id} documentId={active.id} initialQuery={historyQuery} onQuery={setHistoryQuery} onResults={setHistoryMatches} />
             <button type="button" className="new-chat-card" onClick={() => void createNewConversation()}><span>＋</span><div><strong>Start a new chat</strong><small>Uses your current default model</small></div><i>→</i></button>
@@ -2136,7 +2172,7 @@ export default function Home() {
   );
 }
 
-function LinkedPassageReveal({ entry, viewerRef }: { entry: HighlightEntry; viewerRef: React.RefObject<HTMLDivElement | null> }) {
+function LinkedPassageReveal({ entry, viewerRef, fromQuote = false }: { entry: HighlightEntry; viewerRef: React.RefObject<HTMLDivElement | null>; fromQuote?: boolean }) {
   const targetRef = useRef<HTMLDivElement>(null);
   const [visible, setVisible] = useState(false);
   const first = entry.rects[0];
@@ -2168,7 +2204,7 @@ function LinkedPassageReveal({ entry, viewerRef }: { entry: HighlightEntry; view
     <div className="linked-passage-target" ref={targetRef} aria-hidden="true" style={{ left: `${first.left * 100}%`, top: `${first.top * 100}%`, width: `${first.width * 100}%`, height: `${first.height * 100}%` }} />
     {visible && <>
       {entry.rects.map((rect, index) => <div className="linked-passage-flash" aria-hidden="true" key={index} style={{ left: `${rect.left * 100}%`, top: `${rect.top * 100}%`, width: `${rect.width * 100}%`, height: `${rect.height * 100}%` }} />)}
-      <div className="linked-passage-toast" role="status" style={{ left: `${Math.min(.65, Math.max(.03, first.left)) * 100}%`, top: `${first.top * 100}%` }}><span aria-hidden="true">✦</span><div><strong>Linked passage</strong><small>Page {entry.page} · Chat reference</small></div></div>
+      {!fromQuote && <div className="linked-passage-toast" role="status" style={{ left: `${Math.min(.65, Math.max(.03, first.left)) * 100}%`, top: `${first.top * 100}%` }}><span aria-hidden="true">✦</span><div><strong>Linked passage</strong><small>Page {entry.page} · Chat reference</small></div></div>}
     </>}
   </>;
 }
