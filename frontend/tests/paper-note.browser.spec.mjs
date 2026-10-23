@@ -71,6 +71,20 @@ test('PDF quote shortcut, cursor placement, protected text, dragging, clipboard 
   await expect(quote).toHaveCount(1); await expect(quote.locator('p')).toHaveText(excerpt);
   await expect(quote).toHaveAttribute('contenteditable', 'false');
   await expect(editor).toContainText('My introduction');
+  // The saved quote retains its geometry across clipboard and reload.
+  const stored = await (await request.get(endpoint)).json();
+  expect(stored.content_html).toContain('data-source-rects');
+  // Node views expose only UI, so inspect the serialized note for source geometry.
+  expect(stored.content_html).toMatch(/data-source-rects="[^"]*left/);
+  await page.getByRole('button', { name: /^Page number:/ }).click();
+  await page.getByRole('textbox', { name: 'Page number', exact: true }).fill('7');
+  await page.getByRole('textbox', { name: 'Page number', exact: true }).press('Enter');
+  await quote.getByRole('button', { name: 'Show quote in PDF', exact: true }).click();
+  await expect(page.locator('.linked-passage-toast')).toHaveCount(0);
+  await expect(page.locator('.linked-passage-flash').first()).toBeVisible();
+  await expect(page.locator('.linked-passage-flash')).toHaveCount(0, { timeout: 6000 });
+  await quote.getByRole('button', { name: 'Show quote in PDF', exact: true }).click();
+  await expect(page.locator('.linked-passage-flash').first()).toBeVisible();
   expect(errors).toEqual([]);
   await page.screenshot({ path: testInfo.outputPath('paper-note-quotes.png'), fullPage: true });
 });
@@ -106,4 +120,31 @@ test('first quote in an empty note allows typing and newlines above it and saves
   await expect(editor).toContainText('Text below the quote');
   await expect(quote).toHaveCount(1);
   await expect(quote).toHaveAttribute('contenteditable', 'false');
+});
+
+
+test('legacy quote locates text on a distant page and fades without changing the note', async ({ page, request }) => {
+  const papers = await (await request.get(`${base}/api/documents`)).json();
+  const paper = papers.find(p => p.original_name === 'A Field Guide to Diffusion Samplers.pdf');
+  const endpoint = `${base}/api/documents/${paper.id}/paper-note`;
+  const note = await (await request.get(endpoint)).json();
+  const html = '<p>Legacy note</p><blockquote><p>We study how a small set of explicit assumptions</p><cite>Quoted from paper · Page 8</cite></blockquote><p>Keep this writing</p>';
+  await request.put(endpoint, { data: { content_html: html, plain_text: 'Legacy note', revision: note.revision } });
+  await page.goto(base);
+  await page.getByRole('button', { name: `Open ${paper.original_name}`, exact: true }).click();
+  await page.locator('.mode-tabs').getByRole('button', { name: 'Notes', exact: true }).click();
+  const editor = page.getByRole('textbox', { name: 'Paper note', exact: true });
+  await expect(editor).toContainText('Keep this writing');
+  await page.locator('.react-pdf__Page__textContent span').first().waitFor();
+  await editor.getByRole('button', { name: 'Show quote in PDF', exact: true }).click();
+  await expect(page.locator('[data-page-number="8"] .linked-passage-flash').first()).toBeVisible();
+  await expect(page.locator('.linked-passage-toast')).toHaveCount(0);
+  await expect(page.locator('.linked-passage-flash').first()).toBeVisible();
+  const visible = await page.locator('.linked-passage-flash').first().evaluate(el => {
+    const rect = el.getBoundingClientRect(), pane = document.querySelector('.pdf-pane').getBoundingClientRect();
+    return rect.top >= pane.top && rect.top < pane.bottom;
+  });
+  expect(visible).toBe(true);
+  await expect(page.locator('.linked-passage-flash')).toHaveCount(0, { timeout: 6000 });
+  expect((await (await request.get(endpoint)).json()).content_html).toBe(html);
 });

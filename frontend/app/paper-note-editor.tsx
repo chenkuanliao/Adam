@@ -6,17 +6,18 @@ import StarterKit from '@tiptap/starter-kit';
 import TaskList from '@tiptap/extension-task-list';
 import TaskItem from '@tiptap/extension-task-item';
 import { requestAppDialog } from './app-dialog';
-import { SourceQuote, insertSourceQuote, migrateNoteHtml } from './source-quote';
+import { SourceQuote, insertSourceQuote, migrateNoteHtml, type QuoteSource } from './source-quote';
 
-type Quote = { id: string; text: string; page: number | null };
+type Quote = QuoteSource & { id: string };
+type Props = { documentId: string; paperName: string; pendingQuote: Quote | null; onQuoteConsumed: () => void; onShowInPdf: (quote: QuoteSource) => void };
 type PaperNote = { content_html: string; revision: number; detail?: string };
 
-export default function PaperNoteEditor(props: { documentId: string; paperName: string; pendingQuote: Quote | null; onQuoteConsumed: () => void }) {
+export default function PaperNoteEditor(props: Props) {
   // A new document gets its own editor, load request, and save queue.
   return <DocumentNote key={props.documentId} {...props} />;
 }
 
-function DocumentNote({ documentId, paperName, pendingQuote, onQuoteConsumed }: { documentId: string; paperName: string; pendingQuote: Quote | null; onQuoteConsumed: () => void }) {
+function DocumentNote({ documentId, paperName, pendingQuote, onQuoteConsumed, onShowInPdf }: Props) {
   const [status, setStatus] = useState<'loading' | 'saved' | 'saving' | 'error'>('loading');
   const [errorMessage, setErrorMessage] = useState('');
   const [empty, setEmpty] = useState(true);
@@ -28,9 +29,13 @@ function DocumentNote({ documentId, paperName, pendingQuote, onQuoteConsumed }: 
   const queue = useRef(Promise.resolve());
   const insertedQuote = useRef<string | null>(null);
   const saveRef = useRef<() => void>(() => {});
+  const onShowInPdfRef = useRef(onShowInPdf);
+  useEffect(() => { onShowInPdfRef.current = onShowInPdf; }, [onShowInPdf]);
   const editor = useEditor({
     immediatelyRender: false,
-    extensions: [StarterKit.configure({ heading: { levels: [1, 2, 3, 4, 5] }, link: { openOnClick: false } }), TaskList, TaskItem.configure({ nested: true }), SourceQuote],
+    // The node-view callback reads the ref only when its source button is clicked.
+    // eslint-disable-next-line react-hooks/refs
+    extensions: [StarterKit.configure({ heading: { levels: [1, 2, 3, 4, 5] }, link: { openOnClick: false } }), TaskList, TaskItem.configure({ nested: true }), SourceQuote.configure({ onShowInPdf: (quote) => onShowInPdfRef.current(quote) })],
     editable: false,
     editorProps: { attributes: { class: 'paper-note-editor', role: 'textbox', 'aria-multiline': 'true', 'aria-label': 'Paper note' } },
     onUpdate: ({ editor }) => {
@@ -86,9 +91,9 @@ function DocumentNote({ documentId, paperName, pendingQuote, onQuoteConsumed }: 
   useEffect(() => {
     if (!editor || !loaded.current || !pendingQuote || insertedQuote.current === pendingQuote.id) return;
     insertedQuote.current = pendingQuote.id;
-    insertSourceQuote(editor, pendingQuote);
+    insertSourceQuote(editor, { ...pendingQuote, documentId });
     onQuoteConsumed();
-  }, [editor, pendingQuote, status, onQuoteConsumed]);
+  }, [editor, pendingQuote, status, onQuoteConsumed, documentId]);
 
   async function addLink() {
     if (!editor) return;
