@@ -991,7 +991,8 @@ kbd { display: inline-grid; place-items: center; min-width: 18px; height: 18px; 
 .focus-reading-button kbd{padding:2px 4px;border:1px solid #cad5c5;border-radius:4px;font:9px inherit;color:#6e8264}
 .reader-shell.focus-reading{height:100dvh}
 .focus-reading .reader-header{height:54px;padding:0 22px;gap:20px;grid-template-columns:minmax(0,1fr) minmax(0,2fr) minmax(0,1fr);background:#f8f9f3}
-.focus-reading .reader-header>.brand-button,.focus-reading .note-view-button,.focus-reading .reader-delete-button,.focus-reading .reader-header-tools>.settings-button{display:none}
+.focus-reading .reader-header>.brand-button,.focus-reading .reader-delete-button,.focus-reading .reader-header-tools>.settings-button{display:none}
+.focus-reading .note-view-button{flex-shrink:0;white-space:nowrap}
 .focus-reading .document-title{grid-column:2;position:static;transform:none;max-width:none;min-width:0;text-align:center}
 .focus-reading .document-title-button{justify-content:center}
 .focus-reading .document-title>span{display:block}
@@ -1212,3 +1213,23 @@ kbd { display: inline-grid; place-items: center; min-width: 18px; height: 18px; 
 @media (max-width: 850px) { .pdf-find-position { width: 100% !important; padding-inline: 10px; } }
 @media (max-width: 640px) { .find-trigger>span { display: none; } }
 .history-search-match { background: #ffe174b3; color: inherit; border-radius: 2px; padding: 0; box-decoration-break: clone; -webkit-box-decoration-break: clone; }
+
+/* Source quotes are atomic editor nodes; the controls are absent from saved HTML. */
+.paper-note-content { min-height: 100% }
+.paper-note-canvas:focus-within .paper-note-placeholder { display: none }
+.paper-note-editor .paper-source-quote { position: relative; cursor: grab }
+.paper-note-editor .paper-source-quote:active { cursor: grabbing }
+.paper-note-editor .paper-source-quote.ProseMirror-selectednode { outline: 2px solid var(--accent); outline-offset: 3px }
+.source-quote-tools { display: flex; align-items: center; gap: 4px; margin-bottom: 8px; font: 11px/1.4 var(--font-sans); color: var(--muted); user-select: none }
+.source-quote-handle { margin-right: auto; font-size: 20px; line-height: 1; cursor: grab }
+.source-quote-tools button { padding: 3px 5px; border: 1px solid var(--rule); border-radius: 4px; background: var(--surface); color: var(--muted); cursor: pointer }
+.source-quote-tools button:hover, .source-quote-tools button:focus-visible { color: var(--ink); background: var(--surface-2) }
+.paper-note-editor .ProseMirror-gapcursor { display: none; pointer-events: none; position: absolute }
+.paper-note-editor .ProseMirror-gapcursor:after { content: ''; display: block; position: absolute; top: -2px; width: 20px; border-top: 1px solid var(--ink); animation: note-cursor-blink 1.1s steps(2, start) infinite }
+.paper-note-editor.ProseMirror-focused .ProseMirror-gapcursor { display: block }
+@keyframes note-cursor-blink { to { visibility: hidden } }
+.paper-note-editor ul[data-type="taskList"] { list-style: none; padding-left: 0 }
+.paper-note-editor li[data-type="taskItem"] { display: flex; align-items: baseline; gap: 8px }
+.paper-note-editor li[data-type="taskItem"] > label { flex: none; user-select: none }
+.paper-note-editor li[data-type="taskItem"] > label input { margin: 0 }
+.paper-note-editor li[data-type="taskItem"] > div { flex: 1; min-width: 0 }

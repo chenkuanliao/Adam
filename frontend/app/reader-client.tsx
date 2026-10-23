@@ -6,6 +6,7 @@ import { Document as PdfDocument, Page, pdfjs } from 'react-pdf';
 import type { PDFDocumentProxy, PDFPageProxy, TextContent } from 'pdfjs-dist/types/src/display/api';
 import AppSelect from './app-select';
 import PaneSearch from './pane-search';
+import PaperNoteEditor from './paper-note-editor';
 import HistorySearch, { HistoryMatch } from './history-search';
 import { sameHighlightLocation } from './highlight-location';
 import EditableNumber from './editable-number';
@@ -56,7 +57,6 @@ function readReaderView(documentId: string): ReaderView | null {
   } catch { return null; }
 }
 
-type PaperNote = { document_id: string; content_html: string; plain_text: string; revision: number; updated_at: string | null };
 const PROVIDERS: Array<{ id: ProviderId; name: string; keyLabel: string }> = [
   { id: 'zen', name: 'OpenCode Zen', keyLabel: 'OpenCode Zen key' },
   { id: 'openrouter', name: 'OpenRouter', keyLabel: 'OpenRouter key' },
@@ -138,8 +138,10 @@ export default function Home() {
   const [noteEditor, setNoteEditor] = useState<NoteEditor | null>(null);
   const [notesVisible, setNotesVisible] = useState(false);
   const [focusReading, setFocusReading] = useState(false);
+  const [focusNotesVisible, setFocusNotesVisible] = useState(false);
+  const visibleNotes = focusReading ? focusNotesVisible : notesVisible;
   const focusButtonRef = useRef<HTMLButtonElement>(null);
-  const focusWorkspaceRef = useRef<{ zoom: number; fit: boolean } | null>(null);
+  const focusWorkspaceRef = useRef<{ zoom: number; fit: boolean; notesVisible: boolean } | null>(null);
   const readingAnchorRef = useRef<{ page: number; offset: number } | null>(null);
   const [noteSaving, setNoteSaving] = useState(false);
   const [questionStore] = useState(createTextStore);
@@ -442,7 +444,7 @@ export default function Home() {
     if (!viewer) return;
     const styles = window.getComputedStyle(viewer);
     const horizontalPadding = parseFloat(styles.paddingLeft) + parseFloat(styles.paddingRight);
-    const availableWidth = viewer.clientWidth - horizontalPadding - 34 - (notesVisibleRef.current && !focusWorkspaceRef.current ? NOTE_RAIL_WIDTH : 0);
+    const availableWidth = viewer.clientWidth - horizontalPadding - 34 - (notesVisibleRef.current ? NOTE_RAIL_WIDTH : 0);
     if (availableWidth <= 0) return;
     const fittedZoom = Math.min(MAX_ZOOM, Math.max(MIN_ZOOM, Math.floor(availableWidth / BASE_PAGE_WIDTH * 100) / 100));
     changeZoom(fittedZoom - zoomRef.current);
@@ -460,7 +462,13 @@ export default function Home() {
         readingAnchorRef.current = { page: Number(page.dataset.pageNumber), offset: (top - rect.top) / rect.height };
       }
     }
-    if (opening) focusWorkspaceRef.current = { zoom: zoomRef.current, fit: fitZoomRef.current };
+    if (opening) {
+      focusWorkspaceRef.current = { zoom: zoomRef.current, fit: fitZoomRef.current, notesVisible: notesVisibleRef.current };
+      notesVisibleRef.current = false;
+      setFocusNotesVisible(false);
+    } else if (focusWorkspaceRef.current) {
+      notesVisibleRef.current = focusWorkspaceRef.current.notesVisible;
+    }
     setPendingSelection(null);
     setScreenshotSelection(null);
     setFocusReading(opening);
@@ -509,6 +517,11 @@ export default function Home() {
   function toggleNotes() {
     const opening = !notesVisibleRef.current;
     notesVisibleRef.current = opening;
+    if (focusWorkspaceRef.current) {
+      setFocusNotesVisible(opening);
+      window.requestAnimationFrame(() => fitPaperToPane());
+      return;
+    }
     setNotesVisible(opening);
     if (opening) {
       zoomBeforeNotesRef.current = zoomRef.current;
@@ -645,7 +658,7 @@ export default function Home() {
   }, [zoom]);
 
   // Zoom, page count, and note/focus layout all move pages without scrolling.
-  useLayoutEffect(() => updatePageWindow(), [pages, zoom, notesVisible, focusReading, updatePageWindow]);
+  useLayoutEffect(() => updatePageWindow(), [pages, zoom, visibleNotes, focusReading, updatePageWindow]);
 
   useLayoutEffect(() => {
     if (!focusComposerAfterContextRef.current || contextSelections.length === 0) return;
@@ -974,6 +987,7 @@ export default function Home() {
     setPendingSelection(null);
     setNoteEditor(null);
     setNotesVisible(false);
+    setFocusNotesVisible(false);
     notesVisibleRef.current = false;
     zoomBeforeNotesRef.current = null;
     clearHighlights();
@@ -1676,8 +1690,8 @@ export default function Home() {
   }
 
   function openSavedNote(entry: HighlightEntry) {
-    changeReadingMode(false);
-    // Wait for the restored split and reading anchor before placing the editor.
+    if (!focusNotesVisible) changeReadingMode(false);
+    // Wait for any restored split and reading anchor before placing the editor.
     window.requestAnimationFrame(() => window.requestAnimationFrame(() => positionSavedNote(entry)));
   }
 
@@ -2017,12 +2031,12 @@ export default function Home() {
     <main className={`reader-shell${focusReading ? ' focus-reading' : ''}`}>
       <ActionTooltips />
       <AppDialogs />
-      <header className="reader-header"><div className="reader-header-start"><button className="brand-button reader-back" onClick={returnToLibrary} aria-label="Back to library" data-tooltip="Back to your library"><UiIcon kind="back" /><span className="brand-mark" aria-hidden="true">A</span><span className="reader-back-label">Library</span></button></div><div className="document-title">{renaming ? <form onSubmit={(event) => void renamePaper(event)}><input autoFocus aria-label="PDF filename" value={renameValue} maxLength={512} onChange={(event) => setRenameValue(event.target.value)} onKeyDown={(event) => { if (event.key === 'Escape') setRenaming(false); }} disabled={renameSaving} /><button type="submit" disabled={!renameValue.trim() || renameSaving}>{renameSaving ? 'Saving…' : 'Save'}</button></form> : <button type="button" className="document-title-button" title="Rename PDF" onClick={() => { setRenameValue(active.original_name.replace(/\.pdf$/i, '')); setRenaming(true); }}><strong>{active.original_name.replace(/\.pdf$/i, '')}</strong><span aria-hidden="true">✎</span></button>}<span>{pages || active.page_count} pages · stored locally</span></div><div className="reader-header-tools"><button type="button" className="find-trigger" onClick={() => setPdfFind((value) => !value)} aria-label="Search PDF" aria-keyshortcuts="Meta+f Control+f" title="Find in PDF · Ctrl/Cmd+F">⌕<span>Find</span></button><button type="button" ref={focusButtonRef} className="focus-reading-button" aria-label={focusReading ? 'Exit focus reading (Esc or F)' : 'Focus reading (F)'} aria-pressed={focusReading} aria-keyshortcuts={focusReading ? 'Escape F' : 'F'} title={focusReading ? 'Exit focus reading · Esc or F' : 'Focus reading · F'} onClick={() => changeReadingMode(!focusReading)}><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.7" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true"><path d={focusReading ? 'M4 9h5V4m11 5h-5V4M4 15h5v5m11-5h-5v5' : 'M9 4H4v5m11-5h5v5M4 15v5h5m11-5v5h-5'} /></svg><span>{focusReading ? 'Exit focus' : 'Focus reading'}</span>{focusReading ? <><kbd>Esc</kbd><span className="focus-shortcut-or">or</span><kbd>F</kbd></> : <kbd>F</kbd>}</button><button type="button" className={`note-view-button${notesVisible ? ' active' : ''}`} onClick={toggleNotes} data-tooltip={notesVisible ? 'Hide anchored notes beside the pages' : 'Show anchored notes beside the pages'} aria-pressed={notesVisible}><UiIcon kind="note" /><span className="note-view-label">{notesVisible ? 'Hide notes' : 'Notes'}</span><strong>{highlightEntries.filter((entry) => entry.note_text).length}</strong></button><button type="button" className="reader-delete-button" aria-label="Delete paper" data-tooltip="Permanently delete this paper" onClick={() => void deletePaper(active)}><TrashIcon /></button><SettingsButton compact onClick={() => setSettingsOpen(true)} /></div></header>
-      <div className={`reader-workspace${notesVisible && !focusReading ? ' notes-mode' : ''}`} ref={workspaceRef} style={{ gridTemplateColumns: `minmax(0, ${paperPercent}fr) minmax(340px, ${100 - paperPercent}fr)` }}>
+      <header className="reader-header"><div className="reader-header-start"><button className="brand-button reader-back" onClick={returnToLibrary} aria-label="Back to library" data-tooltip="Back to your library"><UiIcon kind="back" /><span className="brand-mark" aria-hidden="true">A</span><span className="reader-back-label">Library</span></button></div><div className="document-title">{renaming ? <form onSubmit={(event) => void renamePaper(event)}><input autoFocus aria-label="PDF filename" value={renameValue} maxLength={512} onChange={(event) => setRenameValue(event.target.value)} onKeyDown={(event) => { if (event.key === 'Escape') setRenaming(false); }} disabled={renameSaving} /><button type="submit" disabled={!renameValue.trim() || renameSaving}>{renameSaving ? 'Saving…' : 'Save'}</button></form> : <button type="button" className="document-title-button" title="Rename PDF" onClick={() => { setRenameValue(active.original_name.replace(/\.pdf$/i, '')); setRenaming(true); }}><strong>{active.original_name.replace(/\.pdf$/i, '')}</strong><span aria-hidden="true">✎</span></button>}<span>{pages || active.page_count} pages · stored locally</span></div><div className="reader-header-tools"><button type="button" className="find-trigger" onClick={() => setPdfFind((value) => !value)} aria-label="Search PDF" aria-keyshortcuts="Meta+f Control+f" title="Find in PDF · Ctrl/Cmd+F">⌕<span>Find</span></button><button type="button" ref={focusButtonRef} className="focus-reading-button" aria-label={focusReading ? 'Exit focus reading (Esc or F)' : 'Focus reading (F)'} aria-pressed={focusReading} aria-keyshortcuts={focusReading ? 'Escape F' : 'F'} title={focusReading ? 'Exit focus reading · Esc or F' : 'Focus reading · F'} onClick={() => changeReadingMode(!focusReading)}><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.7" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true"><path d={focusReading ? 'M4 9h5V4m11 5h-5V4M4 15h5v5m11-5h-5v5' : 'M9 4H4v5m11-5h5v5M4 15v5h5m11-5v5h-5'} /></svg><span>{focusReading ? 'Exit focus' : 'Focus reading'}</span>{focusReading ? <><kbd>Esc</kbd><span className="focus-shortcut-or">or</span><kbd>F</kbd></> : <kbd>F</kbd>}</button><button type="button" className={`note-view-button${visibleNotes ? ' active' : ''}`} onClick={toggleNotes} data-tooltip={visibleNotes ? 'Hide anchored notes beside the pages' : 'Show anchored notes beside the pages'} aria-pressed={visibleNotes}><UiIcon kind="note" /><span className="note-view-label">{visibleNotes ? 'Hide notes' : 'Notes'}</span><strong>{highlightEntries.filter((entry) => entry.note_text).length}</strong></button><button type="button" className="reader-delete-button" aria-label="Delete paper" data-tooltip="Permanently delete this paper" onClick={() => void deletePaper(active)}><TrashIcon /></button><SettingsButton compact onClick={() => setSettingsOpen(true)} /></div></header>
+      <div className={`reader-workspace${visibleNotes ? ' notes-mode' : ''}`} ref={workspaceRef} style={{ gridTemplateColumns: `minmax(0, ${paperPercent}fr) minmax(340px, ${100 - paperPercent}fr)` }}>
         {pdfFind && <div className="pdf-find-position" style={{ width: `${focusReading ? 100 : paperPercent}%` }}><PaneSearch key={active.id} kind="pdf" root={viewerRef} pdf={pdfDocument} onPage={goToPage} onClose={() => setPdfFind(false)} /></div>}
         <section className={`pdf-pane${screenshotMode ? ' screenshot-mode' : ''}`} ref={viewerRef} onScroll={trackCurrentPage} onMouseUp={() => { if (!screenshotMode) captureSelection(); }} onPointerDown={beginScreenshot} onPointerMove={moveScreenshot} onPointerUp={finishScreenshot} onPointerCancel={() => { screenshotPointerRef.current = null; setScreenshotDrag(null); setScreenshotMode(false); }}>
           <PdfDocument key={active.id} file={`${API_BASE}/api/documents/${active.id}/file`} onLoadSuccess={(pdf) => { setPdfDocument(pdf); setPages(pdf.numPages); }} loading={<div className="viewer-message">Rendering paper…</div>} error={<div className="viewer-message error-banner">Could not render this PDF.</div>}>
-            {Array.from({ length: pages }, (_, index) => { const pageEntries = highlightEntries.filter((entry) => entry.page === index + 1); const pageNotes = pageEntries.filter((entry) => entry.note_text).sort(compareNotePosition); const aiNotes = pageEntries.filter((entry) => entry.ai_links?.length).sort(compareNotePosition); const markers = pageEntries.filter((entry) => entry.note_text || entry.ai_links?.length).sort(compareNotePosition); const pageScale = zoom / BASE_RENDER_SCALE; const surfaceHeight = BASE_PAGE_WIDTH * BASE_RENDER_SCALE * aspects[index]; const mounted = isPageMounted(pageWindow, index + 1); return <div className="pdf-page-stage" data-page-number={index + 1} key={index + 1}><div className="pdf-page-wrap" style={{ zoom: pageScale, '--page-scale': pageScale } as CSSProperties}>{mounted ? <PdfPageWithHighlights pageNumber={index + 1} highlights={pageEntries} zoom={rasterZoom} height={surfaceHeight} onSize={recordPageSize} /> : <div className="pdf-raster-surface pdf-page-placeholder" style={{ width: BASE_PAGE_WIDTH * BASE_RENDER_SCALE, height: surfaceHeight }} aria-hidden="true" />}{pageEntries.filter((entry) => entry.id === revealedLinkId).map((entry) => <LinkedPassageReveal key={`${entry.id}-${linkRevealVersion}`} entry={entry} viewerRef={viewerRef} />)}{aiNotes.map((note) => <button type="button" className="ai-note-anchor" style={{ top: `${noteMarkerTop(markers, markers.indexOf(note)) * 100}%` }} title={`${note.ai_links!.length} linked AI ${note.ai_links!.length === 1 ? 'note' : 'notes'}`} aria-label="Open linked AI notes" onClick={() => { changeReadingMode(false); setPaneMode('links'); setSelectedAiNote(note); }} key={`ai-${note.id}`}>✦<small>{note.ai_links!.length}</small></button>)}{(!notesVisible || focusReading) && pageNotes.map((note) => <button type="button" className="note-anchor" style={{ top: `${noteMarkerTop(markers, markers.indexOf(note)) * 100}%`, '--note-color': note.color } as CSSProperties} title="Open note" aria-label="Open note" onClick={() => openSavedNote(note)} key={note.id}>▰</button>)}{notesVisible && !focusReading && <aside className="page-notes" aria-label={`Notes for page ${index + 1}`}>{pageNotes.map((note, noteIndex) => <button type="button" className="page-note-card" style={{ top: `${noteCardTop(pageNotes, noteIndex) * 100}%`, '--note-color': note.color } as CSSProperties} onClick={() => openSavedNote(note)} key={note.id}><span>Page {index + 1}</span><p>{note.note_text}</p><small>{note.text}</small></button>)}</aside>}<span className="page-label">{index + 1}</span></div></div>; })}
+            {Array.from({ length: pages }, (_, index) => { const pageEntries = highlightEntries.filter((entry) => entry.page === index + 1); const pageNotes = pageEntries.filter((entry) => entry.note_text).sort(compareNotePosition); const aiNotes = pageEntries.filter((entry) => entry.ai_links?.length).sort(compareNotePosition); const markers = pageEntries.filter((entry) => entry.note_text || entry.ai_links?.length).sort(compareNotePosition); const pageScale = zoom / BASE_RENDER_SCALE; const surfaceHeight = BASE_PAGE_WIDTH * BASE_RENDER_SCALE * aspects[index]; const mounted = isPageMounted(pageWindow, index + 1); return <div className="pdf-page-stage" data-page-number={index + 1} key={index + 1}><div className="pdf-page-wrap" style={{ zoom: pageScale, '--page-scale': pageScale } as CSSProperties}>{mounted ? <PdfPageWithHighlights pageNumber={index + 1} highlights={pageEntries} zoom={rasterZoom} height={surfaceHeight} onSize={recordPageSize} /> : <div className="pdf-raster-surface pdf-page-placeholder" style={{ width: BASE_PAGE_WIDTH * BASE_RENDER_SCALE, height: surfaceHeight }} aria-hidden="true" />}{pageEntries.filter((entry) => entry.id === revealedLinkId).map((entry) => <LinkedPassageReveal key={`${entry.id}-${linkRevealVersion}`} entry={entry} viewerRef={viewerRef} />)}{aiNotes.map((note) => <button type="button" className="ai-note-anchor" style={{ top: `${noteMarkerTop(markers, markers.indexOf(note)) * 100}%` }} title={`${note.ai_links!.length} linked AI ${note.ai_links!.length === 1 ? 'note' : 'notes'}`} aria-label="Open linked AI notes" onClick={() => { changeReadingMode(false); setPaneMode('links'); setSelectedAiNote(note); }} key={`ai-${note.id}`}>✦<small>{note.ai_links!.length}</small></button>)}{!visibleNotes && pageNotes.map((note) => <button type="button" className="note-anchor" style={{ top: `${noteMarkerTop(markers, markers.indexOf(note)) * 100}%`, '--note-color': note.color } as CSSProperties} title="Open note" aria-label="Open note" onClick={() => openSavedNote(note)} key={note.id}>▰</button>)}{visibleNotes && <aside className="page-notes" aria-label={`Notes for page ${index + 1}`}>{pageNotes.map((note, noteIndex) => <button type="button" className="page-note-card" style={{ top: `${noteCardTop(pageNotes, noteIndex) * 100}%`, '--note-color': note.color } as CSSProperties} onClick={() => openSavedNote(note)} key={note.id}><span>Page {index + 1}</span><p>{note.note_text}</p><small>{note.text}</small></button>)}</aside>}<span className="page-label">{index + 1}</span></div></div>; })}
           </PdfDocument>
           {screenshotMode && !screenshotDrag && <div className="screenshot-hint">Drag over the PDF to ask about it · Esc to cancel</div>}
           {screenshotDrag && <div className="screenshot-region" style={{ left: screenshotDrag.overlayLeft, top: screenshotDrag.overlayTop, width: screenshotDrag.overlayWidth, height: screenshotDrag.overlayHeight }} />}
@@ -2607,217 +2621,6 @@ function SettingsDialog({ onClose }: { onClose: () => void }) {
       <div className="settings-footer"><span role="status" className={status.includes('active') || status.includes('saved') ? 'save-success' : ''}>{status}</span><div><kbd>Esc</kbd><button type="button" className="secondary-button" onClick={onClose}>Close</button>{settingsTab === 'providers' ? <button type="button" className="primary-button" disabled={!settings || !hasPendingModel || saving || !settings.providers[provider]} onClick={() => void persist()}>{saving ? 'Applying…' : 'Apply model'}</button> : settingsTab === 'titles' ? <button type="button" className="primary-button" disabled={!settings || !titleModel.trim() || !settings.providers[titleProvider] || (titleProvider === settings.title_provider && titleModel === settings.title_model) || saving} onClick={() => void saveTitleModel()}>{saving ? 'Saving…' : 'Save title model'}</button> : <button type="button" className="primary-button" disabled={!settings || !systemPrompt.trim() || !quickAskPrompt.trim() || (systemPrompt.trim() === settings.system_prompt && quickAskPrompt.trim() === settings.quick_ask_prompt) || saving} onClick={() => void saveSystemPrompt()}>{saving ? 'Saving…' : 'Save prompt'}</button>}</div></div>
     </div>
   </div>;
-}
-
-const NOTE_ALLOWED_TAGS = new Set(['P', 'DIV', 'BR', 'H1', 'H2', 'H3', 'H4', 'H5', 'UL', 'OL', 'LI', 'BLOCKQUOTE', 'CITE', 'STRONG', 'B', 'EM', 'I', 'U', 'S', 'A', 'CODE', 'PRE', 'INPUT']);
-
-function sanitizeNoteHtml(source: string) {
-  const document = new DOMParser().parseFromString(source, 'text/html');
-  for (const element of Array.from(document.body.querySelectorAll('*'))) {
-    if (!NOTE_ALLOWED_TAGS.has(element.tagName)) {
-      element.replaceWith(...Array.from(element.childNodes));
-      continue;
-    }
-    const linkHref = element.tagName === 'A' ? element.getAttribute('href') ?? '' : '';
-    const checked = element.tagName === 'INPUT' && (element as HTMLInputElement).checked;
-    for (const attribute of Array.from(element.attributes)) element.removeAttribute(attribute.name);
-    if (element.tagName === 'A') {
-      if (/^https?:\/\//i.test(linkHref)) {
-        element.setAttribute('href', linkHref);
-        element.setAttribute('target', '_blank');
-        element.setAttribute('rel', 'noreferrer');
-      }
-    }
-    if (element.tagName === 'INPUT') {
-      element.setAttribute('type', 'checkbox');
-      element.setAttribute('contenteditable', 'false');
-      if (checked) element.setAttribute('checked', '');
-    }
-  }
-  return document.body.innerHTML;
-}
-
-function PaperNoteEditor({ documentId, paperName, pendingQuote, onQuoteConsumed }: { documentId: string; paperName: string; pendingQuote: ContextSelection | null; onQuoteConsumed: () => void }) {
-  const editorRef = useRef<HTMLDivElement>(null);
-  const revisionRef = useRef(0);
-  const saveTimerRef = useRef<number | null>(null);
-  const saveSequenceRef = useRef(Promise.resolve());
-  const insertedQuoteRef = useRef<string | null>(null);
-  const [status, setStatus] = useState<'loading' | 'saved' | 'saving' | 'error'>('loading');
-  const [errorMessage, setErrorMessage] = useState('');
-  const [empty, setEmpty] = useState(true);
-
-  useEffect(() => {
-    let cancelled = false;
-    void fetch(`${API_BASE}/api/documents/${documentId}/paper-note`).then(async (response) => {
-      const payload = await response.json() as PaperNote & { detail?: string };
-      if (!response.ok) throw new Error(payload.detail ?? 'Could not load this note.');
-      if (cancelled || !editorRef.current) return;
-      revisionRef.current = payload.revision;
-      editorRef.current.innerHTML = sanitizeNoteHtml(payload.content_html);
-      setEmpty(!payload.plain_text.trim());
-      setStatus('saved');
-    }).catch((reason) => { if (!cancelled) { setErrorMessage(reason instanceof Error ? reason.message : 'Could not load this note.'); setStatus('error'); } });
-    return () => { cancelled = true; if (saveTimerRef.current !== null) window.clearTimeout(saveTimerRef.current); };
-  }, [documentId]);
-
-  const save = useCallback(() => {
-    const editor = editorRef.current;
-    if (!editor) return Promise.resolve();
-    const content_html = sanitizeNoteHtml(editor.innerHTML);
-    const plain_text = editor.innerText;
-    setStatus('saving'); setErrorMessage('');
-    const operation = async () => {
-      const response = await fetch(`${API_BASE}/api/documents/${documentId}/paper-note`, { method: 'PUT', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ content_html, plain_text, revision: revisionRef.current }) });
-      const payload = await response.json() as PaperNote & { detail?: string };
-      if (!response.ok) throw new Error(payload.detail ?? 'Could not save this note.');
-      revisionRef.current = payload.revision;
-      setStatus('saved');
-    };
-    saveSequenceRef.current = saveSequenceRef.current.then(operation).catch((reason) => { setErrorMessage(reason instanceof Error ? reason.message : 'Could not save this note.'); setStatus('error'); });
-    return saveSequenceRef.current;
-  }, [documentId]);
-
-  function changed() {
-    setEmpty(!(editorRef.current?.innerText.trim()));
-    setStatus('saving');
-    if (saveTimerRef.current !== null) window.clearTimeout(saveTimerRef.current);
-    saveTimerRef.current = window.setTimeout(() => void save(), 650);
-  }
-
-  useEffect(() => {
-    const editor = editorRef.current;
-    if (!pendingQuote || status === 'loading' || !editor || insertedQuoteRef.current === pendingQuote.id) return;
-    insertedQuoteRef.current = pendingQuote.id;
-    const quote = document.createElement('blockquote');
-    quote.className = 'paper-source-quote';
-    const content = document.createElement('p');
-    content.textContent = pendingQuote.text;
-    const citation = document.createElement('cite');
-    citation.textContent = pendingQuote.page ? `Quoted from paper · Page ${pendingQuote.page}` : 'Quoted from paper';
-    quote.append(content, citation);
-    const nextLine = document.createElement('p');
-    nextLine.append(document.createElement('br'));
-    editor.append(quote, nextLine);
-    setEmpty(false);
-    changed();
-    placeCaretAtStart(nextLine);
-    quote.scrollIntoView({ behavior: 'smooth', block: 'center' });
-    onQuoteConsumed();
-    // The pending quote is an external insertion request; `changed` schedules its autosave.
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [pendingQuote, status]);
-
-  function command(name: string, value?: string) {
-    editorRef.current?.focus();
-    document.execCommand(name, false, value);
-    changed();
-  }
-
-  async function addLink() {
-    const selection = window.getSelection();
-    const range = selection?.rangeCount ? selection.getRangeAt(0).cloneRange() : null;
-    const href = await requestAppDialog({ title: 'Add a link', input: true, confirm: 'Insert link' });
-    if (href && /^https?:\/\//i.test(href)) { editorRef.current?.focus(); if (range) { const current = window.getSelection(); current?.removeAllRanges(); current?.addRange(range); } command('createLink', href); }
-  }
-
-  function addChecklist() {
-    editorRef.current?.focus();
-    document.execCommand('insertHTML', false, '<ul class="note-checklist"><li><input type="checkbox" contenteditable="false">&nbsp;Task</li></ul><p><br></p>');
-    changed();
-  }
-
-  function placeCaretAtStart(element: HTMLElement) {
-    const range = document.createRange();
-    range.selectNodeContents(element);
-    range.collapse(true);
-    const selection = window.getSelection();
-    selection?.removeAllRanges();
-    selection?.addRange(range);
-  }
-
-  function exitEmptyFormat(event: React.KeyboardEvent<HTMLDivElement>) {
-    if (event.key !== 'Backspace' || !editorRef.current) return false;
-    const selection = window.getSelection();
-    if (!selection?.rangeCount || !selection.isCollapsed || !editorRef.current) return;
-    const node = selection.anchorNode?.nodeType === Node.TEXT_NODE ? selection.anchorNode.parentElement : selection.anchorNode as HTMLElement | null;
-    const listItem = node?.closest('li');
-    const formattedBlock = node?.closest('h1, h2, h3, h4, h5, blockquote');
-    const target = listItem ?? formattedBlock;
-    if (!target || !editorRef.current.contains(target) || (target.textContent ?? '').replace(/\u00a0/g, ' ').trim()) return false;
-    event.preventDefault();
-    const paragraph = document.createElement('p');
-    paragraph.append(document.createElement('br'));
-    if (listItem) {
-      const list = listItem.parentElement!;
-      const trailingList = listItem.nextElementSibling ? list.cloneNode(false) as HTMLElement : null;
-      while (listItem.nextElementSibling) trailingList!.append(listItem.nextElementSibling);
-      list.after(paragraph);
-      if (trailingList?.children.length) paragraph.after(trailingList);
-      listItem.remove();
-      if (!list.children.length) list.remove();
-    } else {
-      target.replaceWith(paragraph);
-    }
-    placeCaretAtStart(paragraph);
-    changed();
-    return true;
-  }
-
-  function applyInputRule(event: React.KeyboardEvent<HTMLDivElement>) {
-    if (exitEmptyFormat(event)) return;
-    if (event.key !== ' ' || event.metaKey || event.ctrlKey || event.altKey || event.nativeEvent.isComposing) return;
-    const selection = window.getSelection();
-    const editor = editorRef.current;
-    if (!selection?.rangeCount || !selection.isCollapsed || !editor || !selection.anchorNode || !editor.contains(selection.anchorNode)) return;
-    let block = selection.anchorNode.nodeType === Node.TEXT_NODE ? selection.anchorNode.parentElement : selection.anchorNode as HTMLElement | null;
-    // The first line may be bare text in the editor, while later lines are
-    // paragraphs. Never walk above the editor or combine existing paragraphs.
-    while (block && block !== editor && block.parentElement && block.parentElement !== editor) block = block.parentElement;
-    if (!block || (block !== editor && block.parentElement !== editor)) return;
-    const atRoot = block === editor;
-    if (atRoot && editor.querySelector('p, div, h1, h2, h3, h4, h5, ul, ol, blockquote')) return;
-    const beforeCaret = document.createRange();
-    beforeCaret.selectNodeContents(block);
-    beforeCaret.setEnd(selection.anchorNode, selection.anchorOffset);
-    const prefix = beforeCaret.toString().replace(/\u00a0/g, ' ');
-    if (prefix !== (block.textContent ?? '').replace(/\u00a0/g, ' ')) return;
-    const heading = /^(#{1,5})$/.exec(prefix);
-    const unordered = /^[-*+]$/.test(prefix);
-    const ordered = /^1\.$/.test(prefix);
-    const quote = prefix === '>';
-    const task = /^- \[(?: |x|X)\]$/.test(prefix);
-    if (!heading && !unordered && !ordered && !quote && !task) return;
-    event.preventDefault();
-    if (atRoot) {
-      const wrapper = document.createElement('div');
-      wrapper.append(...Array.from(editor.childNodes));
-      editor.append(wrapper);
-      block = wrapper;
-    }
-    const range = document.createRange();
-    range.selectNodeContents(block);
-    selection.removeAllRanges(); selection.addRange(range);
-    document.execCommand('delete');
-    if (heading) document.execCommand('formatBlock', false, `h${heading[1].length}`);
-    else if (unordered) document.execCommand('insertUnorderedList');
-    else if (ordered) document.execCommand('insertOrderedList');
-    else if (quote) document.execCommand('formatBlock', false, 'blockquote');
-    else document.execCommand('insertHTML', false, `<ul><li><input type="checkbox" contenteditable="false"${/[xX]/.test(prefix) ? ' checked' : ''}>&nbsp;</li></ul>`);
-    changed();
-  }
-
-  return <section className="paper-note-mode">
-    <header className="paper-note-header"><div><span>Paper note</span><h2>{paperName}</h2></div><small className={`paper-note-status ${status}`} role="status">{status === 'loading' ? 'Loading…' : status === 'saving' ? 'Saving…' : status === 'error' ? 'Not saved' : 'Saved'}</small></header>
-    <div className="paper-note-toolbar" role="toolbar" aria-label="Note formatting" onMouseDown={(event) => event.preventDefault()}>
-      <button type="button" title="Heading 1" onClick={() => command('formatBlock', 'h1')}>H1</button><button type="button" title="Heading 2" onClick={() => command('formatBlock', 'h2')}>H2</button><button type="button" title="Paragraph" onClick={() => command('formatBlock', 'p')}>¶</button><i />
-      <button type="button" title="Bold" onClick={() => command('bold')}><strong>B</strong></button><button type="button" title="Italic" onClick={() => command('italic')}><em>I</em></button><button type="button" title="Link" onClick={addLink}>↗</button><i />
-      <button type="button" title="Bulleted list" onClick={() => command('insertUnorderedList')}>• List</button><button type="button" title="Numbered list" onClick={() => command('insertOrderedList')}>1. List</button><button type="button" title="Checklist" onClick={addChecklist}>☐</button><button type="button" title="Quote" onClick={() => command('formatBlock', 'blockquote')}>❝</button>
-      <span /><button type="button" title="Undo" onClick={() => command('undo')}>↶</button><button type="button" title="Redo" onClick={() => command('redo')}>↷</button>
-    </div>
-    <div className="paper-note-canvas"><div ref={editorRef} className="paper-note-editor" contentEditable suppressContentEditableWarning role="textbox" aria-multiline="true" aria-label="Paper note" spellCheck onKeyDown={applyInputRule} onInput={changed} onClick={(event) => { if ((event.target as HTMLElement).matches('input[type="checkbox"]')) changed(); }} onBlur={() => void save()} /><div className={`paper-note-placeholder${empty ? ' visible' : ''}`} aria-hidden="true"><strong>Start writing about this paper…</strong><span>Try # through ##### for headings, - for bullets, 1. for numbers, - [ ] for tasks, or &gt; for quotes.</span></div></div>
-    {errorMessage && <button type="button" className="paper-note-error" onClick={() => void save()}>{errorMessage} Click to retry.</button>}
-  </section>;
 }
 
 function WebEvidence({ web }: { web?: WebInfo | null }) {
