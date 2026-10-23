@@ -26,8 +26,8 @@ from .services.documents import document_file_path, ingest_pdf
 from .services.thumbnails import THUMBNAIL_MEDIA_TYPE, THUMBNAIL_WIDTHS, ThumbnailBusy, ensure_thumbnail, remove_thumbnails, shutdown_thumbnail_workers, thumbnail_etag
 from .services.llm import AnthropicProvider, GoogleProvider, OpenAICompatibleProvider, OpenAIResponsesProvider, TITLE_SYSTEM_PROMPT, clean_title, generate_zen_title, sse
 from .services.web_search import asks_for_citing_papers, plan_search, previous_sources, search_citing_papers, search_web, web_context
-from .schemas import PaperCandidate, PaperImportIn, PaperSearchOut
-from .services.paper_discovery import discover, download_pdf, existing_paper, resolve_pdf
+from .schemas import PaperCandidate, PaperImportIn, PaperSearchOut, PdfLinkIn, PdfLinkOut
+from .services.paper_discovery import discover, download_pdf, existing_paper, resolve_pdf, verify_pdf_link
 
 settings = get_settings()
 run_migrations()
@@ -65,6 +65,17 @@ async def resolve_paper(paper: PaperCandidate):
             return await resolve_pdf(paper)
     except (httpx.HTTPError, OSError, TimeoutError):
         raise HTTPException(502, "The source could not be reached. Open its page or try another result.") from None
+
+
+@app.post("/api/paper-discovery/verify-link", response_model=PdfLinkOut)
+async def check_pdf_link(request: PdfLinkIn, db: Session = Depends(get_db)):
+    try:
+        result = await verify_pdf_link(request.url, settings.max_upload_mb * 1024 * 1024)
+        if existing := existing_paper(db, result['paper']):
+            result['paper'].existing_document_id = existing.id
+        return result
+    except (httpx.HTTPError, OSError, TimeoutError):
+        raise HTTPException(502, 'The PDF could not be reached. Check the link and try again.') from None
 
 
 @app.post("/api/paper-discovery/import", response_model=DocumentOut)
