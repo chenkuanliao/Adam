@@ -12,7 +12,7 @@ The current vertical slice supports:
 - chat history search across titles, questions, and answers for the current paper, with matching snippets and direct navigation into a matching chat
 - a floating reader dock with editable page and zoom controls, plus a matching editable chat text percentage
 - Continue reading with browser-local saved page, zoom, and reading position
-- full-window focus reading: click **Focus reading** or press `F` to hide the sidebar and anchored note cards while keeping note and chat-link icons available; use **Exit focus** or `Esc` to restore your workspace, zoom, and reading position
+- full-window focus reading: click **Focus reading** or press `F` to hide the sidebar and anchored note cards while keeping note and chat-link icons available; toggle **Notes** to show anchored note cards beside the PDF without leaving focus mode; use **Exit focus** or `Esc` to restore your workspace, zoom, and reading position
 - local native-text extraction with PyMuPDF
 - per-paper chat histories with temporary empty chats, autosaved unsent drafts, switch, delete, and reload restoration
 - automatic full-paper context for every question, with selected passages and images treated as explicit focus
