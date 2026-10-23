@@ -991,7 +991,8 @@ kbd { display: inline-grid; place-items: center; min-width: 18px; height: 18px; 
 .focus-reading-button kbd{padding:2px 4px;border:1px solid #cad5c5;border-radius:4px;font:9px inherit;color:#6e8264}
 .reader-shell.focus-reading{height:100dvh}
 .focus-reading .reader-header{height:54px;padding:0 22px;gap:20px;grid-template-columns:minmax(0,1fr) minmax(0,2fr) minmax(0,1fr);background:#f8f9f3}
-.focus-reading .reader-header>.brand-button,.focus-reading .note-view-button,.focus-reading .reader-delete-button,.focus-reading .reader-header-tools>.settings-button{display:none}
+.focus-reading .reader-header>.brand-button,.focus-reading .reader-delete-button,.focus-reading .reader-header-tools>.settings-button{display:none}
+.focus-reading .note-view-button{flex-shrink:0;white-space:nowrap}
 .focus-reading .document-title{grid-column:2;position:static;transform:none;max-width:none;min-width:0;text-align:center}
 .focus-reading .document-title-button{justify-content:center}
 .focus-reading .document-title>span{display:block}

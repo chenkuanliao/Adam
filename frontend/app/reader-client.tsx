@@ -128,8 +128,10 @@ export default function Home() {
   const [noteEditor, setNoteEditor] = useState<NoteEditor | null>(null);
   const [notesVisible, setNotesVisible] = useState(false);
   const [focusReading, setFocusReading] = useState(false);
+  const [focusNotesVisible, setFocusNotesVisible] = useState(false);
+  const visibleNotes = focusReading ? focusNotesVisible : notesVisible;
   const focusButtonRef = useRef<HTMLButtonElement>(null);
-  const focusWorkspaceRef = useRef<{ zoom: number; fit: boolean } | null>(null);
+  const focusWorkspaceRef = useRef<{ zoom: number; fit: boolean; notesVisible: boolean } | null>(null);
   const readingAnchorRef = useRef<{ page: number; offset: number } | null>(null);
   const [noteSaving, setNoteSaving] = useState(false);
   const [questionStore] = useState(createTextStore);
@@ -431,7 +433,7 @@ export default function Home() {
     if (!viewer) return;
     const styles = window.getComputedStyle(viewer);
     const horizontalPadding = parseFloat(styles.paddingLeft) + parseFloat(styles.paddingRight);
-    const availableWidth = viewer.clientWidth - horizontalPadding - 34 - (notesVisibleRef.current && !focusWorkspaceRef.current ? NOTE_RAIL_WIDTH : 0);
+    const availableWidth = viewer.clientWidth - horizontalPadding - 34 - (notesVisibleRef.current ? NOTE_RAIL_WIDTH : 0);
     if (availableWidth <= 0) return;
     const fittedZoom = Math.min(MAX_ZOOM, Math.max(MIN_ZOOM, Math.floor(availableWidth / BASE_PAGE_WIDTH * 100) / 100));
     changeZoom(fittedZoom - zoomRef.current);
@@ -449,7 +451,13 @@ export default function Home() {
         readingAnchorRef.current = { page: Number(page.dataset.pageNumber), offset: (top - rect.top) / rect.height };
       }
     }
-    if (opening) focusWorkspaceRef.current = { zoom: zoomRef.current, fit: fitZoomRef.current };
+    if (opening) {
+      focusWorkspaceRef.current = { zoom: zoomRef.current, fit: fitZoomRef.current, notesVisible: notesVisibleRef.current };
+      notesVisibleRef.current = false;
+      setFocusNotesVisible(false);
+    } else if (focusWorkspaceRef.current) {
+      notesVisibleRef.current = focusWorkspaceRef.current.notesVisible;
+    }
     setPendingSelection(null);
     setScreenshotSelection(null);
     setFocusReading(opening);
@@ -498,6 +506,11 @@ export default function Home() {
   function toggleNotes() {
     const opening = !notesVisibleRef.current;
     notesVisibleRef.current = opening;
+    if (focusWorkspaceRef.current) {
+      setFocusNotesVisible(opening);
+      window.requestAnimationFrame(() => fitPaperToPane());
+      return;
+    }
     setNotesVisible(opening);
     if (opening) {
       zoomBeforeNotesRef.current = zoomRef.current;
@@ -634,7 +647,7 @@ export default function Home() {
   }, [zoom]);
 
   // Zoom, page count, and note/focus layout all move pages without scrolling.
-  useLayoutEffect(() => updatePageWindow(), [pages, zoom, notesVisible, focusReading, updatePageWindow]);
+  useLayoutEffect(() => updatePageWindow(), [pages, zoom, visibleNotes, focusReading, updatePageWindow]);
 
   useLayoutEffect(() => {
     if (!focusComposerAfterContextRef.current || contextSelections.length === 0) return;
@@ -942,6 +955,7 @@ export default function Home() {
     setPendingSelection(null);
     setNoteEditor(null);
     setNotesVisible(false);
+    setFocusNotesVisible(false);
     notesVisibleRef.current = false;
     zoomBeforeNotesRef.current = null;
     clearHighlights();
@@ -1628,8 +1642,8 @@ export default function Home() {
   }
 
   function openSavedNote(entry: HighlightEntry) {
-    changeReadingMode(false);
-    // Wait for the restored split and reading anchor before placing the editor.
+    if (!focusNotesVisible) changeReadingMode(false);
+    // Wait for any restored split and reading anchor before placing the editor.
     window.requestAnimationFrame(() => window.requestAnimationFrame(() => positionSavedNote(entry)));
   }
 
@@ -1969,12 +1983,12 @@ export default function Home() {
     <main className={`reader-shell${focusReading ? ' focus-reading' : ''}`}>
       <ActionTooltips />
       <AppDialogs />
-      <header className="reader-header"><div className="reader-header-start"><button className="brand-button reader-back" onClick={returnToLibrary} aria-label="Back to library" data-tooltip="Back to your library"><UiIcon kind="back" /><span className="brand-mark" aria-hidden="true">A</span><span className="reader-back-label">Library</span></button></div><div className="document-title">{renaming ? <form onSubmit={(event) => void renamePaper(event)}><input autoFocus aria-label="PDF filename" value={renameValue} maxLength={512} onChange={(event) => setRenameValue(event.target.value)} onKeyDown={(event) => { if (event.key === 'Escape') setRenaming(false); }} disabled={renameSaving} /><button type="submit" disabled={!renameValue.trim() || renameSaving}>{renameSaving ? 'Saving…' : 'Save'}</button></form> : <button type="button" className="document-title-button" title="Rename PDF" onClick={() => { setRenameValue(active.original_name.replace(/\.pdf$/i, '')); setRenaming(true); }}><strong>{active.original_name.replace(/\.pdf$/i, '')}</strong><span aria-hidden="true">✎</span></button>}<span>{pages || active.page_count} pages · stored locally</span></div><div className="reader-header-tools"><button type="button" className="find-trigger" onClick={() => setPdfFind((value) => !value)} aria-label="Search PDF" aria-keyshortcuts="Meta+f Control+f" title="Find in PDF · Ctrl/Cmd+F">⌕<span>Find</span></button><button type="button" ref={focusButtonRef} className="focus-reading-button" aria-label={focusReading ? 'Exit focus reading (Esc or F)' : 'Focus reading (F)'} aria-pressed={focusReading} aria-keyshortcuts={focusReading ? 'Escape F' : 'F'} title={focusReading ? 'Exit focus reading · Esc or F' : 'Focus reading · F'} onClick={() => changeReadingMode(!focusReading)}><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.7" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true"><path d={focusReading ? 'M4 9h5V4m11 5h-5V4M4 15h5v5m11-5h-5v5' : 'M9 4H4v5m11-5h5v5M4 15v5h5m11-5v5h-5'} /></svg><span>{focusReading ? 'Exit focus' : 'Focus reading'}</span>{focusReading ? <><kbd>Esc</kbd><span className="focus-shortcut-or">or</span><kbd>F</kbd></> : <kbd>F</kbd>}</button><button type="button" className={`note-view-button${notesVisible ? ' active' : ''}`} onClick={toggleNotes} data-tooltip={notesVisible ? 'Hide anchored notes beside the pages' : 'Show anchored notes beside the pages'} aria-pressed={notesVisible}><UiIcon kind="note" /><span className="note-view-label">{notesVisible ? 'Hide notes' : 'Notes'}</span><strong>{highlightEntries.filter((entry) => entry.note_text).length}</strong></button><button type="button" className="reader-delete-button" aria-label="Delete paper" data-tooltip="Permanently delete this paper" onClick={() => void deletePaper(active)}><TrashIcon /></button><SettingsButton compact onClick={() => setSettingsOpen(true)} /></div></header>
-      <div className={`reader-workspace${notesVisible && !focusReading ? ' notes-mode' : ''}`} ref={workspaceRef} style={{ gridTemplateColumns: `minmax(0, ${paperPercent}fr) minmax(340px, ${100 - paperPercent}fr)` }}>
+      <header className="reader-header"><div className="reader-header-start"><button className="brand-button reader-back" onClick={returnToLibrary} aria-label="Back to library" data-tooltip="Back to your library"><UiIcon kind="back" /><span className="brand-mark" aria-hidden="true">A</span><span className="reader-back-label">Library</span></button></div><div className="document-title">{renaming ? <form onSubmit={(event) => void renamePaper(event)}><input autoFocus aria-label="PDF filename" value={renameValue} maxLength={512} onChange={(event) => setRenameValue(event.target.value)} onKeyDown={(event) => { if (event.key === 'Escape') setRenaming(false); }} disabled={renameSaving} /><button type="submit" disabled={!renameValue.trim() || renameSaving}>{renameSaving ? 'Saving…' : 'Save'}</button></form> : <button type="button" className="document-title-button" title="Rename PDF" onClick={() => { setRenameValue(active.original_name.replace(/\.pdf$/i, '')); setRenaming(true); }}><strong>{active.original_name.replace(/\.pdf$/i, '')}</strong><span aria-hidden="true">✎</span></button>}<span>{pages || active.page_count} pages · stored locally</span></div><div className="reader-header-tools"><button type="button" className="find-trigger" onClick={() => setPdfFind((value) => !value)} aria-label="Search PDF" aria-keyshortcuts="Meta+f Control+f" title="Find in PDF · Ctrl/Cmd+F">⌕<span>Find</span></button><button type="button" ref={focusButtonRef} className="focus-reading-button" aria-label={focusReading ? 'Exit focus reading (Esc or F)' : 'Focus reading (F)'} aria-pressed={focusReading} aria-keyshortcuts={focusReading ? 'Escape F' : 'F'} title={focusReading ? 'Exit focus reading · Esc or F' : 'Focus reading · F'} onClick={() => changeReadingMode(!focusReading)}><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.7" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true"><path d={focusReading ? 'M4 9h5V4m11 5h-5V4M4 15h5v5m11-5h-5v5' : 'M9 4H4v5m11-5h5v5M4 15v5h5m11-5v5h-5'} /></svg><span>{focusReading ? 'Exit focus' : 'Focus reading'}</span>{focusReading ? <><kbd>Esc</kbd><span className="focus-shortcut-or">or</span><kbd>F</kbd></> : <kbd>F</kbd>}</button><button type="button" className={`note-view-button${visibleNotes ? ' active' : ''}`} onClick={toggleNotes} data-tooltip={visibleNotes ? 'Hide anchored notes beside the pages' : 'Show anchored notes beside the pages'} aria-pressed={visibleNotes}><UiIcon kind="note" /><span className="note-view-label">{visibleNotes ? 'Hide notes' : 'Notes'}</span><strong>{highlightEntries.filter((entry) => entry.note_text).length}</strong></button><button type="button" className="reader-delete-button" aria-label="Delete paper" data-tooltip="Permanently delete this paper" onClick={() => void deletePaper(active)}><TrashIcon /></button><SettingsButton compact onClick={() => setSettingsOpen(true)} /></div></header>
+      <div className={`reader-workspace${visibleNotes ? ' notes-mode' : ''}`} ref={workspaceRef} style={{ gridTemplateColumns: `minmax(0, ${paperPercent}fr) minmax(340px, ${100 - paperPercent}fr)` }}>
         {pdfFind && <div className="pdf-find-position" style={{ width: `${focusReading ? 100 : paperPercent}%` }}><PaneSearch key={active.id} kind="pdf" root={viewerRef} pdf={pdfDocument} onPage={goToPage} onClose={() => setPdfFind(false)} /></div>}
         <section className={`pdf-pane${screenshotMode ? ' screenshot-mode' : ''}`} ref={viewerRef} onScroll={trackCurrentPage} onMouseUp={() => { if (!screenshotMode) captureSelection(); }} onPointerDown={beginScreenshot} onPointerMove={moveScreenshot} onPointerUp={finishScreenshot} onPointerCancel={() => { screenshotPointerRef.current = null; setScreenshotDrag(null); setScreenshotMode(false); }}>
           <PdfDocument key={active.id} file={`${API_BASE}/api/documents/${active.id}/file`} onLoadSuccess={(pdf) => { setPdfDocument(pdf); setPages(pdf.numPages); }} loading={<div className="viewer-message">Rendering paper…</div>} error={<div className="viewer-message error-banner">Could not render this PDF.</div>}>
-            {Array.from({ length: pages }, (_, index) => { const pageEntries = highlightEntries.filter((entry) => entry.page === index + 1); const pageNotes = pageEntries.filter((entry) => entry.note_text).sort(compareNotePosition); const aiNotes = pageEntries.filter((entry) => entry.ai_links?.length).sort(compareNotePosition); const markers = pageEntries.filter((entry) => entry.note_text || entry.ai_links?.length).sort(compareNotePosition); const pageScale = zoom / BASE_RENDER_SCALE; const surfaceHeight = BASE_PAGE_WIDTH * BASE_RENDER_SCALE * aspects[index]; const mounted = isPageMounted(pageWindow, index + 1); return <div className="pdf-page-stage" data-page-number={index + 1} key={index + 1}><div className="pdf-page-wrap" style={{ zoom: pageScale, '--page-scale': pageScale } as CSSProperties}>{mounted ? <PdfPageWithHighlights pageNumber={index + 1} highlights={pageEntries} zoom={rasterZoom} height={surfaceHeight} onSize={recordPageSize} /> : <div className="pdf-raster-surface pdf-page-placeholder" style={{ width: BASE_PAGE_WIDTH * BASE_RENDER_SCALE, height: surfaceHeight }} aria-hidden="true" />}{pageEntries.filter((entry) => entry.id === revealedLinkId).map((entry) => <LinkedPassageReveal key={`${entry.id}-${linkRevealVersion}`} entry={entry} viewerRef={viewerRef} />)}{aiNotes.map((note) => <button type="button" className="ai-note-anchor" style={{ top: `${noteMarkerTop(markers, markers.indexOf(note)) * 100}%` }} title={`${note.ai_links!.length} linked AI ${note.ai_links!.length === 1 ? 'note' : 'notes'}`} aria-label="Open linked AI notes" onClick={() => { changeReadingMode(false); setPaneMode('links'); setSelectedAiNote(note); }} key={`ai-${note.id}`}>✦<small>{note.ai_links!.length}</small></button>)}{(!notesVisible || focusReading) && pageNotes.map((note) => <button type="button" className="note-anchor" style={{ top: `${noteMarkerTop(markers, markers.indexOf(note)) * 100}%`, '--note-color': note.color } as CSSProperties} title="Open note" aria-label="Open note" onClick={() => openSavedNote(note)} key={note.id}>▰</button>)}{notesVisible && !focusReading && <aside className="page-notes" aria-label={`Notes for page ${index + 1}`}>{pageNotes.map((note, noteIndex) => <button type="button" className="page-note-card" style={{ top: `${noteCardTop(pageNotes, noteIndex) * 100}%`, '--note-color': note.color } as CSSProperties} onClick={() => openSavedNote(note)} key={note.id}><span>Page {index + 1}</span><p>{note.note_text}</p><small>{note.text}</small></button>)}</aside>}<span className="page-label">{index + 1}</span></div></div>; })}
+            {Array.from({ length: pages }, (_, index) => { const pageEntries = highlightEntries.filter((entry) => entry.page === index + 1); const pageNotes = pageEntries.filter((entry) => entry.note_text).sort(compareNotePosition); const aiNotes = pageEntries.filter((entry) => entry.ai_links?.length).sort(compareNotePosition); const markers = pageEntries.filter((entry) => entry.note_text || entry.ai_links?.length).sort(compareNotePosition); const pageScale = zoom / BASE_RENDER_SCALE; const surfaceHeight = BASE_PAGE_WIDTH * BASE_RENDER_SCALE * aspects[index]; const mounted = isPageMounted(pageWindow, index + 1); return <div className="pdf-page-stage" data-page-number={index + 1} key={index + 1}><div className="pdf-page-wrap" style={{ zoom: pageScale, '--page-scale': pageScale } as CSSProperties}>{mounted ? <PdfPageWithHighlights pageNumber={index + 1} highlights={pageEntries} zoom={rasterZoom} height={surfaceHeight} onSize={recordPageSize} /> : <div className="pdf-raster-surface pdf-page-placeholder" style={{ width: BASE_PAGE_WIDTH * BASE_RENDER_SCALE, height: surfaceHeight }} aria-hidden="true" />}{pageEntries.filter((entry) => entry.id === revealedLinkId).map((entry) => <LinkedPassageReveal key={`${entry.id}-${linkRevealVersion}`} entry={entry} viewerRef={viewerRef} />)}{aiNotes.map((note) => <button type="button" className="ai-note-anchor" style={{ top: `${noteMarkerTop(markers, markers.indexOf(note)) * 100}%` }} title={`${note.ai_links!.length} linked AI ${note.ai_links!.length === 1 ? 'note' : 'notes'}`} aria-label="Open linked AI notes" onClick={() => { changeReadingMode(false); setPaneMode('links'); setSelectedAiNote(note); }} key={`ai-${note.id}`}>✦<small>{note.ai_links!.length}</small></button>)}{!visibleNotes && pageNotes.map((note) => <button type="button" className="note-anchor" style={{ top: `${noteMarkerTop(markers, markers.indexOf(note)) * 100}%`, '--note-color': note.color } as CSSProperties} title="Open note" aria-label="Open note" onClick={() => openSavedNote(note)} key={note.id}>▰</button>)}{visibleNotes && <aside className="page-notes" aria-label={`Notes for page ${index + 1}`}>{pageNotes.map((note, noteIndex) => <button type="button" className="page-note-card" style={{ top: `${noteCardTop(pageNotes, noteIndex) * 100}%`, '--note-color': note.color } as CSSProperties} onClick={() => openSavedNote(note)} key={note.id}><span>Page {index + 1}</span><p>{note.note_text}</p><small>{note.text}</small></button>)}</aside>}<span className="page-label">{index + 1}</span></div></div>; })}
           </PdfDocument>
           {screenshotMode && !screenshotDrag && <div className="screenshot-hint">Drag over the PDF to ask about it · Esc to cancel</div>}
           {screenshotDrag && <div className="screenshot-region" style={{ left: screenshotDrag.overlayLeft, top: screenshotDrag.overlayTop, width: screenshotDrag.overlayWidth, height: screenshotDrag.overlayHeight }} />}
