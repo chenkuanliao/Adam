@@ -3,11 +3,11 @@
 import { useEffect, useRef, useState } from 'react';
 import PaperDiscovery from './paper-discovery';
 import { FolderIcon, folderStyle } from './folder-appearance';
-import { Icon, type Folder, type LibraryPaper } from './library-dashboard';
+import { Icon, archivedFolderIds, isPaperArchived, type Folder, type LibraryPaper } from './library-dashboard';
 
 type Result = { kind: 'folder'; folder: Folder } | { kind: 'paper'; paper: LibraryPaper };
 
-export default function LibrarySpotlight({ papers, onClose, onOpen, onBrowseFolder, initialMode = 'library', initialFolderId = null, onImported }: {
+export default function LibrarySpotlight({ papers: allPapers, onClose, onOpen, onBrowseFolder, initialMode = 'library', initialFolderId = null, onImported }: {
   papers: LibraryPaper[];
   initialMode?: 'library' | 'online';
   initialFolderId?: string | null;
@@ -20,13 +20,17 @@ export default function LibrarySpotlight({ papers, onClose, onOpen, onBrowseFold
   const [query, setQuery] = useState('');
   const [link, setLink] = useState('');
   const [selected, setSelected] = useState(0);
-  const [folders, setFolders] = useState<Folder[]>([]);
+  const [allFolders, setFolders] = useState<Folder[]>([]);
   const [scope, setScope] = useState<Folder | null>(null);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState('');
   const dialogRef = useRef<HTMLDialogElement>(null);
   const inputRef = useRef<HTMLInputElement>(null);
   const resultsRef = useRef<HTMLDivElement>(null);
+  // Archived items stay out of search; discovery still sees every paper to reuse existing copies.
+  const hiddenFolders = archivedFolderIds(allFolders);
+  const folders = allFolders.filter((folder) => !hiddenFolders.has(folder.id));
+  const papers = allPapers.filter((paper) => !isPaperArchived(paper, hiddenFolders));
   const term = query.trim().toLocaleLowerCase();
   const matchingFolders = folders.filter((folder) => (!scope || folder.parent_id === scope.id) && folder.name.toLocaleLowerCase().includes(term));
   const matchingPapers = papers.filter((paper) => (!scope || paper.folder_id === scope.id) && paper.original_name.toLocaleLowerCase().includes(term));
@@ -98,8 +102,8 @@ export default function LibrarySpotlight({ papers, onClose, onOpen, onBrowseFold
     <div className="discovery-tabs" role="group" aria-label="Search mode"><button type="button" aria-pressed={mode === 'library'} onClick={() => { setMode('library'); inputRef.current?.focus(); }}>My library</button><button type="button" aria-pressed={mode === 'online'} aria-keyshortcuts="Meta+Shift+K Control+Shift+K" onClick={() => { setMode('online'); inputRef.current?.focus(); }}>Find papers online</button><button type="button" aria-pressed={mode === 'link'} onClick={() => { setMode('link'); inputRef.current?.focus(); }}>Add from link</button><span className="discovery-mode-hint"><kbd>⌘ / Ctrl K</kbd> Switch mode</span></div>
     <div className="spotlight-input"><Icon kind="search" /><input ref={inputRef} autoFocus type={mode === 'link' ? 'url' : 'search'} placeholder={mode === 'link' ? 'Paste a public PDF URL…' : mode === 'online' ? 'Paper title, keywords, DOI, or arXiv link…' : scope ? `Search in ${scope.name}…` : 'Search papers and folders…'} aria-label={mode === 'link' ? 'PDF URL' : mode === 'online' ? 'Search online papers' : scope ? `Search in ${scope.name}` : 'Search your papers and folders'} value={mode === 'link' ? link : query} onChange={(event) => { if (mode === 'link') setLink(event.target.value); else setQuery(event.target.value); setSelected(0); }} /><button className="spotlight-close" aria-label="Close search" data-tooltip="Close search (Escape)" onClick={onClose}><kbd>ESC</kbd></button></div>
     {error && <p className="error-banner" role="alert">{error}</p>}
-    <div className="spotlight-panel" hidden={mode !== 'online'}><PaperDiscovery query={query} folders={folders} papers={papers} initialFolderId={scope?.id ?? initialFolderId} onImported={onImported} onOpen={onOpen} /></div>
-    <div className="spotlight-panel" hidden={mode !== 'link'}><PaperDiscovery directLink query={link} folders={folders} papers={papers} initialFolderId={scope?.id ?? initialFolderId} onImported={onImported} onOpen={onOpen} /></div>
+    <div className="spotlight-panel" hidden={mode !== 'online'}><PaperDiscovery query={query} folders={folders} papers={allPapers} initialFolderId={scope?.id ?? initialFolderId} onImported={onImported} onOpen={onOpen} /></div>
+    <div className="spotlight-panel" hidden={mode !== 'link'}><PaperDiscovery directLink query={link} folders={folders} papers={allPapers} initialFolderId={scope?.id ?? initialFolderId} onImported={onImported} onOpen={onOpen} /></div>
     <div className="spotlight-panel" hidden={mode !== 'library'}>
     {scope ? <div className="spotlight-scope"><button className="spotlight-back" data-tooltip="Return to all search results (Backspace in an empty search)" onClick={() => changeScope(null)}><span aria-hidden="true">←</span>All papers and folders</button><div className="spotlight-scope-heading" style={folderStyle(scope.color)}><span><FolderIcon value={scope.icon} /><strong>{scope.name}</strong><small>{scopeCount} {scopeCount === 1 ? 'paper' : 'papers'}</small></span><button data-tooltip={`View ${scope.name} in the dashboard`} onClick={() => onBrowseFolder(scope.id)}>Open folder <span aria-hidden="true">↗</span></button></div></div> : <div className="spotlight-search-hint">Search your entire library. Select a folder to explore its papers.{loading && <span role="status">Loading folders…</span>}</div>}
     <div className="spotlight-results" ref={resultsRef}>

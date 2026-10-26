@@ -14,6 +14,7 @@ class DocumentOut(BaseModel):
     status: str
     created_at: datetime
     updated_at: datetime
+    archived_at: datetime | None = None
     discovery: dict = Field(default_factory=dict)
 
 
@@ -277,6 +278,7 @@ class FolderUpdate(BaseModel):
     color: str | None = Field(default=None, pattern=r"^#[0-9a-fA-F]{6}$")
     parent_id: str | None = None
     icon: FolderIcon | None = None
+    archived: bool | None = None
 
 
 class FolderOut(BaseModel):
@@ -286,9 +288,15 @@ class FolderOut(BaseModel):
     parent_id: str | None
     color: str
     icon: FolderIcon
+    archived_at: datetime | None = None
     created_at: datetime
 
 
 class DocumentMove(BaseModel):
     document_ids: list[str] = Field(min_length=1, max_length=500)
     folder_id: str | None = None
+
+
+class DocumentArchive(BaseModel):
+    document_ids: list[str] = Field(min_length=1, max_length=500)
+    archived: bool
