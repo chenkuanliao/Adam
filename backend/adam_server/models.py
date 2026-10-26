@@ -24,6 +24,7 @@ class Folder(Base):
     parent_id: Mapped[str | None] = mapped_column(ForeignKey("folders.id", ondelete="SET NULL"), index=True, nullable=True)
     icon: Mapped[str] = mapped_column(String(24), default="folder", server_default="folder")
     color: Mapped[str] = mapped_column(String(7), default="#8c9d65", server_default="#8c9d65")
+    archived_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
 
 
@@ -39,6 +40,7 @@ class Document(Base):
     page_count: Mapped[int] = mapped_column(Integer, default=0)
     status: Mapped[str] = mapped_column(String(32), default="ready")
     discovery_json: Mapped[str] = mapped_column(Text, default="{}", server_default="{}")
+    archived_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
     updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow, onupdate=utcnow)
     pages: Mapped[list["Page"]] = relationship(back_populates="document", cascade="all, delete-orphan")

@@ -21,7 +21,7 @@ import httpx
 from .config import Settings, get_settings
 from .database import SessionLocal, get_db, run_migrations
 from .models import Annotation, Conversation, Document, Folder, Message, ModelFavorite, Page, PaperNote, UsageEvent
-from .schemas import AiNoteCreate, AiNoteUnlink, AnnotationIn, AnnotationOut, AnnotationUpdate, AppSettingsOut, AppSettingsUpdate, ChatRequest, ConversationCreate, ConversationDraftUpdate, ConversationDetail, ConversationOut, ConversationUpdate, DocumentMove, DocumentOut, DocumentUpdate, FolderIn, FolderOut, FolderUpdate, ModelFavoriteUpdate, PageTextOut, PaperNoteOut, PaperNoteUpdate, ProviderKeyUpdate, ProviderModelsOut, QuickAskImportRequest, QuickAskRequest, TitleModelUpdate
+from .schemas import AiNoteCreate, AiNoteUnlink, AnnotationIn, AnnotationOut, AnnotationUpdate, AppSettingsOut, AppSettingsUpdate, ChatRequest, ConversationCreate, ConversationDraftUpdate, ConversationDetail, ConversationOut, ConversationUpdate, DocumentArchive, DocumentMove, DocumentOut, DocumentUpdate, FolderIn, FolderOut, FolderUpdate, ModelFavoriteUpdate, PageTextOut, PaperNoteOut, PaperNoteUpdate, ProviderKeyUpdate, ProviderModelsOut, QuickAskImportRequest, QuickAskRequest, TitleModelUpdate
 from .schemas import ChatTurnIn, ContextImageIn, PriceOverrideIn
 from .services.context import build_paper_context
 from .services.documents import document_file_path, ingest_pdf
@@ -349,6 +349,8 @@ def validate_folder_name(name: str, db: Session, folder_id: str | None = None, p
     if not name or any(ord(char) < 32 for char in name):
         raise HTTPException(422, "Enter a folder name.")
     existing = db.scalar(select(Folder).where(func.lower(Folder.name) == name.lower(), Folder.parent_id == parent_id, Folder.id != (folder_id or "")))
+    if existing and existing.archived_at:
+        raise HTTPException(409, "An archived folder with this name already exists here. Restore it or choose another name.")
     if existing:
         raise HTTPException(409, "A folder with this name already exists here.")
     return name
@@ -410,6 +412,9 @@ def rename_folder(folder_id: str, request: FolderUpdate, db: Session = Depends(g
     color_branch(db, folder, color.lower())
     if request.icon is not None:
         folder.icon = request.icon
+    if request.archived is not None:
+        # Descendants stay as they are; clients hide everything below an archived folder.
+        folder.archived_at = datetime.now(timezone.utc) if request.archived else None
     db.commit()
     return folder
 
@@ -447,6 +452,29 @@ def move_documents(request: DocumentMove, db: Session = Depends(get_db)) -> list
         raise HTTPException(404, "One or more papers no longer exist.")
     for document in documents:
         document.folder_id = request.folder_id
+    db.commit()
+    return documents
+
+
+@app.post("/api/document-archive", response_model=list[DocumentOut])
+def archive_documents(request: DocumentArchive, db: Session = Depends(get_db)) -> list[Document]:
+    ids = set(request.document_ids)
+    documents = list(db.scalars(select(Document).where(Document.id.in_(ids))))
+    if len(documents) != len(ids):
+        raise HTTPException(404, "One or more papers no longer exist.")
+    archived_at = datetime.now(timezone.utc) if request.archived else None
+    folders = {folder.id: folder for folder in db.scalars(select(Folder))} if not request.archived else {}
+    for document in documents:
+        # A restored paper must be visible even when an ancestor remains archived.
+        folder = folders.get(document.folder_id)
+        seen = set()
+        while folder and folder.id not in seen:
+            if folder.archived_at:
+                document.folder_id = None
+                break
+            seen.add(folder.id)
+            folder = folders.get(folder.parent_id)
+        document.archived_at = archived_at
     db.commit()
     return documents
 
