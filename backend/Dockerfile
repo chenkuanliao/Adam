@@ -12,5 +12,5 @@ COPY migrations ./migrations
 COPY alembic.ini ./alembic.ini
 RUN mkdir -p /data && chown -R adam:adam /data /app
 USER adam
-EXPOSE 8000
+EXPOSE 8000 1455
 CMD ["uvicorn", "adam_server.main:app", "--host", "0.0.0.0", "--port", "8000"]

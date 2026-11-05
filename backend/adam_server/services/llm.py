@@ -1,3 +1,4 @@
+import asyncio
 import json
 from collections.abc import AsyncIterator
 from uuid import uuid4
@@ -5,6 +6,13 @@ from uuid import uuid4
 import httpx
 
 from ..schemas import ChatTurnIn, ContextImageIn
+from .chatgpt_auth import ChatGPTAuth, error_code, friendly_api_error
+
+
+class ChatGPTRequestError(Exception):
+    def __init__(self, status: int, code: str | None, message: str) -> None:
+        super().__init__(message)
+        self.status, self.code = status, code
 
 TITLE_SYSTEM_PROMPT = """Write a concise, searchable title for a research-paper conversation using the user's question and the assistant's response, plus any supplied passage.
 
@@ -166,19 +174,110 @@ class OpenAIResponsesProvider:
         content.extend({"type": "input_image", "image_url": image.data_url} for image in images)
         return content
 
-    async def stream_answer(self, question: str, selected_text: str, images: list[ContextImageIn], page: int | None, history: list[ChatTurnIn]) -> AsyncIterator[str]:
+    def build_payload(self, question: str, selected_text: str, images: list[ContextImageIn], page: int | None, history: list[ChatTurnIn]) -> dict:
         inputs = []
         for turn in history[-10:]:
             inputs.extend([{"role": "user", "content": self.content(turn.question, turn.selected_text, turn.images, turn.page)}, {"role": "assistant", "content": turn.answer}])
         inputs.append({"role": "user", "content": self.content(question, selected_text, images, page)})
+        return {"model": self.model, "instructions": self.system_prompt, "input": inputs, "stream": True}
+
+    async def stream_events(self, client: httpx.AsyncClient, payload: dict, headers: dict[str, str]) -> AsyncIterator[dict]:
+        async with client.stream("POST", f"{self.base_url}/responses", headers=headers, json=payload) as response:
+            await self.check_response(response)
+            async for line in response.aiter_lines():
+                if line.startswith("data: ") and line != "data: [DONE]":
+                    yield json.loads(line[6:])
+
+    async def check_response(self, response: httpx.Response) -> None:
+        response.raise_for_status()
+
+    async def stream_answer(self, question: str, selected_text: str, images: list[ContextImageIn], page: int | None, history: list[ChatTurnIn]) -> AsyncIterator[str]:
+        payload = self.build_payload(question, selected_text, images, page, history)
         async with httpx.AsyncClient(timeout=httpx.Timeout(connect=15, read=180, write=30, pool=15)) as client:
-            async with client.stream("POST", f"{self.base_url}/responses", headers=request_headers(self.api_key, self.base_url), json={"model": self.model, "instructions": self.system_prompt, "input": inputs, "stream": True}) as response:
-                response.raise_for_status()
-                async for line in response.aiter_lines():
-                    if line.startswith("data: ") and line != "data: [DONE]":
-                        event = json.loads(line[6:])
-                        if event.get("type") == "response.output_text.delta" and event.get("delta"):
+            async for event in self.stream_events(client, payload, request_headers(self.api_key, self.base_url)):
+                if event.get("type") == "response.output_text.delta" and event.get("delta"):
+                    yield event["delta"]
+
+
+class ChatGPTSubscriptionProvider(OpenAIResponsesProvider):
+    """Responses API funded by the owner's ChatGPT plan through Sign in with ChatGPT."""
+
+    BASE_URL = "https://api.openai.com/v1"
+    # Rejected by plan-funded inference; never send them.
+    FORBIDDEN_FIELDS = frozenset({"background", "conversation", "max_output_tokens", "max_tool_calls", "metadata", "moderation", "multi_agent", "prompt", "prompt_cache_retention", "safety_identifier", "temperature", "top_logprobs", "top_p", "truncation", "user", "previous_response_id"})
+
+    def __init__(self, auth: "ChatGPTAuth", model: str, system_prompt: str = "", transport: httpx.AsyncBaseTransport | None = None) -> None:
+        super().__init__("", model, self.BASE_URL, system_prompt)
+        self.auth, self.transport = auth, transport
+
+    def build_payload(self, question: str, selected_text: str, images: list[ContextImageIn], page: int | None, history: list[ChatTurnIn]) -> dict:
+        payload = super().build_payload(question, selected_text, images, page, history)
+        payload = {key: value for key, value in payload.items() if key not in self.FORBIDDEN_FIELDS}
+        if not payload.get("instructions"):
+            payload.pop("instructions", None)
+        payload.update(store=False, stream=True)
+        return payload
+
+    async def check_response(self, response: httpx.Response) -> None:
+        if response.status_code == 200:
+            return
+        await response.aread()
+        try:
+            body = response.json()
+        except ValueError:
+            body = {}
+        code, param = error_code(body)
+        if code == "subscription_sharing_usage_limit_exceeded" or response.status_code == 429:
+            self.auth.pause_for_usage_limit()
+        raise ChatGPTRequestError(response.status_code, code, friendly_api_error(response.status_code, code, param))
+
+    async def stream_answer(self, question: str, selected_text: str, images: list[ContextImageIn], page: int | None, history: list[ChatTurnIn]) -> AsyncIterator[str]:
+        self.auth.ensure_not_paused()
+        payload = self.build_payload(question, selected_text, images, page, history)
+        token = await self.auth.access_token()
+        refreshed = False
+        attempt = 0
+        async with httpx.AsyncClient(transport=self.transport, timeout=httpx.Timeout(connect=15, read=180, write=30, pool=15)) as client:
+            while True:
+                started = False
+                completed = False
+                headers = {"Authorization": f"Bearer {token}", "Content-Type": "application/json", "User-Agent": "Adam-Paper-Reader/0.1"}
+                try:
+                    async for event in self.stream_events(client, payload, headers):
+                        kind = event.get("type")
+                        if kind == "response.output_text.delta" and event.get("delta"):
+                            started = True
                             yield event["delta"]
+                        elif kind == "response.completed":
+                            completed = True
+                        elif kind in {"response.failed", "error"}:
+                            error = (event.get("response") or {}).get("error") or event.get("error") or event
+                            error = error if isinstance(error, dict) else {}
+                            code = error.get("code")
+                            # Usage limits can arrive mid-stream as response.failed.
+                            status = 429 if code == "subscription_sharing_usage_limit_exceeded" else 500
+                            if status == 429:
+                                self.auth.pause_for_usage_limit()
+                            raise ChatGPTRequestError(status, code, friendly_api_error(status, code, error.get("param")))
+                        elif kind == "response.incomplete":
+                            reason = ((event.get("response") or {}).get("incomplete_details") or {}).get("reason")
+                            raise ChatGPTRequestError(200, "incomplete", f"ChatGPT stopped before finishing the answer{f' ({reason})' if reason else ''}.")
+                except ChatGPTRequestError as exc:
+                    if started:
+                        raise
+                    if exc.status == 401 and not refreshed:
+                        # The access token may have been revoked early; refresh once and retry.
+                        refreshed = True
+                        token = await self.auth.access_token(force_refresh=True)
+                        continue
+                    if exc.status == 503 and attempt < 2:
+                        attempt += 1
+                        await asyncio.sleep(attempt)
+                        continue
+                    raise
+                if not completed:
+                    raise ChatGPTRequestError(200, "interrupted", "The ChatGPT stream ended before the answer completed. Try again.")
+                return
 
 
 class AnthropicProvider:

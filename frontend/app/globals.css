@@ -1239,3 +1239,22 @@ kbd { display: inline-grid; place-items: center; min-width: 18px; height: 18px; 
 @media (prefers-reduced-motion: reduce) {
   .linked-passage-flash, .linked-passage-toast { animation: none }
 }
+
+/* Sign in with ChatGPT */
+.chatgpt-connection { display: grid; gap: 12px }
+.chatgpt-signin { display: grid; justify-items: start; gap: 6px }
+.chatgpt-signin > p { margin: 0; color: var(--muted); font-size: 12.5px; line-height: 1.5 }
+.chatgpt-signin .title-key-notice { margin: 0 }
+.chatgpt-fallback-link a, .chatgpt-paused a { color: inherit; text-decoration: underline }
+.chatgpt-account { display: flex; align-items: center; justify-content: space-between; gap: 12px; padding: 12px 14px; border: 1px solid #2f7a5266; border-radius: 12px; background: #2f7a520d }
+.chatgpt-account > div { display: grid; gap: 2px; min-width: 0 }
+.chatgpt-account span { color: var(--success); font: 600 10.5px var(--font-mono); letter-spacing: .08em; text-transform: uppercase }
+.chatgpt-account strong { overflow: hidden; color: var(--ink); font-size: 14px; text-overflow: ellipsis; white-space: nowrap }
+.chatgpt-account small { color: var(--muted); font-size: 12px; line-height: 1.45 }
+.chatgpt-paused { margin-top: 0; cursor: default }
+.chatgpt-paused .secondary-button { justify-self: start; height: 32px; margin-top: 6px }
+.chatgpt-paste { padding: 10px 14px; border: 1px solid var(--rule-strong); border-radius: 12px; background: var(--surface) }
+.chatgpt-paste summary { color: var(--ink-2); font-size: 13px; font-weight: 600; cursor: pointer }
+.chatgpt-paste p { margin: 8px 0 10px; color: var(--muted); font-size: 12.5px; line-height: 1.55 }
+.chatgpt-paste code { font-size: 11.5px; overflow-wrap: anywhere }
+.chatgpt-message { margin: 0; color: var(--ink-2); font-size: 12.5px; line-height: 1.5 }

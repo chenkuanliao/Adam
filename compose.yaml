@@ -8,6 +8,13 @@ services:
       ADAM_OPENCODE_MODEL: ${ADAM_OPENCODE_MODEL:-gpt-5.6-terra}
       ADAM_SEARCH_BASE_URL: http://search:8080
       ADAM_CORS_ORIGINS: http://localhost:${ADAM_WEB_PORT:-3000},http://127.0.0.1:${ADAM_WEB_PORT:-3000}
+      # Sign in with ChatGPT: the redirect URI uses the host port; the listener binds 1455 in the container.
+      ADAM_CHATGPT_CALLBACK_PORT: ${ADAM_CHATGPT_CALLBACK_PORT:-1455}
+      ADAM_CHATGPT_CALLBACK_LISTEN_HOST: 0.0.0.0
+      ADAM_CHATGPT_CALLBACK_LISTEN_PORT: 1455
+    ports:
+      # Published on the host loopback only, so the callback is reached at 127.0.0.1.
+      - "127.0.0.1:${ADAM_CHATGPT_CALLBACK_PORT:-1455}:1455"
     volumes:
       - ./data:/data
     secrets:
