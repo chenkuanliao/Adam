@@ -262,6 +262,7 @@ An annotation is the anchor; a note is content attached to it. Multiple rectangl
 - `provider_configs`: id, provider_kind, display_name, base_url nullable, secret_reference, nonsecret_config_json, enabled
 - `model_catalog`: provider_config_id, model_id, capabilities_json, context_window nullable, source, refreshed_at
 - `ingestion_jobs`: id, document_id, stage, status, progress, attempt_count, error_json, lease fields, created_at, updated_at
+- `usage_events` (implemented): one row per model call with kind (`chat`, `quick_ask`, `title`), provider, model_id, nullable document/conversation ids (`ON DELETE SET NULL`), disjoint token counts (uncached input, cache read, cache write, output; reasoning is a subset of output), optional provider-reported cost, and status. Providers normalize their own usage formats (`services/usage.py`); costs are never stored but computed on read from cached LiteLLM/models.dev rates plus Settings overrides (`services/pricing.py`, `services/usage_summary.py`).
 
 Store a secret reference, never an API key, in ordinary SQLite rows. Native installs should use the OS keychain. Docker deployments should prefer environment variables or mounted secrets. If encrypted key storage is later added, require an external master secret; “encrypted in SQLite with a key stored beside SQLite” is not meaningful protection.
 

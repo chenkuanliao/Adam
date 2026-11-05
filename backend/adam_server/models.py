@@ -129,3 +129,25 @@ class ModelFavorite(Base):
     provider: Mapped[str] = mapped_column(String(32), index=True)
     model_id: Mapped[str] = mapped_column(String(200))
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
+
+
+class UsageEvent(Base):
+    """Token usage reported by one model call. Costs are computed when read, never stored."""
+    __tablename__ = "usage_events"
+
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=new_id)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow, index=True)
+    kind: Mapped[str] = mapped_column(String(16))
+    provider: Mapped[str] = mapped_column(String(32), index=True)
+    model_id: Mapped[str] = mapped_column(String(200))
+    # History survives paper and chat deletion.
+    document_id: Mapped[str | None] = mapped_column(ForeignKey("documents.id", ondelete="SET NULL"), index=True, nullable=True)
+    conversation_id: Mapped[str | None] = mapped_column(ForeignKey("conversations.id", ondelete="SET NULL"), index=True, nullable=True)
+    uncached_input_tokens: Mapped[int] = mapped_column(Integer, default=0)
+    cache_read_tokens: Mapped[int] = mapped_column(Integer, default=0)
+    cache_write_tokens: Mapped[int] = mapped_column(Integer, default=0)
+    output_tokens: Mapped[int] = mapped_column(Integer, default=0)
+    # Already included in output_tokens; informational only.
+    reasoning_tokens: Mapped[int] = mapped_column(Integer, default=0)
+    provider_reported_cost_usd: Mapped[float | None] = mapped_column(nullable=True)
+    status: Mapped[str] = mapped_column(String(16), default="completed")

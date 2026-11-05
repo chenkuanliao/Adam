@@ -1,11 +1,12 @@
 import asyncio
 import json
-from collections.abc import AsyncIterator
+from collections.abc import AsyncIterator, Callable
 from uuid import uuid4
 
 import httpx
 
 from ..schemas import ChatTurnIn, ContextImageIn
+from .usage import TokenUsage, anthropic_usage, chat_completions_usage, gemini_usage, merge_anthropic_usage, responses_usage
 from .chatgpt_auth import ChatGPTAuth, error_code, friendly_api_error
 
 
@@ -58,7 +59,7 @@ def clean_title(value: str, fallback: str) -> str:
     return (title or fallback.strip() or "New chat")[:200]
 
 
-async def generate_zen_title(api_key: str, transcript: str, fallback: str, model: str = "gpt-6-luna") -> str:
+async def generate_zen_title(api_key: str, transcript: str, fallback: str, model: str = "gpt-6-luna", on_usage: Callable[[TokenUsage | None], None] | None = None) -> str:
     """Generate a title through an OpenCode Zen Responses-compatible model."""
     payload = {
         "model": model,
@@ -73,6 +74,8 @@ async def generate_zen_title(api_key: str, transcript: str, fallback: str, model
         )
         response.raise_for_status()
         data = response.json()
+    if on_usage:
+        on_usage(responses_usage(data.get("usage")))
     text = data.get("output_text", "")
     if not text:
         for item in data.get("output", []):
@@ -89,6 +92,7 @@ class GoogleProvider:
         self.model = model
         self.base_url = base_url.rstrip("/")
         self.system_prompt = system_prompt
+        self.usage: TokenUsage | None = None
 
     async def stream_answer(self, question: str, selected_text: str, images: list[ContextImageIn], page: int | None, history: list[ChatTurnIn]) -> AsyncIterator[str]:
         def user_parts(turn_question: str, turn_selection: str, turn_images: list[ContextImageIn], turn_page: int | None) -> list[dict]:
@@ -130,6 +134,9 @@ class GoogleProvider:
                     if not line.startswith("data: "):
                         continue
                     event = json.loads(line[6:])
+                    if event.get("usageMetadata"):
+                        # Cumulative; the last chunk carries the final counts.
+                        self.usage = gemini_usage(event["usageMetadata"])
                     candidates = event.get("candidates") or []
                     if not candidates:
                         continue
@@ -143,6 +150,7 @@ class OpenAICompatibleProvider:
     def __init__(self, api_key: str, model: str, base_url: str, system_prompt: str = "") -> None:
         self.api_key, self.model, self.base_url = api_key, model, base_url.rstrip("/")
         self.system_prompt = system_prompt
+        self.usage: TokenUsage | None = None
 
     def parts(self, question: str, selection: str, images: list[ContextImageIn], page: int | None) -> list[dict]:
         parts: list[dict] = [{"type": "text", "text": user_prompt(question, selection, page)}]
@@ -155,11 +163,14 @@ class OpenAICompatibleProvider:
             messages.extend([{"role": "user", "content": self.parts(turn.question, turn.selected_text, turn.images, turn.page)}, {"role": "assistant", "content": turn.answer}])
         messages.append({"role": "user", "content": self.parts(question, selected_text, images, page)})
         async with httpx.AsyncClient(timeout=httpx.Timeout(connect=15, read=180, write=30, pool=15)) as client:
-            async with client.stream("POST", f"{self.base_url}/chat/completions", headers=request_headers(self.api_key, self.base_url), json={"model": self.model, "messages": messages, "stream": True, "temperature": .2}) as response:
+            async with client.stream("POST", f"{self.base_url}/chat/completions", headers=request_headers(self.api_key, self.base_url), json={"model": self.model, "messages": messages, "stream": True, "stream_options": {"include_usage": True}, "temperature": .2}) as response:
                 response.raise_for_status()
                 async for line in response.aiter_lines():
                     if not line.startswith("data: ") or line == "data: [DONE]": continue
                     event = json.loads(line[6:])
+                    if event.get("usage"):
+                        # Sent in the final chunk, whose `choices` is empty.
+                        self.usage = chat_completions_usage(event["usage"])
                     text = ((event.get("choices") or [{}])[0].get("delta") or {}).get("content")
                     if text: yield text
 
@@ -168,6 +179,7 @@ class OpenAIResponsesProvider:
     def __init__(self, api_key: str, model: str, base_url: str, system_prompt: str = "") -> None:
         self.api_key, self.model, self.base_url = api_key, model, base_url.rstrip("/")
         self.system_prompt = system_prompt
+        self.usage: TokenUsage | None = None
 
     def content(self, question: str, selection: str, images: list[ContextImageIn], page: int | None) -> list[dict]:
         content: list[dict] = [{"type": "input_text", "text": user_prompt(question, selection, page)}]
@@ -197,6 +209,8 @@ class OpenAIResponsesProvider:
             async for event in self.stream_events(client, payload, request_headers(self.api_key, self.base_url)):
                 if event.get("type") == "response.output_text.delta" and event.get("delta"):
                     yield event["delta"]
+                elif event.get("type") in {"response.completed", "response.incomplete", "response.failed"}:
+                    self.usage = responses_usage((event.get("response") or {}).get("usage")) or self.usage
 
 
 class ChatGPTSubscriptionProvider(OpenAIResponsesProvider):
@@ -248,7 +262,9 @@ class ChatGPTSubscriptionProvider(OpenAIResponsesProvider):
                         if kind == "response.output_text.delta" and event.get("delta"):
                             started = True
                             yield event["delta"]
-                        elif kind == "response.completed":
+                        if kind in {"response.completed", "response.incomplete", "response.failed"}:
+                            self.usage = responses_usage((event.get("response") or {}).get("usage")) or self.usage
+                        if kind == "response.completed":
                             completed = True
                         elif kind in {"response.failed", "error"}:
                             error = (event.get("response") or {}).get("error") or event.get("error") or event
@@ -284,6 +300,7 @@ class AnthropicProvider:
     def __init__(self, api_key: str, model: str, base_url: str = "https://api.anthropic.com/v1", system_prompt: str = "") -> None:
         self.api_key, self.model, self.base_url = api_key, model, base_url.rstrip("/")
         self.system_prompt = system_prompt
+        self.usage: TokenUsage | None = None
 
     def content(self, question: str, selection: str, images: list[ContextImageIn], page: int | None) -> list[dict]:
         content: list[dict] = [{"type": "text", "text": user_prompt(question, selection, page)}]
@@ -298,14 +315,27 @@ class AnthropicProvider:
             messages.extend([{"role": "user", "content": self.content(turn.question, turn.selected_text, turn.images, turn.page)}, {"role": "assistant", "content": turn.answer}])
         messages.append({"role": "user", "content": self.content(question, selected_text, images, page)})
         headers = request_headers(self.api_key, self.base_url, **{"x-api-key": self.api_key, "anthropic-version": "2023-06-01"})
+        usage: dict = {}
         async with httpx.AsyncClient(timeout=httpx.Timeout(connect=15, read=180, write=30, pool=15)) as client:
-            async with client.stream("POST", f"{self.base_url}/messages", headers=headers, json={"model": self.model, "system": self.system_prompt, "messages": messages, "max_tokens": 4096, "stream": True, "temperature": .2}) as response:
+            async with client.stream("POST", f"{self.base_url}/messages", headers=headers, json={"model": self.model, "system": self.system_blocks(), "messages": messages, "max_tokens": 4096, "stream": True, "temperature": .2}) as response:
                 response.raise_for_status()
                 async for line in response.aiter_lines():
                     if line.startswith("data: "):
                         event = json.loads(line[6:])
                         if event.get("type") == "content_block_delta" and event.get("delta", {}).get("type") == "text_delta":
                             yield event["delta"]["text"]
+                        elif event.get("type") == "message_start":
+                            self.usage = anthropic_usage(merge_anthropic_usage(usage, (event.get("message") or {}).get("usage")))
+                        elif event.get("type") == "message_delta":
+                            self.usage = anthropic_usage(merge_anthropic_usage(usage, event.get("usage")))
+
+    def system_blocks(self) -> list[dict] | str:
+        # The system prompt carries the whole paper, so cache it: follow-up questions then
+        # read it from the prompt cache instead of paying full input price again.
+        # Prompts below the model's minimum cacheable length are processed normally.
+        if not self.system_prompt or not self.model.startswith("claude"):
+            return self.system_prompt
+        return [{"type": "text", "text": self.system_prompt, "cache_control": {"type": "ephemeral"}}]
 
 
 # Backwards-compatible name for existing imports.

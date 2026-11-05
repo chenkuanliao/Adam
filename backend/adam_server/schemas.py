@@ -323,3 +323,12 @@ class FolderOut(BaseModel):
 class DocumentMove(BaseModel):
     document_ids: list[str] = Field(min_length=1, max_length=500)
     folder_id: str | None = None
+
+
+class PriceOverrideIn(BaseModel):
+    """Manual model price in USD per million tokens. Cache rates default to the input rate."""
+    model: str = Field(min_length=1, max_length=200)
+    input: float = Field(ge=0, le=100_000)
+    output: float = Field(ge=0, le=100_000)
+    cache_read: float | None = Field(default=None, ge=0, le=100_000)
+    cache_write: float | None = Field(default=None, ge=0, le=100_000)
