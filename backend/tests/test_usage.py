@@ -420,7 +420,8 @@ def test_summary_by_range_provider_model_and_day(tmp_path) -> None:
     by_day = {item["bucket"]: item for item in summary["series"]}
     assert by_day["2026-11-05"]["cost_usd"] == pytest.approx(4.8)
     assert by_day["2026-11-04"]["by_provider"]["anthropic"]["cost_usd"] == pytest.approx(3.0)
-    assert sum(point["total_tokens"] for point in models["claude-sonnet-4-5"]["series"]) == 3_100_000
+    assert sum(models["claude-sonnet-4-5"]["series_tokens"]) == 3_100_000
+    assert len(models["claude-sonnet-4-5"]["series_cost"]) == 7
 
 
 def test_summary_filters_kind_and_provider_and_hourly_window(tmp_path) -> None:

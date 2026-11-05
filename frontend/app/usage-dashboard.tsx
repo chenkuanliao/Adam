@@ -15,39 +15,36 @@ type PerMillion = { input: number; output: number; cache_read: number; cache_wri
 type ModelTotals = Totals & {
   provider: string; model: string; cost_share: number; token_share: number; cost_unknown: boolean;
   rates: PerMillion | null; rate_source: 'override' | 'models.dev' | 'litellm' | null;
-  series: { bucket: string; cost_usd: number; total_tokens: number }[];
+  series_cost: number[]; series_tokens: number[];
 };
 type ProviderTotals = Totals & { provider: string; cost_share: number; token_share: number };
-type Period = Totals & { bucket: string; by_provider: Record<string, { cost_usd: number; total_tokens: number; requests: number }> };
+type Period = { bucket: string; requests: number; cost_usd: number; total_tokens: number; by_provider: Record<string, { cost_usd: number; total_tokens: number; requests: number }> };
 type PricingStatus = { litellm_fetched_at: string | null; models_dev_fetched_at: string | null; litellm_models: number; zen_models: number; stale: boolean; error: string | null; refresh_available_in: number };
-export type UsageSummary = {
+type UsageSummary = {
   range: { days: number; resolution: 'day' | 'hour'; since: string; until: string; buckets: string[] };
   available_providers: string[]; totals: Totals; providers: ProviderTotals[]; models: ModelTotals[]; series: Period[]; pricing: PricingStatus;
 };
 type Metric = 'cost' | 'tokens';
 type PriceOverride = { input: number; output: number; cache_read: number | null; cache_write: number | null };
+type View = { kind: 'overview' } | { kind: 'model'; key: string } | { kind: 'price'; model: string | null; back: View };
 
-export const CHATGPT_USAGE_URL = 'https://chatgpt.com/#settings/Usage';
-const RANGES = [{ days: 1, label: 'Past 24h' }, { days: 7, label: '7 days' }, { days: 30, label: '30 days' }, { days: 90, label: '90 days' }] as const;
+const CHATGPT_USAGE_URL = 'https://chatgpt.com/#settings/Usage';
+const RANGES = [{ days: 1, label: '24h' }, { days: 7, label: '7 days' }, { days: 30, label: '30 days' }, { days: 90, label: '90 days' }] as const;
 const KINDS = [{ value: '', label: 'All requests' }, { value: 'chat', label: 'Chat' }, { value: 'quick_ask', label: 'Quick Ask' }, { value: 'title', label: 'Chat titles' }];
-/** Fixed categorical slots: a provider keeps its color whatever the filter shows. */
-const PROVIDERS: Record<string, { label: string; slot: number; mark: string; manageUrl?: string }> = {
-  zen: { label: 'OpenCode Zen', slot: 1, mark: 'Z' },
-  openrouter: { label: 'OpenRouter', slot: 2, mark: 'OR' },
-  openai: { label: 'OpenAI', slot: 3, mark: 'O' },
-  anthropic: { label: 'Anthropic', slot: 4, mark: 'A' },
-  google: { label: 'Google', slot: 5, mark: 'G' },
-  chatgpt: { label: 'ChatGPT (subscription)', slot: 6, mark: 'C', manageUrl: CHATGPT_USAGE_URL },
+/** Fixed colors per provider (validated for color-vision deficiency), so filters never repaint a provider. */
+const PROVIDERS: Record<string, { label: string; color: string; manageUrl?: string }> = {
+  zen: { label: 'OpenCode Zen', color: '#3f7fc0' },
+  openrouter: { label: 'OpenRouter', color: '#c4683f' },
+  openai: { label: 'OpenAI', color: '#0f9480' },
+  anthropic: { label: 'Anthropic', color: '#b8860b' },
+  google: { label: 'Google', color: '#8a63c4' },
+  chatgpt: { label: 'ChatGPT (subscription)', color: '#6f8f2a', manageUrl: CHATGPT_USAGE_URL },
 };
 const PROVIDER_ORDER = Object.keys(PROVIDERS);
 const PREFERENCES_KEY = 'adam.usage.preferences';
 
-export function providerInfo(provider: string) {
-  return PROVIDERS[provider] ?? { label: provider, slot: 7, mark: provider.slice(0, 1).toUpperCase() };
-}
-const providerColor = (provider: string) => `var(--usage-series-${providerInfo(provider).slot})`;
+const providerInfo = (provider: string) => PROVIDERS[provider] ?? { label: provider, color: '#7d7a72' };
 const sortProviders = (providers: string[]) => [...providers].sort((a, b) => (PROVIDER_ORDER.indexOf(a) + 1 || 99) - (PROVIDER_ORDER.indexOf(b) + 1 || 99) || a.localeCompare(b));
-
 const formatRate = (value: number) => `$${value >= 1 ? value.toFixed(2) : value.toPrecision(2)}`;
 
 function formatBucket(bucket: string, resolution: 'day' | 'hour', long = false): string {
@@ -65,22 +62,19 @@ function readPreferences(): { days: number; metric: Metric } {
   }
 }
 
-export function ProviderMark({ provider }: { provider: string }) {
-  const info = providerInfo(provider);
-  return <span className="usage-provider-mark" style={{ '--mark-color': providerColor(provider) } as React.CSSProperties} aria-hidden="true">{info.mark}</span>;
+function Dot({ color }: { color: string }) {
+  return <i className="usage-dot" style={{ background: color }} aria-hidden="true" />;
 }
 
-/* ------------------------------------------------------------------------------------------ */
-/* Stacked area chart: one series per provider, fixed order, crosshair tooltip                */
-/* ------------------------------------------------------------------------------------------ */
+/* Stacked area chart: one series per provider in fixed order, with a crosshair tooltip. */
 
 type ChartSeries = { key: string; label: string; color: string; values: number[] };
 
-export function UsageAreaChart({ buckets, resolution, series, format, label, height = 220 }: {
+function UsageAreaChart({ buckets, resolution, series, format, label, height = 200 }: {
   buckets: string[]; resolution: 'day' | 'hour'; series: ChartSeries[]; format: (value: number) => string; label: string; height?: number;
 }) {
   const host = useRef<HTMLDivElement>(null);
-  const [width, setWidth] = useState(640);
+  const [width, setWidth] = useState(560);
   const [hover, setHover] = useState<number | null>(null);
   useLayoutEffect(() => {
     const element = host.current;
@@ -91,7 +85,7 @@ export function UsageAreaChart({ buckets, resolution, series, format, label, hei
     observer.observe(element);
     return () => observer.disconnect();
   }, []);
-  const padding = { top: 10, right: 8, bottom: 26, left: 56 };
+  const padding = { top: 10, right: 6, bottom: 24, left: 52 };
   const plotWidth = width - padding.left - padding.right;
   const plotHeight = height - padding.top - padding.bottom;
   const stacks = useMemo(() => stackSeries(series, buckets.length), [buckets, series]);
@@ -101,7 +95,7 @@ export function UsageAreaChart({ buckets, resolution, series, format, label, hei
   const y = (value: number) => padding.top + plotHeight - (value / max) * plotHeight;
   const ticks = [0, 0.25, 0.5, 0.75, 1].map((step) => step * max);
   const labelEvery = Math.max(1, Math.ceil(buckets.length / Math.max(2, Math.floor(plotWidth / 76))));
-  const empty = totals.every((value) => value === 0);
+  const empty = series.length === 0;
 
   function pointerMove(event: React.PointerEvent<SVGRectElement>) {
     const bounds = event.currentTarget.getBoundingClientRect();
@@ -109,11 +103,11 @@ export function UsageAreaChart({ buckets, resolution, series, format, label, hei
     setHover(Math.min(buckets.length - 1, Math.max(0, Math.round(ratio * (buckets.length - 1)))));
   }
 
-  const tooltipLeft = hover === null ? 0 : x(hover);
   return <div className="usage-chart" ref={host}>
     <svg width={width} height={height} role="img" aria-label={`${label}: ${series.map((item) => `${item.label} ${format(item.values.reduce((sum, value) => sum + value, 0))}`).join(', ') || 'no usage'}`}>
       {ticks.map((tick) => <g key={tick} className="usage-chart-grid"><line x1={padding.left} x2={width - padding.right} y1={y(tick)} y2={y(tick)} /><text x={padding.left - 8} y={y(tick)} dy="0.32em" textAnchor="end">{format(tick)}</text></g>)}
-      {buckets.map((bucket, index) => (index % labelEvery === 0 && (buckets.length - 1 - index >= labelEvery * 0.75 || index === 0)) || index === buckets.length - 1 ? <text key={bucket} className="usage-chart-axis" x={x(index)} y={height - 6} textAnchor={index === 0 ? 'start' : index === buckets.length - 1 ? 'end' : 'middle'}>{formatBucket(bucket, resolution)}</text> : null)}
+      {buckets.map((bucket, index) => (index % labelEvery === 0 && (buckets.length - 1 - index >= labelEvery * 0.75 || index === 0)) || index === buckets.length - 1
+        ? <text key={bucket} className="usage-chart-axis" x={x(index)} y={height - 6} textAnchor={index === 0 ? 'start' : index === buckets.length - 1 ? 'end' : 'middle'}>{formatBucket(bucket, resolution)}</text> : null)}
       {!empty && stacks.map((item) => {
         const top = item.upper.map((value, index) => `${x(index)},${y(value)}`);
         const bottom = item.lower.map((value, index) => `${x(index)},${y(value)}`).reverse();
@@ -128,102 +122,91 @@ export function UsageAreaChart({ buckets, resolution, series, format, label, hei
       </g>}
       <rect x={padding.left} y={padding.top} width={plotWidth} height={plotHeight} fill="transparent" onPointerMove={pointerMove} onPointerLeave={() => setHover(null)} />
     </svg>
-    {empty && <p className="usage-chart-empty">No usage in this window</p>}
-    {hover !== null && !empty && <div className="usage-tooltip" style={{ left: Math.min(Math.max(tooltipLeft, 90), width - 90) }}>
+    {empty && <p className="usage-chart-empty">No usage in this period</p>}
+    {hover !== null && !empty && <div className="usage-tooltip" style={{ left: Math.min(Math.max(x(hover), 90), width - 90) }}>
       <strong>{formatBucket(buckets[hover], resolution, true)}</strong>
-      {[...stacks].reverse().map((item) => <span key={item.key}><i style={{ background: item.color }} />{item.label}<b>{format(item.values[hover] ?? 0)}</b></span>)}
+      {[...stacks].reverse().map((item) => <span key={item.key}><Dot color={item.color} />{item.label}<b>{format(item.values[hover] ?? 0)}</b></span>)}
       {stacks.length > 1 && <span className="usage-tooltip-total">Total<b>{format(totals[hover])}</b></span>}
     </div>}
-    {series.length > 1 && <div className="usage-legend">{series.map((item) => <span key={item.key}><i style={{ background: item.color }} />{item.label}</span>)}</div>}
+    {series.length > 1 && <div className="usage-legend">{series.map((item) => <span key={item.key}><Dot color={item.color} />{item.label}</span>)}</div>}
   </div>;
 }
 
-/* ------------------------------------------------------------------------------------------ */
-/* Share bar                                                                                   */
-/* ------------------------------------------------------------------------------------------ */
+/* Share bars for cost and tokens by type. */
 
 type Segment = { label: string; value: number; color: string };
 const TYPE_COLORS = { input: 'var(--usage-type-input)', cache_read: 'var(--usage-type-cache-read)', cache_write: 'var(--usage-type-cache-write)', output: 'var(--usage-type-output)', other: 'var(--usage-type-other)' };
 
-export function costSegments(cost: CategoryCost): Segment[] {
-  return [
-    { label: 'Input', value: cost.input, color: TYPE_COLORS.input },
-    { label: 'Cache read', value: cost.cache_read, color: TYPE_COLORS.cache_read },
-    { label: 'Cache write', value: cost.cache_write, color: TYPE_COLORS.cache_write },
-    { label: 'Output', value: cost.output, color: TYPE_COLORS.output },
-    { label: 'Provider total', value: cost.other, color: TYPE_COLORS.other },
-  ];
-}
-export function tokenSegments(tokens: TokenTotals): Segment[] {
-  return [
-    { label: 'Input', value: tokens.uncached_input, color: TYPE_COLORS.input },
-    { label: 'Cache read', value: tokens.cache_read, color: TYPE_COLORS.cache_read },
-    { label: 'Cache write', value: tokens.cache_write, color: TYPE_COLORS.cache_write },
-    { label: 'Output', value: tokens.output, color: TYPE_COLORS.output },
-  ];
-}
+const costSegments = (cost: CategoryCost): Segment[] => [
+  { label: 'Input', value: cost.input, color: TYPE_COLORS.input },
+  { label: 'Cache read', value: cost.cache_read, color: TYPE_COLORS.cache_read },
+  { label: 'Cache write', value: cost.cache_write, color: TYPE_COLORS.cache_write },
+  { label: 'Output', value: cost.output, color: TYPE_COLORS.output },
+  { label: 'Provider total', value: cost.other, color: TYPE_COLORS.other },
+];
+const tokenSegments = (tokens: TokenTotals): Segment[] => [
+  { label: 'Input', value: tokens.uncached_input, color: TYPE_COLORS.input },
+  { label: 'Cache read', value: tokens.cache_read, color: TYPE_COLORS.cache_read },
+  { label: 'Cache write', value: tokens.cache_write, color: TYPE_COLORS.cache_write },
+  { label: 'Output', value: tokens.output, color: TYPE_COLORS.output },
+];
 
-function ShareBar({ label, segments, format, aside }: { label: string; segments: Segment[]; format: (value: number) => string; aside?: ReactNode }) {
+function ShareBar({ label, segments, format, aside, emptyText = 'Nothing yet.' }: { label: string; segments: Segment[]; format: (value: number) => string; aside?: ReactNode; emptyText?: string }) {
   const visible = segments.filter((segment) => segment.value > 0);
   const total = visible.reduce((sum, segment) => sum + segment.value, 0);
   return <div className="usage-share">
-    <div className="usage-share-head"><h3>{label}</h3>{aside}</div>
+    <div className="usage-share-head"><h4>{label}</h4>{aside}</div>
     {total > 0 ? <>
       <div className="usage-share-bar" role="img" aria-label={`${label}: ${visible.map((segment) => `${segment.label} ${format(segment.value)}`).join(', ')}`}>
         {visible.map((segment) => <span key={segment.label} title={`${segment.label} · ${format(segment.value)} · ${formatPercent(segment.value / total)}`} style={{ flexGrow: segment.value, background: segment.color }} />)}
       </div>
-      <div className="usage-share-legend">{visible.map((segment) => <span key={segment.label}><i style={{ background: segment.color }} />{segment.label}<b>{format(segment.value)}</b><small>{formatPercent(segment.value / total)}</small></span>)}</div>
-    </> : <p className="usage-muted">Nothing to show yet.</p>}
+      <div className="usage-share-legend">{visible.map((segment) => <span key={segment.label}><Dot color={segment.color} />{segment.label}<b>{format(segment.value)}</b></span>)}</div>
+    </> : <p className="usage-muted">{emptyText}</p>}
   </div>;
 }
 
-/* ------------------------------------------------------------------------------------------ */
-/* Model detail and price override panels                                                     */
-/* ------------------------------------------------------------------------------------------ */
+/* Model details and price form, shown in place inside the settings pane. */
+
+const RATE_SOURCE_LABELS: Record<string, string> = { override: 'Your price', 'models.dev': 'OpenCode Zen price', litellm: 'Published price' };
 
 function costPerMillion(model: ModelTotals): number | null {
   const priced = model.total_tokens - model.unpriced_tokens;
   return model.cost_unknown || priced <= 0 ? null : (model.cost_usd / priced) * 1e6;
 }
-const RATE_SOURCE_LABELS: Record<string, string> = { override: 'Your price override', 'models.dev': 'OpenCode Zen price list (models.dev)', litellm: 'LiteLLM price list' };
 
-function ModelPanel({ model, summary, metric, onClose, onSetPrice }: { model: ModelTotals; summary: UsageSummary; metric: Metric; onClose: () => void; onSetPrice: () => void }) {
+function ModelDetail({ model, summary, metric, onBack, onSetPrice }: { model: ModelTotals; summary: UsageSummary; metric: Metric; onBack: () => void; onSetPrice: () => void }) {
   const hit = cacheHitRate(model.tokens);
   const perMillion = costPerMillion(model);
   const chartMetric = model.cost_unknown ? 'tokens' : metric;
-  const stats = [
-    { label: 'Cost', value: model.cost_unknown ? 'Unpriced' : formatUsd(model.cost_usd) },
-    { label: 'Tokens', value: formatTokens(model.total_tokens) },
-    { label: 'Per 1M tokens', value: perMillion === null ? '—' : formatUsd(perMillion) },
-    { label: 'Cache hit', value: hit === null ? '—' : formatPercent(hit) },
-  ];
-  return <div className="usage-sheet-backdrop" onMouseDown={(event) => { if (event.target === event.currentTarget) onClose(); }}>
-    <section className="usage-sheet" role="dialog" aria-modal="true" aria-labelledby="usage-model-title">
-      <header className="usage-sheet-head">
-        <div><h2 id="usage-model-title"><ProviderMark provider={model.provider} />{model.model}</h2>
-          <p>{providerInfo(model.provider).label} · {model.requests} {model.requests === 1 ? 'request' : 'requests'}{model.cost_unknown ? '' : ` · ${formatPercent(model.cost_share)} of cost`}</p></div>
-        <button type="button" className="usage-icon-button" onClick={onClose} aria-label="Close model details">×</button>
-      </header>
-      <div className="usage-stat-grid">{stats.map((stat) => <div key={stat.label}><span>{stat.label}</span><strong>{stat.value}</strong></div>)}</div>
-      <div className="usage-sheet-section">
-        <h3>{summary.range.resolution === 'hour' ? 'Hourly' : 'Daily'} {chartMetric === 'cost' ? 'cost' : 'tokens'}</h3>
-        <UsageAreaChart label={`${model.model} ${chartMetric}`} buckets={summary.range.buckets} resolution={summary.range.resolution} height={180}
-          format={chartMetric === 'cost' ? formatUsd : formatTokens}
-          series={[{ key: model.model, label: model.model, color: providerColor(model.provider), values: model.series.map((point) => chartMetric === 'cost' ? point.cost_usd : point.total_tokens) }]} />
-      </div>
-      <div className="usage-share-grid">
-        {!model.cost_unknown && <ShareBar label="Cost by type" segments={costSegments(model.category_cost)} format={formatUsd} />}
-        <ShareBar label="Tokens by type" segments={tokenSegments(model.tokens)} format={formatTokens} aside={model.tokens.reasoning > 0 ? <small className="usage-muted">{formatTokens(model.tokens.reasoning)} reasoning (in output)</small> : undefined} />
-      </div>
-      <footer className="usage-sheet-foot">
-        <span className="usage-muted">{model.rates ? <>{RATE_SOURCE_LABELS[model.rate_source ?? ''] ?? 'Price'}: {formatRate(model.rates.input)} in · {formatRate(model.rates.output)} out · {formatRate(model.rates.cache_read)} cache read · {formatRate(model.rates.cache_write)} cache write per 1M</> : model.cost_sources.providerReported ? 'Cost reported by the provider; no list price found.' : `${formatTokens(model.unpriced_tokens)} tokens have no known price.`}</span>
-        <button type="button" className={model.cost_unknown ? 'primary-button' : 'secondary-button'} onClick={onSetPrice}>{model.rate_source === 'override' ? 'Edit price' : 'Set price'}</button>
-      </footer>
+  const info = providerInfo(model.provider);
+  return <div className="usage-subview">
+    <button type="button" className="usage-back-link" onClick={onBack}>‹ All usage</button>
+    <div className="usage-subview-head">
+      <div><h4><Dot color={info.color} />{model.model}</h4>
+        <p>{info.label} · {model.requests} {model.requests === 1 ? 'request' : 'requests'}{model.cost_unknown ? '' : ` · ${formatPercent(model.cost_share)} of cost`}</p></div>
+      <button type="button" className={model.cost_unknown ? 'primary-button' : 'secondary-button'} onClick={onSetPrice}>{model.rate_source === 'override' ? 'Edit price' : 'Set price'}</button>
+    </div>
+    <div className="usage-metrics">
+      <div><span>Cost</span><strong>{model.cost_unknown ? 'Unpriced' : formatUsd(model.cost_usd)}</strong></div>
+      <div><span>Tokens</span><strong>{formatTokens(model.total_tokens)}</strong></div>
+      <div><span>Per 1M tokens</span><strong>{perMillion === null ? '—' : formatUsd(perMillion)}</strong></div>
+      <div><span>Cache hit</span><strong>{hit === null ? '—' : formatPercent(hit)}</strong></div>
+    </div>
+    <section className="usage-card">
+      <h4>{summary.range.resolution === 'hour' ? 'Hourly' : 'Daily'} {chartMetric === 'cost' ? 'cost' : 'tokens'}</h4>
+      <UsageAreaChart label={`${model.model} ${chartMetric}`} buckets={summary.range.buckets} resolution={summary.range.resolution} height={170}
+        format={chartMetric === 'cost' ? formatUsd : formatTokens}
+        series={[{ key: model.model, label: model.model, color: info.color, values: chartMetric === 'cost' ? model.series_cost : model.series_tokens }]} />
     </section>
+    <div className="usage-share-grid">
+      {!model.cost_unknown && <ShareBar label="Cost by type" segments={costSegments(model.category_cost)} format={formatUsd} />}
+      <ShareBar label="Tokens by type" segments={tokenSegments(model.tokens)} format={formatTokens} aside={model.tokens.reasoning > 0 ? <small className="usage-muted">incl. {formatTokens(model.tokens.reasoning)} reasoning</small> : undefined} />
+    </div>
+    <p className="usage-muted">{model.rates ? <>{RATE_SOURCE_LABELS[model.rate_source ?? ''] ?? 'Price'} per 1M tokens: {formatRate(model.rates.input)} input · {formatRate(model.rates.output)} output · {formatRate(model.rates.cache_read)} cache read · {formatRate(model.rates.cache_write)} cache write</> : model.cost_sources.providerReported ? 'Cost reported by the provider.' : 'No known price for this model. Set one to include it in the total.'}</p>
   </div>;
 }
 
-function PriceForm({ model, current, override, onClose, onSaved }: { model: string | null; current: PerMillion | null; override: PriceOverride | undefined; onClose: () => void; onSaved: () => void }) {
+function PriceForm({ model, current, override, onBack, onSaved }: { model: string | null; current: PerMillion | null; override: PriceOverride | undefined; onBack: () => void; onSaved: () => void }) {
   const initial = override ?? current;
   const field = (value: number | null | undefined) => value === null || value === undefined ? '' : String(Number(value.toPrecision(6)));
   const [name, setName] = useState(model ?? '');
@@ -237,64 +220,45 @@ function PriceForm({ model, current, override, onClose, onSaved }: { model: stri
   const values = [parse(input), parse(output), parse(cacheRead), parse(cacheWrite)];
   const valid = name.trim() && values[0] !== null && values[1] !== null && values.every((value) => value === null || (Number.isFinite(value) && value >= 0));
 
-  async function save(event: FormEvent) {
-    event.preventDefault();
-    if (!valid) return;
+  async function send(method: 'PUT' | 'DELETE', event?: FormEvent) {
+    event?.preventDefault();
+    if (method === 'PUT' && !valid) return;
     setSaving(true); setStatus('');
     try {
-      const response = await fetch('/api/usage/price-overrides', { method: 'PUT', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ model: name.trim(), input: values[0], output: values[1], cache_read: values[2], cache_write: values[3] }) });
+      const response = method === 'PUT'
+        ? await fetch('/api/usage/price-overrides', { method, headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ model: name.trim(), input: values[0], output: values[1], cache_read: values[2], cache_write: values[3] }) })
+        : await fetch(`/api/usage/price-overrides?model=${encodeURIComponent(name.trim())}`, { method });
       if (!response.ok) throw new Error((await response.json().catch(() => ({}))).detail ?? 'Could not save the price.');
       onSaved();
     } catch (reason) {
       setStatus(reason instanceof Error ? reason.message : 'Could not save the price.');
     } finally { setSaving(false); }
   }
-  async function remove() {
-    setSaving(true);
-    try {
-      const response = await fetch(`/api/usage/price-overrides?model=${encodeURIComponent(name.trim())}`, { method: 'DELETE' });
-      if (!response.ok) throw new Error('Could not remove the override.');
-      onSaved();
-    } catch (reason) {
-      setStatus(reason instanceof Error ? reason.message : 'Could not remove the override.');
-    } finally { setSaving(false); }
-  }
-  const numberField = (label: string, value: string, change: (value: string) => void, placeholder: string, required = false) =>
-    <label className="field-label">{label}<span className="usage-money-input"><i>$</i><input type="number" inputMode="decimal" min="0" step="any" value={value} placeholder={placeholder} required={required} onChange={(event) => change(event.target.value)} /></span></label>;
-  return <div className="usage-sheet-backdrop" onMouseDown={(event) => { if (event.target === event.currentTarget) onClose(); }}>
-    <form className="usage-sheet usage-price-form" role="dialog" aria-modal="true" aria-labelledby="usage-price-title" onSubmit={save}>
-      <header className="usage-sheet-head">
-        <div><h2 id="usage-price-title">{override ? 'Edit price override' : 'Set model price'}</h2><p>USD per 1M tokens. Overrides win over published prices and apply to all past usage of this model.</p></div>
-        <button type="button" className="usage-icon-button" onClick={onClose} aria-label="Close price form">×</button>
-      </header>
-      <label className="field-label">Model ID<input value={name} onChange={(event) => setName(event.target.value)} disabled={model !== null} placeholder="e.g. gpt-5.6-terra" required autoFocus={model === null} /></label>
-      {!override && current && <p className="usage-muted">Prefilled with the current published price.</p>}
-      <div className="usage-price-grid">
-        {numberField('Input', input, setInput, '0.00', true)}
-        {numberField('Output', output, setOutput, '0.00', true)}
-        {numberField('Cache read', cacheRead, setCacheRead, input ? `${input} (input)` : 'Input rate')}
-        {numberField('Cache write', cacheWrite, setCacheWrite, input ? `${input} (input)` : 'Input rate')}
-      </div>
-      <footer className="usage-sheet-foot">
-        <span role="status" className="usage-error">{status}</span>
-        <div>{override && <button type="button" className="secondary-button" onClick={() => void remove()} disabled={saving}>Remove override</button>}
-          <button type="button" className="secondary-button" onClick={onClose}>Cancel</button>
-          <button type="submit" className="primary-button" disabled={!valid || saving}>{saving ? 'Saving…' : 'Save price'}</button></div>
-      </footer>
-    </form>
-  </div>;
+  const money = (label: string, value: string, change: (value: string) => void, placeholder: string) =>
+    <label className="field-label">{label}<span className="usage-money-input"><i>$</i><input type="number" inputMode="decimal" min="0" step="any" value={value} placeholder={placeholder} onChange={(event) => change(event.target.value)} /></span></label>;
+  return <form className="usage-subview" onSubmit={(event) => void send('PUT', event)}>
+    <button type="button" className="usage-back-link" onClick={onBack}>‹ Back</button>
+    <div className="usage-subview-head"><div><h4>{override ? 'Edit model price' : 'Set model price'}</h4>
+      <p>USD per 1M tokens. Your price replaces published prices and applies to all past usage of this model.</p></div></div>
+    <label className="field-label">Model ID<input value={name} onChange={(event) => setName(event.target.value)} disabled={model !== null} placeholder="e.g. gpt-5.6-terra" autoFocus={model === null} /></label>
+    <div className="usage-price-grid">
+      {money('Input', input, setInput, '0.00')}
+      {money('Output', output, setOutput, '0.00')}
+      {money('Cache read (optional)', cacheRead, setCacheRead, 'Same as input')}
+      {money('Cache write (optional)', cacheWrite, setCacheWrite, 'Same as input')}
+    </div>
+    {!override && current && <p className="usage-muted">Filled in with the current published price.</p>}
+    <div className="usage-form-actions">
+      <span role="status" className="usage-error">{status}</span>
+      {override && <button type="button" className="secondary-button" onClick={() => void send('DELETE')} disabled={saving}>Remove my price</button>}
+      <button type="submit" className="primary-button" disabled={!valid || saving}>{saving ? 'Saving…' : 'Save price'}</button>
+    </div>
+  </form>;
 }
 
-/* ------------------------------------------------------------------------------------------ */
-/* Page                                                                                         */
-/* ------------------------------------------------------------------------------------------ */
+/* The Usage section of Settings. */
 
-function Metric({ label, value, hint }: { label: string; value: string; hint?: string }) {
-  return <div className="usage-metric" title={hint}><span>{label}</span><strong>{value}</strong></div>;
-}
-
-export default function UsageDashboard({ onClose, onBack }: { onClose: () => void; onBack?: () => void }) {
-  const dialog = useRef<HTMLDialogElement>(null);
+export default function UsageSettings() {
   const [preferences, setPreferences] = useState<{ days: number; metric: Metric }>(readPreferences);
   const [provider, setProvider] = useState('');
   const [kind, setKind] = useState('');
@@ -304,10 +268,10 @@ export default function UsageDashboard({ onClose, onBack }: { onClose: () => voi
   const [error, setError] = useState('');
   const [notice, setNotice] = useState('');
   const [refreshing, setRefreshing] = useState(false);
-  const [selectedModel, setSelectedModel] = useState<string | null>(null);
-  const [priceTarget, setPriceTarget] = useState<{ model: string | null } | null>(null);
+  const [view, setView] = useState<View>({ kind: 'overview' });
   const [overrides, setOverrides] = useState<Record<string, PriceOverride>>({});
   const request = useRef(0);
+  const root = useRef<HTMLDivElement>(null);
   const { days, metric } = preferences;
 
   const updatePreferences = (next: Partial<{ days: number; metric: Metric }>) => setPreferences((current) => {
@@ -320,12 +284,11 @@ export default function UsageDashboard({ onClose, onBack }: { onClose: () => voi
     const id = ++request.current;
     setLoading(true);
     try {
-      const timeZone = Intl.DateTimeFormat().resolvedOptions().timeZone;
-      const params = new URLSearchParams({ days: String(days), tz: timeZone });
+      const params = new URLSearchParams({ days: String(days), tz: Intl.DateTimeFormat().resolvedOptions().timeZone });
       if (provider) params.set('provider', provider);
       if (kind) params.set('kind', kind);
       const [response, overrideResponse] = await Promise.all([fetch(`/api/usage/summary?${params}`), fetch('/api/usage/price-overrides')]);
-      if (!response.ok) throw new Error('Could not load usage.');
+      if (!response.ok) throw new Error('Could not load usage. Try again.');
       const value = await response.json() as UsageSummary;
       const overrideValue = overrideResponse.ok ? await overrideResponse.json() as Record<string, PriceOverride> : {};
       if (id !== request.current) return;
@@ -339,162 +302,161 @@ export default function UsageDashboard({ onClose, onBack }: { onClose: () => voi
   // eslint-disable-next-line react-hooks/set-state-in-effect -- reload when the range or filters change
   useEffect(() => { void load(); }, [load]);
 
+  // Escape steps back to the overview before it closes Settings.
   useEffect(() => {
-    const element = dialog.current;
-    if (element && !element.open) element.showModal();
-  }, []);
-  // Escape closes the innermost panel first.
-  const onCancel = (event: React.SyntheticEvent) => {
-    event.preventDefault();
-    if (priceTarget) setPriceTarget(null);
-    else if (selectedModel) setSelectedModel(null);
-    else onClose();
-  };
+    if (view.kind === 'overview') return;
+    const back = (event: KeyboardEvent) => {
+      if (event.key !== 'Escape' || document.querySelector('.app-select-menu')) return;
+      event.preventDefault();
+      setView((current) => current.kind === 'price' ? current.back : { kind: 'overview' });
+    };
+    window.addEventListener('keydown', back, true);
+    return () => window.removeEventListener('keydown', back, true);
+  }, [view]);
+  const go = (next: View) => { setView(next); root.current?.closest('.provider-content')?.scrollTo({ top: 0 }); };
 
   async function refreshPrices() {
     setRefreshing(true); setNotice('');
     try {
       const response = await fetch('/api/usage/prices/refresh', { method: 'POST' });
       const value = await response.json().catch(() => ({}));
-      if (response.status === 429) setNotice(value.detail ?? 'Prices were refreshed recently.');
-      else if (!response.ok) throw new Error('Could not refresh prices.');
-      else setNotice(value.error ? `Some price sources failed (${value.error}); using the last saved prices.` : 'Prices refreshed.');
+      if (response.status === 429) setNotice(value.detail ?? 'Prices were updated a moment ago.');
+      else if (!response.ok) throw new Error('Could not update prices.');
+      else setNotice(value.error ? 'Some price lists could not be reached; the last saved prices are still used.' : 'Prices updated.');
       await load();
     } catch (reason) {
-      setNotice(reason instanceof Error ? reason.message : 'Could not refresh prices.');
+      setNotice(reason instanceof Error ? reason.message : 'Could not update prices.');
     } finally { setRefreshing(false); }
   }
 
   const totals = summary?.totals;
   const activeProviders = useMemo(() => sortProviders(summary?.providers.map((item) => item.provider) ?? []), [summary]);
   const chartSeries = useMemo<ChartSeries[]>(() => !summary ? [] : activeProviders.map((name) => ({
-    key: name, label: providerInfo(name).label, color: providerColor(name),
+    key: name, label: providerInfo(name).label, color: providerInfo(name).color,
     values: summary.series.map((period) => metric === 'cost' ? period.by_provider[name]?.cost_usd ?? 0 : period.by_provider[name]?.total_tokens ?? 0),
   })), [summary, activeProviders, metric]);
   const models = useMemo(() => [...(summary?.models ?? [])].sort((a, b) => metric === 'tokens' ? b.total_tokens - a.total_tokens : (Number(a.cost_unknown) - Number(b.cost_unknown)) || b.cost_usd - a.cost_usd || b.total_tokens - a.total_tokens), [summary, metric]);
   const peak = Math.max(0, ...models.map((model) => metric === 'tokens' ? model.total_tokens : model.cost_usd));
   const periods = useMemo(() => [...(summary?.series ?? [])].filter((period) => period.requests > 0).reverse(), [summary]);
-  const selected = summary?.models.find((model) => `${model.provider}:${model.model}` === selectedModel);
-  const priceModel = priceTarget?.model ? summary?.models.find((model) => model.model === priceTarget.model) : undefined;
-  const unpricedShare = totals && totals.requests ? totals.unpriced_requests / totals.requests : 0;
-  const estimateLabel = totals && totals.requests > 0 && totals.cost_sources.providerReported === totals.requests ? 'provider reported' : 'estimate';
   const pricing = summary?.pricing;
   const pricingDate = pricing?.litellm_fetched_at ? new Date(pricing.litellm_fetched_at).toLocaleString('en-US', { month: 'short', day: 'numeric', hour: 'numeric', minute: '2-digit' }) : null;
   const providerOptions = [{ value: '', label: 'All providers' }, ...sortProviders([...new Set([...(summary?.available_providers ?? []), ...(provider ? [provider] : [])])]).map((name) => ({ value: name, label: providerInfo(name).label }))];
+  const unpricedShare = totals && totals.requests ? totals.unpriced_requests / totals.requests : 0;
 
-  return <dialog ref={dialog} className="usage-dialog" aria-labelledby="usage-title" onCancel={onCancel}>
-    <div className="usage-page">
-      <header className="usage-topbar">
-        <div className="usage-title">
-          {onBack && <button type="button" className="usage-back" onClick={onBack} aria-label="Back to settings">‹ Settings</button>}
-          <div><span className="settings-kicker">Preferences</span><h1 id="usage-title">Usage</h1></div>
-        </div>
-        <button type="button" className="usage-icon-button" onClick={onClose} aria-label="Close usage">×</button>
-      </header>
+  const selectedModel = view.kind === 'model' ? summary?.models.find((model) => `${model.provider}:${model.model}` === view.key) : undefined;
+  const priceModel = view.kind === 'price' && view.model ? summary?.models.find((model) => model.model === view.model) : undefined;
 
-      <div className="usage-controls" role="toolbar" aria-label="Usage filters">
-        <div className="usage-segmented" role="group" aria-label="Time range">
-          {RANGES.map((range) => <button type="button" key={range.days} aria-pressed={days === range.days} onClick={() => updatePreferences({ days: range.days })}>{range.label}</button>)}
+  let body: ReactNode;
+  if (view.kind === 'model' && selectedModel && summary) {
+    body = <ModelDetail model={selectedModel} summary={summary} metric={metric} onBack={() => go({ kind: 'overview' })} onSetPrice={() => go({ kind: 'price', model: selectedModel.model, back: view })} />;
+  } else if (view.kind === 'price') {
+    body = <PriceForm key={view.model ?? 'new'} model={view.model} current={priceModel && priceModel.rate_source !== 'override' ? priceModel.rates : null} override={view.model ? overrides[view.model] : undefined}
+      onBack={() => go(view.back)} onSaved={() => { go(view.back); void load(); }} />;
+  } else if (!summary || !totals) {
+    body = <div className="model-empty">{loading ? 'Loading usage…' : error || 'Usage is unavailable.'}</div>;
+  } else if (totals.requests === 0 && !provider && !kind) {
+    body = <div className="usage-empty"><strong>No usage in this period</strong><p>Ask a question in any paper and its token usage and estimated cost appear here. Usage is recorded from when this feature was installed; earlier requests weren’t measured.</p></div>;
+  } else {
+    body = <div className={`usage-overview${loading ? ' is-loading' : ''}`}>
+      <section className="usage-card usage-hero">
+        <div className="usage-hero-summary">
+          <span className="usage-kicker">{metric === 'cost' ? 'Estimated cost' : 'Processed tokens'}</span>
+          <span className="usage-hero-figure">{metric === 'cost' ? formatUsd(totals.cost_usd) : formatTokens(totals.total_tokens)}</span>
+          <span className="usage-muted">{totals.requests.toLocaleString()} {totals.requests === 1 ? 'request' : 'requests'}
+            {metric === 'cost' && unpricedShare > 0 && <span className="usage-flag" title="Requests to models without a known price count as $0.">{formatPercent(unpricedShare)} unpriced</span>}</span>
+          <ul className="usage-provider-list">
+            {[...summary.providers].sort((a, b) => metric === 'tokens' ? b.total_tokens - a.total_tokens : b.cost_usd - a.cost_usd).map((item) => {
+              const info = providerInfo(item.provider);
+              return <li key={item.provider}>
+                <span className="usage-provider-name"><Dot color={info.color} />{info.label}</span>
+                <strong>{metric === 'cost' ? formatUsd(item.cost_usd) : formatTokens(item.total_tokens)}</strong>
+                <span className="usage-muted usage-provider-sub">{item.requests} {item.requests === 1 ? 'request' : 'requests'} · {metric === 'cost' ? `${formatPercent(item.cost_share)} of cost` : `${formatPercent(item.token_share)} of tokens`}
+                  {info.manageUrl && <> · <a href={info.manageUrl} target="_blank" rel="noreferrer">Manage usage ↗</a></>}</span>
+              </li>;
+            })}
+          </ul>
         </div>
-        <div className="usage-segmented" role="group" aria-label="Metric">
-          {(['cost', 'tokens'] as const).map((value) => <button type="button" key={value} aria-pressed={metric === value} onClick={() => updatePreferences({ metric: value })}>{value === 'cost' ? 'Cost' : 'Tokens'}</button>)}
+        <div className="usage-hero-chart">
+          <h4>{summary.range.resolution === 'hour' ? 'Hourly' : 'Daily'} {metric === 'cost' ? 'cost' : 'tokens'}</h4>
+          <UsageAreaChart label={`${summary.range.resolution === 'hour' ? 'Hourly' : 'Daily'} ${metric}`} buckets={summary.range.buckets} resolution={summary.range.resolution} series={chartSeries} format={metric === 'cost' ? formatUsd : formatTokens} />
         </div>
-        <div className="usage-select"><AppSelect label="Provider" value={provider} onChange={setProvider} options={providerOptions} /></div>
-        <div className="usage-select"><AppSelect label="Request type" value={kind} onChange={setKind} options={KINDS} /></div>
-        <button type="button" className="secondary-button usage-refresh" onClick={() => void refreshPrices()} disabled={refreshing}
-          title={pricing ? `LiteLLM prices: ${pricing.litellm_models} models${pricingDate ? `, fetched ${pricingDate}` : ''}. OpenCode Zen prices: ${pricing.zen_models} models.` : undefined}>
-          <span aria-hidden="true" className={refreshing ? 'usage-spin' : ''}>↻</span>{refreshing ? 'Refreshing…' : 'Refresh prices'}
-        </button>
+      </section>
+
+      <div className="usage-metrics">
+        <div title="Uncached input + cache reads + cache writes + output"><span>Processed tokens</span><strong>{formatTokens(totals.total_tokens)}</strong></div>
+        <div><span>Cached input</span><strong>{formatTokens(totals.tokens.cache_read)}</strong></div>
+        <div title="Includes cache writes"><span>Uncached input</span><strong>{formatTokens(totals.tokens.uncached_input + totals.tokens.cache_write)}</strong></div>
+        <div title={`Includes ${formatTokens(totals.tokens.reasoning)} reasoning tokens`}><span>Output</span><strong>{formatTokens(totals.tokens.output)}</strong></div>
+        <div title="Cache reads × (input price − cache read price)"><span>Cache savings</span><strong>{formatUsd(totals.cache_savings_usd)}</strong></div>
       </div>
-      {(notice || error || pricing?.error) && <p className={`usage-notice${error ? ' usage-error' : ''}`} role="status">{error || notice || `Price update failed; using prices from ${pricingDate ?? 'the last saved copy'}.`}</p>}
 
-      {!summary ? <div className="usage-loading">{loading ? 'Loading usage…' : 'Usage is unavailable.'}</div> : <div className={`usage-body${loading ? ' is-loading' : ''}`}>
-        <section className="usage-hero">
-          <div className="usage-hero-summary">
-            <span className="usage-hero-figure">{metric === 'cost' ? formatUsd(totals!.cost_usd) : formatTokens(totals!.total_tokens)}</span>
-            <span className="usage-muted">{totals!.requests.toLocaleString()} {totals!.requests === 1 ? 'request' : 'requests'}{metric === 'cost' ? ` · ${estimateLabel}` : ' · processed tokens'}
-              {metric === 'cost' && unpricedShare > 0 && <span className="usage-flag" title="Unpriced usage counts as $0. Set a price for those models below.">{formatPercent(unpricedShare)} unpriced</span>}</span>
-            <ul className="usage-provider-list">
-              {summary.providers.length === 0 && <li className="usage-muted">No requests yet in this window.</li>}
-              {[...summary.providers].sort((a, b) => metric === 'tokens' ? b.total_tokens - a.total_tokens : b.cost_usd - a.cost_usd).map((item) => {
-                const info = providerInfo(item.provider);
-                return <li key={item.provider}>
-                  <div className="usage-provider-row"><span className="usage-provider-name"><i style={{ background: providerColor(item.provider) }} /><ProviderMark provider={item.provider} />{info.label}<small>{item.requests} {item.requests === 1 ? 'request' : 'requests'}</small></span>
-                    <strong>{metric === 'cost' ? formatUsd(item.cost_usd) : formatTokens(item.total_tokens)}</strong></div>
-                  <span className="usage-muted usage-provider-sub">{metric === 'cost' ? `${formatPercent(item.cost_share)} of cost · ${formatTokens(item.total_tokens)} tokens` : `${formatPercent(item.token_share)} of tokens · ${formatUsd(item.cost_usd)}`}
-                    {info.manageUrl && <a href={info.manageUrl} target="_blank" rel="noreferrer">Manage usage ↗</a>}</span>
-                </li>;
-              })}
-            </ul>
-          </div>
-          <div className="usage-hero-chart">
-            <h2>{summary.range.resolution === 'hour' ? 'Hourly' : 'Daily'} {metric === 'cost' ? 'cost' : 'processed tokens'}</h2>
-            <UsageAreaChart label={`${summary.range.resolution === 'hour' ? 'Hourly' : 'Daily'} ${metric}`} buckets={summary.range.buckets} resolution={summary.range.resolution} series={chartSeries} format={metric === 'cost' ? formatUsd : formatTokens} />
-          </div>
-        </section>
-
-        <section className="usage-section">
-          <h2>Totals</h2>
-          <div className="usage-metrics">
-            <Metric label="Processed tokens" value={formatTokens(totals!.total_tokens)} hint="Uncached input + cache reads + cache writes + output" />
-            <Metric label="Cached input" value={formatTokens(totals!.tokens.cache_read)} />
-            <Metric label="Uncached input" value={formatTokens(totals!.tokens.uncached_input + totals!.tokens.cache_write)} hint="Includes cache writes" />
-            <Metric label="Output" value={formatTokens(totals!.tokens.output)} hint={`Includes ${formatTokens(totals!.tokens.reasoning)} reasoning tokens`} />
-            <Metric label="Cache savings" value={formatUsd(totals!.cache_savings_usd)} hint="Cache reads × (input price − cache read price)" />
-          </div>
-        </section>
-
-        {totals!.total_tokens > 0 && <section className="usage-share-grid usage-section">
-          {metric === 'cost' ? <ShareBar label="Cost by type" segments={costSegments(totals!.category_cost)} format={formatUsd} /> : <ShareBar label="Tokens by type" segments={tokenSegments(totals!.tokens)} format={formatTokens} />}
-          {metric === 'cost' && <ShareBar label="Tokens by type" segments={tokenSegments(totals!.tokens)} format={formatTokens} />}
-        </section>}
-
-        <section className="usage-section">
-          <div className="usage-section-head"><h2>Breakdown</h2>
-            <div className="usage-segmented" role="group" aria-label="Breakdown">
-              <button type="button" aria-pressed={breakdown === 'model'} onClick={() => setBreakdown('model')}>Model</button>
-              <button type="button" aria-pressed={breakdown === 'day'} onClick={() => setBreakdown('day')}>{summary.range.resolution === 'hour' ? 'Hour' : 'Day'}</button>
-            </div></div>
-          {breakdown === 'model' ? <table className="usage-table">
-            <thead><tr><th>#</th><th className="usage-col-model">Model</th><th>Cost</th><th className="usage-col-share">Share</th><th>Tokens</th></tr></thead>
-            <tbody>
-              {models.length === 0 ? <tr><td colSpan={5} className="usage-table-empty">No activity in this window.</td></tr> : models.map((model, index) => {
-                const key = `${model.provider}:${model.model}`;
-                const value = metric === 'tokens' ? model.total_tokens : model.cost_usd;
-                const share = metric === 'tokens' ? model.token_share : model.cost_unknown ? null : model.cost_share;
-                return <tr key={key}>
-                  <td className="usage-rank">{index + 1}</td>
-                  <td className="usage-col-model"><button type="button" className="usage-model-button" onClick={() => setSelectedModel(key)}><ProviderMark provider={model.provider} />{model.model}</button>
-                    {value > 0 && peak > 0 && <div className="usage-row-bar" aria-hidden="true"><span style={{ width: `max(0.5rem, ${(value / peak) * 100}%)`, background: providerColor(model.provider) }} /></div>}</td>
-                  <td>{model.cost_unknown ? <span className="usage-unpriced">Unpriced · <button type="button" onClick={() => setPriceTarget({ model: model.model })}>Set price</button></span> : formatUsd(model.cost_usd)}</td>
-                  <td className="usage-col-share">{share === null ? '' : formatPercent(share)}</td>
-                  <td>{formatTokens(model.total_tokens)}</td>
-                </tr>;
-              })}
-            </tbody>
-          </table> : <div className="usage-table-scroll" role="region" aria-label="Usage by period" tabIndex={0}><table className="usage-table">
-            <thead><tr><th className="usage-col-model">{summary.range.resolution === 'hour' ? 'Hour' : 'Day'}</th>{activeProviders.map((name) => <th key={name}>{providerInfo(name).label}</th>)}<th>Total</th><th>Tokens</th></tr></thead>
-            <tbody>
-              {periods.length === 0 ? <tr><td colSpan={activeProviders.length + 3} className="usage-table-empty">No activity in this window.</td></tr> : periods.map((period) => <tr key={period.bucket}>
-                <td className="usage-col-model">{formatBucket(period.bucket, summary.range.resolution, true)}</td>
-                {activeProviders.map((name) => <td key={name}>{metric === 'cost' ? formatUsd(period.by_provider[name]?.cost_usd ?? 0) : formatTokens(period.by_provider[name]?.total_tokens ?? 0)}</td>)}
-                <td className="usage-strong">{formatUsd(period.cost_usd)}</td><td>{formatTokens(period.total_tokens)}</td>
-              </tr>)}
-            </tbody>
-          </table></div>}
-        </section>
-
-        <section className="usage-section">
-          <div className="usage-section-head"><h2>Price overrides</h2><button type="button" className="secondary-button" onClick={() => setPriceTarget({ model: null })}>Add override</button></div>
-          {Object.keys(overrides).length === 0 ? <p className="usage-muted">No overrides. Published prices from LiteLLM and OpenCode Zen are used; set a price for any model that is unpriced or priced differently for you.</p> :
-            <ul className="usage-override-list">{Object.entries(overrides).map(([name, value]) => <li key={name}><strong>{name}</strong><span className="usage-muted">{formatRate(value.input)} in · {formatRate(value.output)} out · {formatRate(value.cache_read ?? value.input)} cache read · {formatRate(value.cache_write ?? value.input)} cache write per 1M</span><button type="button" className="secondary-button" onClick={() => setPriceTarget({ model: name })}>Edit</button></li>)}</ul>}
-        </section>
-
-        <p className="usage-footnote">Costs are estimates recomputed from current prices{pricingDate ? ` (LiteLLM, fetched ${pricingDate}` : ' ('}{pricing?.models_dev_fetched_at ? '; OpenCode Zen via models.dev' : ''}), so price updates and overrides apply to past usage. OpenRouter costs are provider-reported. Usage history starts when usage tracking was installed; unpriced models count as $0.</p>
+      {totals.total_tokens > 0 && <div className="usage-share-grid">
+        <ShareBar label="Cost by type" segments={costSegments(totals.category_cost)} format={formatUsd} emptyText={totals.unpriced_requests ? 'No cost yet: these requests used free or unpriced models.' : 'No cost yet: these requests used free models.'} />
+        <ShareBar label="Tokens by type" segments={tokenSegments(totals.tokens)} format={formatTokens} />
       </div>}
+
+      <section className="usage-breakdown">
+        <div className="usage-section-head"><h4>Breakdown</h4>
+          <div className="prompt-kind-tabs" role="group" aria-label="Breakdown">
+            <button type="button" className={breakdown === 'model' ? 'active' : ''} aria-pressed={breakdown === 'model'} onClick={() => setBreakdown('model')}>By model</button>
+            <button type="button" className={breakdown === 'day' ? 'active' : ''} aria-pressed={breakdown === 'day'} onClick={() => setBreakdown('day')}>By {summary.range.resolution === 'hour' ? 'hour' : 'day'}</button>
+          </div></div>
+        {breakdown === 'model' ? <table className="usage-table">
+          <thead><tr><th>#</th><th className="usage-col-main">Model</th><th>Cost</th><th className="usage-col-share">Share</th><th>Tokens</th></tr></thead>
+          <tbody>
+            {models.length === 0 ? <tr><td colSpan={5} className="usage-table-empty">No requests match these filters.</td></tr> : models.map((model, index) => {
+              const key = `${model.provider}:${model.model}`;
+              const value = metric === 'tokens' ? model.total_tokens : model.cost_usd;
+              const share = metric === 'tokens' ? model.token_share : model.cost_unknown ? null : model.cost_share;
+              const color = providerInfo(model.provider).color;
+              return <tr key={key}>
+                <td className="usage-rank">{index + 1}</td>
+                <td className="usage-col-main"><button type="button" className="usage-model-button" onClick={() => go({ kind: 'model', key })}><Dot color={color} />{model.model}</button>
+                  {value > 0 && peak > 0 && <div className="usage-row-bar" aria-hidden="true"><span style={{ width: `max(0.5rem, ${(value / peak) * 100}%)`, background: color }} /></div>}</td>
+                <td>{model.cost_unknown ? <span className="usage-unpriced">Unpriced · <button type="button" onClick={() => go({ kind: 'price', model: model.model, back: { kind: 'overview' } })}>Set price</button></span> : formatUsd(model.cost_usd)}</td>
+                <td className="usage-col-share">{share === null ? '' : formatPercent(share)}</td>
+                <td>{formatTokens(model.total_tokens)}</td>
+              </tr>;
+            })}
+          </tbody>
+        </table> : <div className="usage-table-scroll" role="region" aria-label="Usage by period" tabIndex={0}><table className="usage-table">
+          <thead><tr><th className="usage-col-main">{summary.range.resolution === 'hour' ? 'Hour' : 'Day'}</th>{activeProviders.map((name) => <th key={name}>{providerInfo(name).label}</th>)}<th>Total</th><th>Tokens</th></tr></thead>
+          <tbody>
+            {periods.length === 0 ? <tr><td colSpan={activeProviders.length + 3} className="usage-table-empty">No requests match these filters.</td></tr> : periods.map((period) => <tr key={period.bucket}>
+              <td className="usage-col-main">{formatBucket(period.bucket, summary.range.resolution, true)}</td>
+              {activeProviders.map((name) => <td key={name}>{metric === 'cost' ? formatUsd(period.by_provider[name]?.cost_usd ?? 0) : formatTokens(period.by_provider[name]?.total_tokens ?? 0)}</td>)}
+              <td className="usage-strong">{formatUsd(period.cost_usd)}</td><td>{formatTokens(period.total_tokens)}</td>
+            </tr>)}
+          </tbody>
+        </table></div>}
+      </section>
+
+      <section className="usage-breakdown">
+        <div className="usage-section-head"><h4>Your model prices</h4><button type="button" className="secondary-button" onClick={() => go({ kind: 'price', model: null, back: { kind: 'overview' } })}>Add price</button></div>
+        {Object.keys(overrides).length === 0 ? <p className="usage-muted">None. Published prices are used; add your own for a model that’s missing or priced differently for you.</p> :
+          <ul className="usage-override-list">{Object.entries(overrides).map(([name, value]) => <li key={name}><strong>{name}</strong><span className="usage-muted">{formatRate(value.input)} input · {formatRate(value.output)} output per 1M</span><button type="button" className="secondary-button" onClick={() => go({ kind: 'price', model: name, back: { kind: 'overview' } })}>Edit</button></li>)}</ul>}
+      </section>
+
+      <p className="usage-footnote">Costs are estimates from current published prices{pricingDate ? ` (updated ${pricingDate})` : ''}; OpenRouter costs come from OpenRouter. Usage is recorded from when this feature was installed.</p>
+    </div>;
+  }
+
+  return <div className="usage-settings" ref={root}>
+    <div className="provider-heading">
+      <div><h3>Usage &amp; cost</h3><p>Token usage and estimated spend for chats, Quick Ask, and chat titles.</p></div>
+      <button type="button" className="secondary-button" onClick={() => void refreshPrices()} disabled={refreshing} title={pricingDate ? `Prices last updated ${pricingDate}` : undefined}>{refreshing ? 'Updating…' : 'Update prices'}</button>
     </div>
-    {selected && summary && <ModelPanel model={selected} summary={summary} metric={metric} onClose={() => setSelectedModel(null)} onSetPrice={() => setPriceTarget({ model: selected.model })} />}
-    {priceTarget && <PriceForm key={priceTarget.model ?? 'new'} model={priceTarget.model} current={priceModel?.rate_source !== 'override' ? priceModel?.rates ?? null : null} override={priceTarget.model ? overrides[priceTarget.model] : undefined}
-      onClose={() => setPriceTarget(null)} onSaved={() => { setPriceTarget(null); void load(); }} />}
-  </dialog>;
+    {view.kind === 'overview' && <div className="usage-controls" role="toolbar" aria-label="Usage filters">
+      <div className="prompt-kind-tabs" role="group" aria-label="Time range">
+        {RANGES.map((range) => <button type="button" key={range.days} className={days === range.days ? 'active' : ''} aria-pressed={days === range.days} onClick={() => updatePreferences({ days: range.days })}>{range.label}</button>)}
+      </div>
+      <div className="prompt-kind-tabs" role="group" aria-label="Metric">
+        {(['cost', 'tokens'] as const).map((value) => <button type="button" key={value} className={metric === value ? 'active' : ''} aria-pressed={metric === value} onClick={() => updatePreferences({ metric: value })}>{value === 'cost' ? 'Cost' : 'Tokens'}</button>)}
+      </div>
+      <AppSelect label="Provider" value={provider} onChange={setProvider} options={providerOptions} />
+      <AppSelect label="Request type" value={kind} onChange={setKind} options={KINDS} />
+    </div>}
+    {(notice || (error && summary) || pricing?.error) && view.kind === 'overview' && <p className="usage-notice" role="status">{notice || error || 'Price lists could not be reached; the last saved prices are used.'}</p>}
+    {body}
+  </div>;
 }

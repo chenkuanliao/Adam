@@ -140,11 +140,15 @@ def build_usage_summary(rows: list[UsageRow], *, book: PriceBook, overrides: dic
         model["cost_share"] = _share(model["cost_usd"], total_cost)
         model["token_share"] = _share(model["total_tokens"], total_tokens)
         model["cost_unknown"] = model["unpriced_requests"] == model["requests"]
-        model["series"] = [{"bucket": label, **value} for label, value in model["series"].items()]
+        # Compact per-bucket arrays aligned with range.buckets keep long ranges small.
+        points = model.pop("series").values()
+        model["series_cost"] = [round(point["cost_usd"], 6) for point in points]
+        model["series_tokens"] = [point["total_tokens"] for point in points]
         model_list.append(model)
     model_list.sort(key=lambda item: (-item["cost_usd"], -item["total_tokens"]))
-    series = [{"bucket": label, **{name: value for name, value in period.items() if name != "by_provider"},
-               "by_provider": dict(period["by_provider"])} for label, period in periods.items()]
+    series = [{"bucket": label, "requests": period["requests"], "cost_usd": round(period["cost_usd"], 6), "total_tokens": period["total_tokens"],
+               "by_provider": {name: {**value, "cost_usd": round(value["cost_usd"], 6)} for name, value in period["by_provider"].items()}}
+              for label, period in periods.items()]
     return {"range": {"days": days, "resolution": resolution, "since": start.isoformat(), "until": now.isoformat(), "buckets": labels},
             "filters": {"provider": provider, "kind": kind}, "available_providers": available_providers,
             "totals": totals, "providers": provider_list, "models": model_list, "series": series,

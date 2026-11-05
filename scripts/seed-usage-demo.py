@@ -1,14 +1,16 @@
 #!/usr/bin/env python3
-"""Seed synthetic usage events so the Usage dashboard can be viewed without spending money.
+"""Seed synthetic usage events for developing the Usage settings page. Development only.
 
-Development only; never run automatically. Rows use ids starting with ``demo-usage-`` so a rerun
-replaces them and ``--clear`` removes them without touching real usage history.
+Never run automatically and never needed for normal use. Rows use ids starting with
+``demo-usage-``; ``--clear`` removes them without touching real usage history.
 
-    python scripts/seed-usage-demo.py                 # ./data/database/adam.sqlite3
-    python scripts/seed-usage-demo.py --data-dir data/review-demo
-    python scripts/seed-usage-demo.py --clear
+Run it inside the API container so it writes through the same SQLite instance the server uses
+(writing the bind-mounted database from the host is not reliable while Docker has it open):
 
-Start the app once first so the database and its ``usage_events`` table exist.
+    docker compose exec -T api python - --data-dir /data < scripts/seed-usage-demo.py
+    docker compose exec -T api python - --data-dir /data --clear < scripts/seed-usage-demo.py
+
+For a local (non-Docker) backend, run it directly with ``--data-dir`` pointing at that data directory.
 """
 import argparse
 import random

@@ -5,7 +5,7 @@ import { FormEvent, memo, useCallback, useEffect, useLayoutEffect, useRef, useSt
 import { Document as PdfDocument, Page, pdfjs } from 'react-pdf';
 import type { PDFDocumentProxy, PDFPageProxy, TextContent } from 'pdfjs-dist/types/src/display/api';
 import AppSelect from './app-select';
-import UsageDashboard from './usage-dashboard';
+import UsageSettings from './usage-dashboard';
 import PaneSearch from './pane-search';
 import PaperNoteEditor from './paper-note-editor';
 import type { QuoteSource } from './source-quote';
@@ -188,7 +188,6 @@ export default function Home() {
   const [asking, setAsking] = useState(false);
   const [error, setError] = useState('');
   const [settingsOpen, setSettingsOpen] = useState(false);
-  const [usageOpen, setUsageOpen] = useState(false);
   const [libraryLoading, setLibraryLoading] = useState(true);
   const [paperSearchOpen, setPaperSearchOpen] = useState(false);
   const [paperSearchMode, setPaperSearchMode] = useState<'library' | 'online'>('library');
@@ -685,7 +684,6 @@ export default function Home() {
     const openSettings = (event: KeyboardEvent) => {
       if ((event.metaKey || event.ctrlKey) && event.key === ',') {
         event.preventDefault();
-        setUsageOpen(false);
         setSettingsOpen(true);
       }
     };
@@ -2104,8 +2102,7 @@ export default function Home() {
     <ActionTooltips />
     <AppDialogs />
     <LibraryDashboard key={libraryNavigation} onSearch={(folderId) => { setPaperSearchMode('library'); setPaperSearchFolder(folderId ?? null); setPaperSearchOpen(true); }} onFindPapers={(folderId) => { setPaperSearchMode('online'); setPaperSearchFolder(folderId); setPaperSearchOpen(true); }} papers={papers} loading={libraryLoading} uploading={uploading} error={error} brand={<Brand />} settings={<SettingsButton onClick={() => setSettingsOpen(true)} />} preview={(paper) => <PaperPreview paper={paper} />} onOpen={(paper) => openPaper(paper)} onUpload={upload} onDelete={(paper) => deletePaper(paper)} onUpdate={(updated) => setPapers((current) => current.map((paper) => updated.find((item) => item.id === paper.id) ?? paper))} />
-    {settingsOpen && <SettingsDialog onClose={closeSettings} onOpenUsage={() => { closeSettings(); setUsageOpen(true); }} />}
-    {usageOpen && <UsageDashboard onClose={() => setUsageOpen(false)} onBack={() => { setUsageOpen(false); setSettingsOpen(true); }} />}
+    {settingsOpen && <SettingsDialog onClose={closeSettings} />}
     {paperSearchOpen && <LibrarySpotlight initialMode={paperSearchMode} initialFolderId={paperSearchFolder} onImported={(paper) => setPapers((current) => current.some((item) => item.id === paper.id) ? current.map((item) => item.id === paper.id ? paper : item) : [paper, ...current])} onBrowseFolder={(folderId) => { window.localStorage.setItem('adam.libraryLocation', folderId); setLibraryNavigation((value) => value + 1); setPaperSearchOpen(false); returnToLibrary(); }} papers={papers} onClose={() => setPaperSearchOpen(false)} onOpen={(paper) => { setPaperSearchOpen(false); openPaper(paper); }} />}
   </>);
 
@@ -2170,8 +2167,7 @@ export default function Home() {
         {quickError && <p className="quick-ask-error">{quickError}</p>}
         <div className="quick-ask-footer"><span>Save this thread before linking it to the PDF</span><div><button type="button" className="move-to-chat" onClick={() => void importQuickAsk()} disabled={quickAsking || quickImporting || (!quickTurns.length && !hasQuickAnswer)}>{quickImporting ? 'Saving…' : 'Save as new chat →'}</button></div></div>
       </form>}
-      {settingsOpen && <SettingsDialog onClose={closeSettings} onOpenUsage={() => { closeSettings(); setUsageOpen(true); }} />}
-    {usageOpen && <UsageDashboard onClose={() => setUsageOpen(false)} onBack={() => { setUsageOpen(false); setSettingsOpen(true); }} />}
+      {settingsOpen && <SettingsDialog onClose={closeSettings} />}
       {paperSearchOpen && <LibrarySpotlight initialMode={paperSearchMode} initialFolderId={paperSearchFolder} onImported={(paper) => setPapers((current) => current.some((item) => item.id === paper.id) ? current.map((item) => item.id === paper.id ? paper : item) : [paper, ...current])} onBrowseFolder={(folderId) => { window.localStorage.setItem('adam.libraryLocation', folderId); setLibraryNavigation((value) => value + 1); setPaperSearchOpen(false); returnToLibrary(); }} papers={papers} onClose={() => setPaperSearchOpen(false)} onOpen={(paper) => { setPaperSearchOpen(false); openPaper(paper); }} />}
     </main>
   );
@@ -2542,7 +2538,7 @@ function SettingsButton({ onClick, compact = false }: { onClick: () => void; com
   return <button type="button" className={`settings-button${compact ? ' compact-button' : ''}`} onClick={onClick} data-tooltip="Open settings (⌘ / Ctrl + ,)" aria-label="Open settings" aria-keyshortcuts="Meta+, Control+,"><svg className="settings-gear" viewBox="0 0 24 24" aria-hidden="true"><circle cx="12" cy="12" r="3" /><path d="M19.4 15a1.7 1.7 0 0 0 .3 1.8l.1.1a2 2 0 1 1-2.8 2.8l-.1-.1a1.7 1.7 0 0 0-1.8-.3 1.7 1.7 0 0 0-1 1.5V21a2 2 0 1 1-4 0v-.1a1.7 1.7 0 0 0-1.1-1.5 1.7 1.7 0 0 0-1.8.3l-.1.1a2 2 0 1 1-2.8-2.8l.1-.1a1.7 1.7 0 0 0 .3-1.8 1.7 1.7 0 0 0-1.5-1H3a2 2 0 1 1 0-4h.1a1.7 1.7 0 0 0 1.5-1.1 1.7 1.7 0 0 0-.3-1.8l-.1-.1a2 2 0 1 1 2.8-2.8l.1.1a1.7 1.7 0 0 0 1.8.3H9a1.7 1.7 0 0 0 1-1.5V3a2 2 0 1 1 4 0v.1a1.7 1.7 0 0 0 1 1.5 1.7 1.7 0 0 0 1.8-.3l.1-.1a2 2 0 1 1 2.8 2.8l-.1.1a1.7 1.7 0 0 0-.3 1.8V9a1.7 1.7 0 0 0 1.5 1H21a2 2 0 1 1 0 4h-.1a1.7 1.7 0 0 0-1.5 1Z" /></svg><span>{compact ? '' : 'Settings'}</span></button>;
 }
 
-function SettingsDialog({ onClose, onOpenUsage }: { onClose: () => void; onOpenUsage?: () => void }) {
+function SettingsDialog({ onClose }: { onClose: () => void }) {
   const [settings, setSettings] = useState<AppSettings | null>(null);
   const [provider, setProvider] = useState<ProviderId>('zen');
   const [model, setModel] = useState('');
@@ -2560,7 +2556,7 @@ function SettingsDialog({ onClose, onOpenUsage }: { onClose: () => void; onOpenU
   const [systemPrompt, setSystemPrompt] = useState('');
   const [quickAskPrompt, setQuickAskPrompt] = useState('');
   const [promptKind, setPromptKind] = useState<'chat' | 'quick'>('chat');
-  const [settingsTab, setSettingsTab] = useState<'providers' | 'titles' | 'system'>('providers');
+  const [settingsTab, setSettingsTab] = useState<'providers' | 'titles' | 'system' | 'usage'>('providers');
   const dialogRef = useRef<HTMLDivElement>(null);
 
   useEffect(() => {
@@ -2685,7 +2681,7 @@ function SettingsDialog({ onClose, onOpenUsage }: { onClose: () => void; onOpenU
   const modelRow = (id: string) => <button type="button" className={`${model === id ? 'selected' : ''}${activeModel === id ? ' active-model' : ''}`} onClick={() => { setModel(id); setStatus(id === activeModel ? '' : 'Selection not applied yet'); }} key={id}><span>{id}{activeModel === id && <small className="active-model-label">Active</small>}</span><i role="button" aria-label={favorites.includes(id) ? `Unpin ${id}` : `Pin ${id}`} title={favorites.includes(id) ? 'Unpin model' : 'Pin model'} onClick={(event) => { event.stopPropagation(); toggleFavorite(id); }}>{favorites.includes(id) ? '★' : '☆'}</i></button>;
 
   return <div className="settings-backdrop" onMouseDown={(event) => { if (event.target === event.currentTarget) onClose(); }}>
-    <div className="settings-dialog provider-dialog" ref={dialogRef} role="dialog" aria-modal="true" aria-labelledby="settings-title" tabIndex={-1}>
+    <div className={`settings-dialog provider-dialog${settingsTab === 'usage' ? ' usage-open' : ''}`} ref={dialogRef} role="dialog" aria-modal="true" aria-labelledby="settings-title" tabIndex={-1}>
       <div className="settings-titlebar"><div><span className="settings-kicker">Preferences</span><h2 id="settings-title">Settings</h2></div><button type="button" onClick={onClose} aria-label="Close settings">×</button></div>
       <div className="provider-layout">
         <nav className="provider-nav" aria-label="Settings sections">
@@ -2694,7 +2690,7 @@ function SettingsDialog({ onClose, onOpenUsage }: { onClose: () => void; onOpenU
           <span className="nav-section-label secondary-label">General</span>
           <button type="button" className={`more-settings-tab${settingsTab === 'titles' ? ' active' : ''}`} onClick={() => { setSettingsTab('titles'); setStatus(''); if (settings?.providers[titleProvider]) void loadTitleModels(titleProvider); }}><span className="more-tab-icon">✦</span>Chat titles</button>
           <button type="button" className={`more-settings-tab${settingsTab === 'system' ? ' active' : ''}`} onClick={() => { setSettingsTab('system'); setStatus(''); }}><span className="more-tab-icon">¶</span>System prompt</button>
-          {onOpenUsage && <button type="button" className="more-settings-tab" onClick={onOpenUsage} title="Token usage and estimated cost by provider and model"><span className="more-tab-icon usage-tab-icon">$</span>Usage &amp; cost</button>}
+          <button type="button" className={`more-settings-tab${settingsTab === 'usage' ? ' active' : ''}`} onClick={() => { setSettingsTab('usage'); setStatus(''); }}><span className="more-tab-icon">$</span>Usage &amp; cost</button>
         </nav>
         {settingsTab === 'providers' ? <div className="provider-content">
           <div className="provider-heading"><div><h3>{providerInfo.name}</h3><p>{settings?.providers[provider] ? 'API key configured' : 'Add a key to enable chat and load available models.'}</p></div>{settings?.providers[provider] && <button type="button" className="secondary-button" onClick={() => void loadModels(provider)} disabled={loadingModels}>{loadingModels ? 'Loading…' : 'Refresh models'}</button>}</div>
@@ -2709,9 +2705,9 @@ function SettingsDialog({ onClose, onOpenUsage }: { onClose: () => void; onOpenU
           {!settings?.providers[titleProvider] && <p className="title-key-notice">Add an API key for {PROVIDERS.find((item) => item.id === titleProvider)?.name} in its Providers settings to use it for titles.</p>}
           <div className="selected-model-summary"><span>Current title model</span><strong>{settings?.title_model ?? 'gpt-6-luna'}</strong><small>{PROVIDERS.find((item) => item.id === settings?.title_provider)?.name ?? 'OpenCode Zen'}</small></div>
           <div className="model-picker"><div className="model-picker-head"><label htmlFor="title-model-search">Browse title models</label><div className="title-model-tools"><input id="title-model-search" type="search" value={titleQuery} onChange={(event) => setTitleQuery(event.target.value)} placeholder="Search models…" /><button type="button" className="secondary-button" disabled={!settings?.providers[titleProvider] || loadingTitleModels} onClick={() => void loadTitleModels(titleProvider)}>{loadingTitleModels ? 'Loading…' : 'Refresh models'}</button></div></div>{titleModels.length ? <div className="model-list">{titleModels.filter((id) => id.toLowerCase().includes(titleQuery.toLowerCase())).map((id) => <button type="button" className={titleModel === id ? 'selected' : ''} onClick={() => { setTitleModel(id); setStatus(''); }} key={id}><span>{id}{settings?.title_provider === titleProvider && settings.title_model === id && <small className="active-model-label">Active</small>}</span></button>)}</div> : <div className="model-empty">{loadingTitleModels ? 'Loading models…' : settings?.providers[titleProvider] ? 'Refresh to load models from this provider.' : 'Connect an API key to browse models.'}</div>}</div>
-        </div> : <div className="system-prompt-page"><span className="settings-kicker">Assistant behavior</span><h3>System prompts</h3><div className="prompt-kind-tabs"><button type="button" className={promptKind === 'chat' ? 'active' : ''} onClick={() => setPromptKind('chat')}>Chat</button><button type="button" className={promptKind === 'quick' ? 'active' : ''} onClick={() => setPromptKind('quick')}>Quick Ask</button></div><p>{promptKind === 'chat' ? 'Sent with every full chat. Controls how Adam reads paper context and writes answers.' : 'Sent only for inline questions. Quick Ask receives the selected excerpt or screenshot, plus web references when search is enabled or earlier sources are available.'}</p><label htmlFor="system-prompt-editor">{promptKind === 'chat' ? 'Chat prompt' : 'Quick Ask prompt'}</label><textarea id="system-prompt-editor" value={promptKind === 'chat' ? systemPrompt : quickAskPrompt} onChange={(event) => promptKind === 'chat' ? setSystemPrompt(event.target.value) : setQuickAskPrompt(event.target.value)} spellCheck rows={16} /></div>}
+        </div> : settingsTab === 'usage' ? <div className="provider-content"><UsageSettings /></div> : <div className="system-prompt-page"><span className="settings-kicker">Assistant behavior</span><h3>System prompts</h3><div className="prompt-kind-tabs"><button type="button" className={promptKind === 'chat' ? 'active' : ''} onClick={() => setPromptKind('chat')}>Chat</button><button type="button" className={promptKind === 'quick' ? 'active' : ''} onClick={() => setPromptKind('quick')}>Quick Ask</button></div><p>{promptKind === 'chat' ? 'Sent with every full chat. Controls how Adam reads paper context and writes answers.' : 'Sent only for inline questions. Quick Ask receives the selected excerpt or screenshot, plus web references when search is enabled or earlier sources are available.'}</p><label htmlFor="system-prompt-editor">{promptKind === 'chat' ? 'Chat prompt' : 'Quick Ask prompt'}</label><textarea id="system-prompt-editor" value={promptKind === 'chat' ? systemPrompt : quickAskPrompt} onChange={(event) => promptKind === 'chat' ? setSystemPrompt(event.target.value) : setQuickAskPrompt(event.target.value)} spellCheck rows={16} /></div>}
       </div>
-      <div className="settings-footer"><span role="status" className={status.includes('active') || status.includes('saved') ? 'save-success' : ''}>{status}</span><div><kbd>Esc</kbd><button type="button" className="secondary-button" onClick={onClose}>Close</button>{settingsTab === 'providers' ? <button type="button" className="primary-button" disabled={!settings || !hasPendingModel || saving || !settings.providers[provider]} onClick={() => void persist()}>{saving ? 'Applying…' : 'Apply model'}</button> : settingsTab === 'titles' ? <button type="button" className="primary-button" disabled={!settings || !titleModel.trim() || !settings.providers[titleProvider] || (titleProvider === settings.title_provider && titleModel === settings.title_model) || saving} onClick={() => void saveTitleModel()}>{saving ? 'Saving…' : 'Save title model'}</button> : <button type="button" className="primary-button" disabled={!settings || !systemPrompt.trim() || !quickAskPrompt.trim() || (systemPrompt.trim() === settings.system_prompt && quickAskPrompt.trim() === settings.quick_ask_prompt) || saving} onClick={() => void saveSystemPrompt()}>{saving ? 'Saving…' : 'Save prompt'}</button>}</div></div>
+      <div className="settings-footer"><span role="status" className={status.includes('active') || status.includes('saved') ? 'save-success' : ''}>{status}</span><div><kbd>Esc</kbd><button type="button" className="secondary-button" onClick={onClose}>Close</button>{settingsTab === 'usage' ? null : settingsTab === 'providers' ? <button type="button" className="primary-button" disabled={!settings || !hasPendingModel || saving || !settings.providers[provider]} onClick={() => void persist()}>{saving ? 'Applying…' : 'Apply model'}</button> : settingsTab === 'titles' ? <button type="button" className="primary-button" disabled={!settings || !titleModel.trim() || !settings.providers[titleProvider] || (titleProvider === settings.title_provider && titleModel === settings.title_model) || saving} onClick={() => void saveTitleModel()}>{saving ? 'Saving…' : 'Save title model'}</button> : <button type="button" className="primary-button" disabled={!settings || !systemPrompt.trim() || !quickAskPrompt.trim() || (systemPrompt.trim() === settings.system_prompt && quickAskPrompt.trim() === settings.quick_ask_prompt) || saving} onClick={() => void saveSystemPrompt()}>{saving ? 'Saving…' : 'Save prompt'}</button>}</div></div>
     </div>
   </div>;
 }
