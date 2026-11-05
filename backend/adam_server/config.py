@@ -51,7 +51,7 @@ class Settings(BaseSettings):
         return self.database_url or f"sqlite:///{self.data_dir / 'database' / 'adam.sqlite3'}"
 
     def prepare_directories(self) -> None:
-        for name in ("database", "documents", "derived", "models", "backups", "tmp"):
+        for name in ("database", "documents", "derived", "models", "backups", "tmp", "pricing"):
             (self.data_dir / name).mkdir(parents=True, exist_ok=True)
 
     @property
@@ -149,6 +149,25 @@ class Settings(BaseSettings):
         values = self.runtime_settings
         values["title_provider"] = provider
         values["title_model"] = model
+        temporary = self.runtime_settings_path.with_suffix(".tmp")
+        temporary.write_text(json.dumps(values, indent=2) + "\n", encoding="utf-8")
+        os.chmod(temporary, 0o600)
+        temporary.replace(self.runtime_settings_path)
+
+    @property
+    def price_overrides(self) -> dict[str, dict[str, float | None]]:
+        """Manual model prices in USD per million tokens, keyed by model id."""
+        value = self.runtime_settings.get("price_overrides", {})
+        return value if isinstance(value, dict) else {}
+
+    def save_price_override(self, model: str, prices: dict[str, float | None] | None) -> None:
+        values = self.runtime_settings
+        overrides = values.get("price_overrides") if isinstance(values.get("price_overrides"), dict) else {}
+        if prices is None:
+            overrides.pop(model, None)
+        else:
+            overrides[model] = prices
+        values["price_overrides"] = overrides
         temporary = self.runtime_settings_path.with_suffix(".tmp")
         temporary.write_text(json.dumps(values, indent=2) + "\n", encoding="utf-8")
         os.chmod(temporary, 0o600)

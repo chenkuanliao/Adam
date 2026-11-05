@@ -459,7 +459,7 @@ def test_zen_auto_title_manual_rename_and_regeneration(monkeypatch) -> None:
     monkeypatch.setattr(type(main_module.settings), "provider_api_key", lambda _self, _provider: "test-key")
 
     generated_from: list[str] = []
-    async def fake_title(_key, transcript, _fallback, model):
+    async def fake_title(_key, transcript, _fallback, model, **_kwargs):
         assert model == "gpt-6-luna"
         generated_from.append(transcript)
         return "Attention Mechanisms Explained" if len(generated_from) == 1 else "Attention Follow-up Analysis"
@@ -581,7 +581,7 @@ def test_folder_migration_preserves_existing_papers_and_children(tmp_path) -> No
             assert db.execute(f'SELECT COUNT(*) FROM {table}').fetchone()[0] == 1
         assert db.execute('SELECT color, icon FROM folders WHERE id = ?', ('old-folder',)).fetchone() == ('#8c9d65', 'folder')
         assert 'discovery_json' in {column[1] for column in db.execute('PRAGMA table_info(documents)')}
-        assert db.execute('SELECT version_num FROM alembic_version').fetchall() == [('0014_conversation_drafts',)]
+        assert db.execute('SELECT version_num FROM alembic_version').fetchall() == [('0015_usage_events',)]
         assert db.execute('PRAGMA foreign_key_check').fetchall() == []
 
 
@@ -1004,7 +1004,7 @@ def test_folder_and_discovery_migrations_upgrade_all_feature_branches(tmp_path) 
             if revision in ['0011_nested_folders', '0012_merge_folder_features']:
                 assert db.execute("SELECT parent_id, icon FROM folders WHERE id = 'child'").fetchone() == ('root', 'folder')
             assert 'discovery_json' in {column[1] for column in db.execute('PRAGMA table_info(documents)')}
-            assert db.execute('SELECT version_num FROM alembic_version').fetchall() == [('0014_conversation_drafts',)]
+            assert db.execute('SELECT version_num FROM alembic_version').fetchall() == [('0015_usage_events',)]
             assert db.execute('PRAGMA foreign_key_check').fetchall() == []
 
 

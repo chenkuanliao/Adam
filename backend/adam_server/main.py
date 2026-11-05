@@ -1,11 +1,13 @@
 import asyncio
+import contextvars
 import json
+import math
 import logging
 import os
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
 from dataclasses import dataclass
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 from fastapi import Depends, FastAPI, HTTPException, Query, Request, Response, UploadFile
@@ -18,9 +20,9 @@ import httpx
 
 from .config import Settings, get_settings
 from .database import SessionLocal, get_db, run_migrations
-from .models import Annotation, Conversation, Document, Folder, Message, ModelFavorite, Page, PaperNote
+from .models import Annotation, Conversation, Document, Folder, Message, ModelFavorite, Page, PaperNote, UsageEvent
 from .schemas import AiNoteCreate, AiNoteUnlink, AnnotationIn, AnnotationOut, AnnotationUpdate, AppSettingsOut, AppSettingsUpdate, ChatRequest, ConversationCreate, ConversationDraftUpdate, ConversationDetail, ConversationOut, ConversationUpdate, DocumentMove, DocumentOut, DocumentUpdate, FolderIn, FolderOut, FolderUpdate, ModelFavoriteUpdate, PageTextOut, PaperNoteOut, PaperNoteUpdate, ProviderKeyUpdate, ProviderModelsOut, QuickAskImportRequest, QuickAskRequest, TitleModelUpdate
-from .schemas import ChatTurnIn, ContextImageIn
+from .schemas import ChatTurnIn, ContextImageIn, PriceOverrideIn
 from .services.context import build_paper_context
 from .services.documents import document_file_path, ingest_pdf
 from .services.thumbnails import THUMBNAIL_MEDIA_TYPE, THUMBNAIL_WIDTHS, ThumbnailBusy, ensure_thumbnail, remove_thumbnails, shutdown_thumbnail_workers, thumbnail_etag
@@ -28,10 +30,16 @@ from .services.llm import AnthropicProvider, GoogleProvider, OpenAICompatiblePro
 from .services.web_search import asks_for_citing_papers, plan_search, previous_sources, search_citing_papers, search_web, web_context
 from .schemas import PaperCandidate, PaperImportIn, PaperSearchOut, PdfLinkIn, PdfLinkOut
 from .services.paper_discovery import discover, download_pdf, existing_paper, resolve_pdf, verify_pdf_link
+from .services.pricing import PriceBook, RefreshTooSoon, parse_overrides
+from .services.usage import UsageTracker, record_usage_event
+from .services.usage_summary import RANGE_DAYS, UsageRow, build_usage_summary, resolve_zone
 
 settings = get_settings()
 run_migrations()
 logger = logging.getLogger(__name__)
+price_book = PriceBook(settings.data_dir / "pricing")
+# (document_id, conversation_id) that title-generation usage is attributed to.
+title_usage_scope: contextvars.ContextVar[tuple[str | None, str | None]] = contextvars.ContextVar("title_usage_scope", default=(None, None))
 
 
 @asynccontextmanager
@@ -109,14 +117,28 @@ async def generate_configured_title(transcript: str, fallback: str) -> str:
     api_key = settings.provider_api_key(provider_name)
     if not api_key:
         raise ValueError(f"No {provider_name} API key is configured for title generation.")
+    document_id, conversation_id = title_usage_scope.get()
+    tracker = UsageTracker(SessionLocal, "title", document_id, conversation_id)
     if provider_name == "zen" and model.startswith(("gpt-", "grok-", "muse-")):
-        return await generate_zen_title(api_key, transcript, fallback, model)
-    provider = make_provider(provider_name, api_key, model, TITLE_SYSTEM_PROMPT)
+        def record(usage) -> None:
+            record_usage_event(SessionLocal, kind="title", provider=provider_name, model=model, usage=usage, status="completed",
+                               document_id=document_id, conversation_id=conversation_id)
+        return await generate_zen_title(api_key, transcript, fallback, model, on_usage=record)
+    provider = tracker.track(provider_name, model, make_provider(provider_name, api_key, model, TITLE_SYSTEM_PROMPT))
     parts = []
-    async for part in provider.stream_answer(transcript[:30000], "", [], None, []):
-        parts.append(part)
-        if sum(map(len, parts)) > 1000:
-            break
+    status = "partial"
+    try:
+        async for part in provider.stream_answer(transcript[:30000], "", [], None, []):
+            parts.append(part)
+            if sum(map(len, parts)) > 1000:
+                break
+        else:
+            status = "completed"
+    except Exception:
+        status = "failed"
+        raise
+    finally:
+        tracker.finish(status)
     return clean_title("".join(parts), fallback)
 
 
@@ -124,8 +146,9 @@ async def generate_configured_title(transcript: str, fallback: str) -> str:
 title_jobs: dict[str, asyncio.Task] = {}
 
 
-async def persist_generated_title(conversation_id: str, provisional_title: str, transcript: str) -> str | None:
+async def persist_generated_title(conversation_id: str, provisional_title: str, transcript: str, document_id: str | None = None) -> str | None:
     try:
+        title_usage_scope.set((document_id, conversation_id))
         title = await generate_configured_title(transcript, provisional_title)
         # Open the session only after the slow model call so no connection is held while waiting.
         return await run_in_threadpool(save_generated_title, conversation_id, provisional_title, title)
@@ -135,11 +158,11 @@ async def persist_generated_title(conversation_id: str, provisional_title: str, 
         return None
 
 
-def start_title_job(conversation_id: str, provisional_title: str, transcript: str) -> asyncio.Task:
+def start_title_job(conversation_id: str, provisional_title: str, transcript: str, document_id: str | None = None) -> asyncio.Task:
     job = title_jobs.get(conversation_id)
     if job and not job.done():
         return job
-    job = asyncio.create_task(persist_generated_title(conversation_id, provisional_title, transcript))
+    job = asyncio.create_task(persist_generated_title(conversation_id, provisional_title, transcript, document_id))
     title_jobs[conversation_id] = job
     job.add_done_callback(lambda done: title_jobs.pop(conversation_id, None) if title_jobs.get(conversation_id) is done else None)
     return job
@@ -763,7 +786,7 @@ def update_conversation(conversation_id: str, request: ConversationUpdate, db: S
     return conversation
 
 
-def load_title_transcript(conversation_id: str) -> tuple[str, str]:
+def load_title_transcript(conversation_id: str) -> tuple[str, str, str]:
     with SessionLocal() as db:
         conversation = db.get(Conversation, conversation_id)
         if not conversation:
@@ -775,7 +798,7 @@ def load_title_transcript(conversation_id: str) -> tuple[str, str]:
             raise HTTPException(409, "Send a message before generating a title.")
         transcript = "\n\n".join(f"{message.role.title()}: {message.content}" for message in messages)
         fallback = next((message.content for message in messages if message.role == "user"), conversation.title)[:80]
-        return transcript, fallback
+        return transcript, fallback, conversation.document_id
 
 
 def save_regenerated_title(conversation_id: str, title: str) -> ConversationOut:
@@ -792,7 +815,8 @@ def save_regenerated_title(conversation_id: str, title: str) -> ConversationOut:
 @app.post("/api/conversations/{conversation_id}/regenerate-title", response_model=ConversationOut)
 async def regenerate_conversation_title(conversation_id: str) -> ConversationOut:
     # No session stays open while the title model is awaited.
-    transcript, fallback = await run_in_threadpool(load_title_transcript, conversation_id)
+    transcript, fallback, document_id = await run_in_threadpool(load_title_transcript, conversation_id)
+    title_usage_scope.set((document_id, conversation_id))
     try:
         title = await generate_configured_title(transcript, fallback)
     except (httpx.HTTPError, ValueError, KeyError) as exc:
@@ -918,6 +942,9 @@ async def chat_stream(conversation_id: str, request: ChatRequest) -> StreamingRe
 
     async def events() -> AsyncIterator[str]:
         complete = ""
+        usage = UsageTracker(SessionLocal, "chat", setup.document_id, setup.conversation_id)
+        # Stays "partial" if the client disconnects mid-stream.
+        status = "partial"
         try:
             yield sse({"type": "started", "provider": provider_name, "model": model, "context_mode": setup.context_mode, "conversation_id": setup.conversation_id, "title": setup.title})
             prior_sources = setup.prior_sources
@@ -927,7 +954,7 @@ async def chat_stream(conversation_id: str, request: ChatRequest) -> StreamingRe
             if request.allow_web_search:
                 yield sse({"type": "searching"})
                 try:
-                    planner = make_provider(provider_name, api_key, model, "")
+                    planner = usage.track(provider_name, model, make_provider(provider_name, api_key, model, ""))
                     search_query = await plan_search(planner, request.question, request.selected_text, paper_title)
                 except Exception:
                     search_query = f'"{paper_title}" {request.question}'[:180]
@@ -946,10 +973,12 @@ async def chat_stream(conversation_id: str, request: ChatRequest) -> StreamingRe
             web = {"searched": search_performed, "query": search_query if search_performed else None, "reused": bool(prior_sources), "sources": sources}
             yield sse({"type": "web_sources", "web": web})
             system_prompt = setup.system_prompt + setup.paper_context + web_context(sources)
-            provider = make_provider(provider_name, api_key, model, system_prompt)
+            provider = usage.track(provider_name, model, make_provider(provider_name, api_key, model, system_prompt))
             async for delta in provider.stream_answer(request.question, request.selected_text, request.images, request.page, setup.history[-20:]):
                 complete += delta
                 yield sse({"type": "delta", "text": delta})
+            status = "completed"
+            usage.finish(status)
             await run_in_threadpool(save_assistant_message, setup, complete, web, bool(search_performed or sources))
             title_job = None
             if setup.should_generate_title:
@@ -958,7 +987,7 @@ async def chat_stream(conversation_id: str, request: ChatRequest) -> StreamingRe
                 if request.selected_text:
                     transcript += f"\n\nSelected passage: {request.selected_text[:6000]}"
                 transcript += f"\n\nAssistant: {complete[:12000]}"
-                title_job = start_title_job(setup.conversation_id, setup.title, transcript)
+                title_job = start_title_job(setup.conversation_id, setup.title, transcript, setup.document_id)
             # The answer is saved: release the composer now instead of waiting on the title model.
             yield sse({"type": "completed", "web": web, "title": setup.title, "title_pending": title_job is not None})
             if title_job:
@@ -967,12 +996,17 @@ async def chat_stream(conversation_id: str, request: ChatRequest) -> StreamingRe
                 if title:
                     yield sse({"type": "title", "title": title})
         except Exception as exc:
+            if status != "completed":
+                status = "failed"
             yield sse({"type": "error", "message": str(exc)})
+        finally:
+            # Synchronous so it also runs when the stream is cancelled; never raises.
+            usage.finish(status)
 
     return StreamingResponse(events(), media_type="text/event-stream", headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"})
 
 
-def prepare_quick_ask(conversation_id: str, request: QuickAskRequest) -> tuple[str, str, str, str]:
+def prepare_quick_ask(conversation_id: str, request: QuickAskRequest) -> tuple[str, str, str, str, str]:
     with SessionLocal() as db:
         conversation = db.get(Conversation, conversation_id)
         if not conversation:
@@ -984,14 +1018,16 @@ def prepare_quick_ask(conversation_id: str, request: QuickAskRequest) -> tuple[s
         if not api_key:
             raise HTTPException(503, f"No API key is configured for {conversation.provider}. Open Settings to enable Quick Ask.")
         paper_title = Path(db.get(Document, conversation.document_id).original_name).stem
-        return conversation.provider, conversation.model_id, api_key, paper_title
+        return conversation.provider, conversation.model_id, api_key, paper_title, conversation.document_id
 
 
 @app.post("/api/conversations/{conversation_id}/quick-ask/stream")
 async def quick_ask_stream(conversation_id: str, request: QuickAskRequest) -> StreamingResponse:
-    provider_name, model, api_key, paper_title = await run_in_threadpool(prepare_quick_ask, conversation_id, request)
+    provider_name, model, api_key, paper_title, document_id = await run_in_threadpool(prepare_quick_ask, conversation_id, request)
 
     async def events() -> AsyncIterator[str]:
+        usage = UsageTracker(SessionLocal, "quick_ask", document_id, conversation_id)
+        status = "partial"
         try:
             yield sse({"type": "started", "provider": provider_name, "model": model})
             prior_sources = []
@@ -1011,7 +1047,7 @@ async def quick_ask_stream(conversation_id: str, request: QuickAskRequest) -> St
             if request.allow_web_search:
                 yield sse({"type": "searching"})
                 try:
-                    planner = make_provider(provider_name, api_key, model, "")
+                    planner = usage.track(provider_name, model, make_provider(provider_name, api_key, model, ""))
                     search_selection = request.selected_text or (request.history[0].selected_text if request.history else "")
                     search_query = await plan_search(planner, request.question, search_selection, paper_title)
                 except Exception:
@@ -1030,12 +1066,16 @@ async def quick_ask_stream(conversation_id: str, request: QuickAskRequest) -> St
             sources = (fresh_sources + [item for item in prior_sources if item["url"] not in {source["url"] for source in fresh_sources}])[:6]
             web = {"searched": search_performed, "query": search_query if search_performed else None, "reused": bool(prior_sources), "sources": sources}
             yield sse({"type": "web_sources", "web": web})
-            provider = make_provider(provider_name, api_key, model, settings.quick_ask_prompt + web_context(sources))
+            provider = usage.track(provider_name, model, make_provider(provider_name, api_key, model, settings.quick_ask_prompt + web_context(sources)))
             async for delta in provider.stream_answer(request.question, request.selected_text, request.images, request.page, request.history):
                 yield sse({"type": "delta", "text": delta})
+            status = "completed"
             yield sse({"type": "completed", "web": web})
         except Exception as exc:
+            status = "failed"
             yield sse({"type": "error", "message": str(exc)})
+        finally:
+            usage.finish(status)
 
     return StreamingResponse(events(), media_type="text/event-stream", headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"})
 
@@ -1057,3 +1097,62 @@ def import_quick_ask(conversation_id: str, request: QuickAskImportRequest, db: S
     db.refresh(conversation)
     result = ConversationOut.model_validate(conversation)
     return result.model_copy(update={"message_count": db.scalar(select(func.count(Message.id)).where(Message.conversation_id == conversation.id)) or 0})
+
+
+def load_usage_rows(since: datetime, kind: str | None) -> list[UsageRow]:
+    with SessionLocal() as db:
+        query = select(UsageEvent).where(UsageEvent.created_at >= since)
+        if kind:
+            query = query.where(UsageEvent.kind == kind)
+        return [UsageRow(event.created_at, event.kind, event.provider, event.model_id, event.uncached_input_tokens, event.cache_read_tokens,
+                         event.cache_write_tokens, event.output_tokens, event.reasoning_tokens, event.provider_reported_cost_usd, event.status)
+                for event in db.scalars(query)]
+
+
+@app.get("/api/usage/summary")
+async def usage_summary(days: int = 7, provider: str | None = None, kind: str | None = None, tz: str | None = Query(default=None, max_length=64)) -> dict:
+    if days not in RANGE_DAYS:
+        raise HTTPException(422, f"Range must be one of {', '.join(map(str, RANGE_DAYS))} days.")
+    if kind not in (None, "", "chat", "quick_ask", "title"):
+        raise HTTPException(422, "Kind must be chat, quick_ask, or title.")
+    try:
+        await price_book.ensure_fresh()
+    except Exception:
+        logger.warning("Price refresh failed; using cached prices", exc_info=True)
+    zone = resolve_zone(tz)
+    now = datetime.now(timezone.utc)
+    # Query a day early; the summary trims to the exact local window.
+    since = now - timedelta(days=days + 1)
+    rows = await run_in_threadpool(load_usage_rows, since, kind or None)
+    return build_usage_summary(rows, book=price_book, overrides=parse_overrides(settings.price_overrides), days=days, now=now,
+                               zone=zone, provider=provider or None, kind=kind or None)
+
+
+@app.post("/api/usage/prices/refresh")
+async def refresh_usage_prices() -> dict:
+    try:
+        await price_book.ensure_fresh(force=True)
+    except RefreshTooSoon as exc:
+        raise HTTPException(429, str(exc), headers={"Retry-After": str(exc.retry_after)}) from exc
+    return price_book.status()
+
+
+@app.get("/api/usage/price-overrides")
+def list_price_overrides() -> dict:
+    return settings.price_overrides
+
+
+@app.put("/api/usage/price-overrides")
+def save_price_override(request: PriceOverrideIn) -> dict:
+    values = [request.input, request.output, request.cache_read, request.cache_write]
+    if any(value is not None and not math.isfinite(value) for value in values):
+        raise HTTPException(422, "Prices must be finite numbers.")
+    settings.save_price_override(request.model.strip(), {"input": request.input, "output": request.output,
+                                                         "cache_read": request.cache_read, "cache_write": request.cache_write})
+    return settings.price_overrides
+
+
+@app.delete("/api/usage/price-overrides")
+def delete_price_override(model: str = Query(min_length=1, max_length=200)) -> dict:
+    settings.save_price_override(model.strip(), None)
+    return settings.price_overrides

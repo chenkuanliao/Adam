@@ -125,10 +125,15 @@ async def plan_search(provider, question: str, selection: str, paper_title: str)
     if selection:
         input_text += f"\nSelected focus: {selection[:500]}"
     parts = []
-    async for part in planner.stream_answer(input_text, "", [], None, []):
-        parts.append(part)
-        if sum(map(len, parts)) > 2000:
-            break
+    try:
+        async for part in planner.stream_answer(input_text, "", [], None, []):
+            parts.append(part)
+            if sum(map(len, parts)) > 2000:
+                break
+    finally:
+        # Surface the planner call's token usage on the caller's provider for usage tracking.
+        if getattr(planner, "usage", None) is not None:
+            provider.usage = planner.usage
     raw = "".join(parts).strip()
     match = re.search(r"\{.*\}", raw, re.DOTALL)
     fallback = f'"{paper_title}" {question}' if paper_title else question

@@ -1,0 +1,182 @@
+/* Usage & cost dashboard. Adam is light-only today; this view also selects a dark theme from the OS
+ * setting by redefining Adam's tokens on the dialog, so shared controls (buttons, selects) follow. */
+.usage-dialog {
+  color-scheme: light;
+  --usage-series-1: #2a78d6;
+  --usage-series-2: #eb6834;
+  --usage-series-3: #1baf7a;
+  --usage-series-4: #eda100;
+  --usage-series-5: #e87ba4;
+  --usage-series-6: #008300;
+  --usage-series-7: #6250d6;
+  --usage-type-input: color-mix(in oklab, var(--ink) 58%, var(--surface));
+  --usage-type-cache-read: color-mix(in oklab, var(--accent) 45%, var(--surface));
+  --usage-type-cache-write: color-mix(in oklab, var(--accent) 85%, var(--surface));
+  --usage-type-output: var(--ink);
+  --usage-type-other: color-mix(in oklab, var(--ink) 30%, var(--surface));
+  --usage-chart-fill: .16;
+}
+@media (prefers-color-scheme: dark) {
+  :root:where(:not([data-theme="light"])) .usage-dialog {
+    color-scheme: dark;
+    --bg: #141517; --surface: #1b1c1f; --surface-2: #202125; --sunken: #26272b;
+    --ink: #f0efec; --ink-2: #d6d4ce; --muted: #a4a39d; --faint: #7d7c77;
+    --rule: #2e2f33; --rule-strong: #3d3e43;
+    --accent: #5fae8a; --accent-ink: #8fd0b0; --accent-soft: #20352b; --accent-line: #2f5a46;
+    --danger: #e66767; --danger-soft: #3a1f1f;
+    --shadow-2: 0 10px 30px #00000066; --shadow-3: 0 28px 70px #00000099;
+    --usage-series-1: #3987e5; --usage-series-2: #d95926; --usage-series-3: #199e70; --usage-series-4: #c98500;
+    --usage-series-5: #d55181; --usage-series-6: #008300; --usage-series-7: #9085e9;
+    --usage-chart-fill: .24;
+  }
+}
+:root[data-theme="dark"] .usage-dialog {
+  color-scheme: dark;
+  --bg: #141517; --surface: #1b1c1f; --surface-2: #202125; --sunken: #26272b;
+  --ink: #f0efec; --ink-2: #d6d4ce; --muted: #a4a39d; --faint: #7d7c77;
+  --rule: #2e2f33; --rule-strong: #3d3e43;
+  --accent: #5fae8a; --accent-ink: #8fd0b0; --accent-soft: #20352b; --accent-line: #2f5a46;
+  --usage-series-1: #3987e5; --usage-series-2: #d95926; --usage-series-3: #199e70; --usage-series-4: #c98500;
+  --usage-series-5: #d55181; --usage-series-6: #008300; --usage-series-7: #9085e9;
+  --usage-chart-fill: .24;
+}
+
+.usage-dialog { width: 100vw; max-width: none; height: 100dvh; max-height: none; margin: 0; padding: 0; border: 0; background: var(--bg); color: var(--ink); overflow: auto; overscroll-behavior: contain }
+.usage-dialog::backdrop { background: #16181d66 }
+.usage-dialog[open] { animation: fade-in .15s ease-out }
+.usage-page { width: min(1120px, 100%); margin: 0 auto; padding: 22px 28px 48px; display: flex; flex-direction: column; gap: 18px }
+.usage-topbar { display: flex; align-items: flex-start; justify-content: space-between; gap: 16px }
+.usage-title { display: flex; align-items: center; gap: 14px }
+.usage-title h1 { margin: 2px 0 0; font: 600 28px/1.1 var(--font-serif); letter-spacing: -.01em }
+.usage-back { height: 32px; padding: 0 10px; border: 1px solid var(--rule-strong); border-radius: 9px; background: var(--surface); color: var(--ink-2); font-size: 13px; font-weight: 600; cursor: pointer }
+.usage-back:hover { color: var(--ink); border-color: var(--ink-2) }
+.usage-icon-button { width: 34px; height: 34px; flex-shrink: 0; border: 1px solid var(--rule); border-radius: 10px; background: var(--surface); color: var(--muted); font-size: 20px; line-height: 1; cursor: pointer }
+.usage-icon-button:hover { color: var(--ink); border-color: var(--rule-strong) }
+
+.usage-controls { display: flex; flex-wrap: wrap; align-items: center; gap: 10px }
+.usage-segmented { display: inline-flex; padding: 3px; gap: 2px; border: 1px solid var(--rule); border-radius: 11px; background: var(--sunken) }
+.usage-segmented button { height: 32px; padding: 0 12px; border: 0; border-radius: 8px; background: transparent; color: var(--muted); font-size: 13px; font-weight: 600; white-space: nowrap; cursor: pointer }
+.usage-segmented button:hover { color: var(--ink) }
+.usage-segmented button[aria-pressed="true"] { background: var(--surface); color: var(--ink); box-shadow: 0 1px 2px #0000001a, 0 0 0 1px var(--rule) }
+.usage-select .app-select { min-width: 150px }
+.usage-select .app-select-trigger { min-height: 38px }
+.usage-refresh { display: inline-flex; align-items: center; gap: 7px; margin-left: auto }
+.usage-spin { display: inline-block; animation: usage-spin 1s linear infinite }
+@keyframes usage-spin { to { transform: rotate(360deg) } }
+.usage-notice { margin: 0; padding: 9px 12px; border: 1px solid var(--rule); border-radius: 10px; background: var(--surface); color: var(--ink-2); font-size: 13px }
+.usage-error { color: var(--danger) }
+.usage-muted { color: var(--muted); font-size: 12.5px }
+.usage-loading { padding: 80px 0; color: var(--muted); text-align: center }
+.usage-body { display: flex; flex-direction: column; gap: 26px; transition: opacity .15s }
+.usage-body.is-loading { opacity: .6 }
+
+.usage-hero { display: grid; grid-template-columns: minmax(250px, 320px) minmax(0, 1fr); gap: 28px; padding: 22px; border: 1px solid var(--rule); border-radius: 16px; background: var(--surface) }
+.usage-hero-summary { display: flex; flex-direction: column; gap: 4px; min-width: 0 }
+.usage-hero-figure { font: 600 42px/1.1 var(--font-ui); letter-spacing: -.02em; font-variant-numeric: tabular-nums }
+.usage-flag { margin-left: 6px; padding: 1px 7px; border-radius: 99px; background: var(--marker-soft); color: var(--marker-ink); font-size: 11.5px; font-weight: 600 }
+.usage-provider-list { list-style: none; margin: 16px 0 0; padding: 14px 0 0; border-top: 1px solid var(--rule); display: flex; flex-direction: column; gap: 12px }
+.usage-provider-row { display: flex; align-items: baseline; justify-content: space-between; gap: 12px }
+.usage-provider-row strong { font-variant-numeric: tabular-nums; font-weight: 600 }
+.usage-provider-name { display: flex; align-items: center; gap: 7px; min-width: 0; font-size: 13.5px }
+.usage-provider-name > i { width: 8px; height: 8px; flex-shrink: 0; border-radius: 50% }
+.usage-provider-name small { color: var(--muted); font-size: 11.5px; white-space: nowrap; font-variant-numeric: tabular-nums }
+.usage-provider-sub { display: flex; flex-wrap: wrap; gap: 4px 10px; padding-left: 15px }
+.usage-provider-sub a { color: var(--accent-ink); font-weight: 600; text-decoration: none }
+.usage-provider-sub a:hover { text-decoration: underline }
+.usage-provider-mark { display: inline-grid; place-items: center; min-width: 18px; height: 18px; padding: 0 3px; flex-shrink: 0; border-radius: 5px; background: color-mix(in oklab, var(--mark-color) 16%, var(--surface)); color: var(--ink-2); box-shadow: inset 0 0 0 1px color-mix(in oklab, var(--mark-color) 45%, transparent); font: 700 9.5px/1 var(--font-mono) }
+.usage-hero-chart { min-width: 0; display: flex; flex-direction: column; gap: 8px }
+.usage-hero-chart h2, .usage-section h2, .usage-sheet-section h3, .usage-share h3 { margin: 0; color: var(--ink); font-size: 13.5px; font-weight: 600 }
+
+.usage-chart { position: relative; width: 100%; min-width: 0 }
+.usage-chart svg { display: block; overflow: visible }
+.usage-chart-grid line { stroke: var(--rule); stroke-width: 1 }
+.usage-chart-grid text, .usage-chart-axis { fill: var(--muted); font: 11px var(--font-ui); font-variant-numeric: tabular-nums }
+.usage-chart-area { fill-opacity: var(--usage-chart-fill); stroke: var(--surface); stroke-width: 1 }
+.usage-chart-cursor line { stroke: var(--rule-strong); stroke-dasharray: 3 3 }
+.usage-chart-cursor circle { stroke: var(--surface); stroke-width: 2 }
+.usage-chart-empty { position: absolute; inset: 40% 0 auto; margin: 0; color: var(--muted); font-size: 13px; text-align: center; pointer-events: none }
+.usage-tooltip { position: absolute; top: 6px; z-index: 2; min-width: 170px; transform: translateX(-50%); display: flex; flex-direction: column; gap: 4px; padding: 9px 11px; border: 1px solid var(--rule); border-radius: 10px; background: var(--surface); box-shadow: var(--shadow-2); font-size: 12px; pointer-events: none }
+.usage-tooltip strong { font-size: 12px; font-weight: 600 }
+.usage-tooltip span { display: flex; align-items: center; gap: 7px; color: var(--ink-2) }
+.usage-tooltip i, .usage-legend i, .usage-share-legend i { width: 8px; height: 8px; flex-shrink: 0; border-radius: 2px }
+.usage-tooltip b { margin-left: auto; padding-left: 12px; font-weight: 600; font-variant-numeric: tabular-nums }
+.usage-tooltip-total { padding-top: 4px; border-top: 1px solid var(--rule) }
+.usage-legend { display: flex; flex-wrap: wrap; gap: 4px 14px; margin-top: 6px; color: var(--ink-2); font-size: 12px }
+.usage-legend span { display: inline-flex; align-items: center; gap: 6px }
+
+.usage-section { display: flex; flex-direction: column; gap: 10px }
+.usage-section-head { display: flex; align-items: center; justify-content: space-between; gap: 12px }
+.usage-section-head .secondary-button { height: 34px }
+.usage-metrics { display: grid; grid-template-columns: repeat(5, minmax(0, 1fr)); gap: 12px }
+.usage-metric { display: flex; flex-direction: column; gap: 2px; padding: 12px 14px; border: 1px solid var(--rule); border-radius: 12px; background: var(--surface) }
+.usage-metric span { color: var(--muted); font-size: 12px }
+.usage-metric strong { font-size: 20px; font-weight: 600; font-variant-numeric: tabular-nums }
+.usage-share-grid { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 24px 40px }
+.usage-share { display: flex; flex-direction: column; gap: 9px; min-width: 0 }
+.usage-share-head { display: flex; align-items: baseline; justify-content: space-between; gap: 12px }
+.usage-share-bar { display: flex; gap: 2px; height: 10px }
+.usage-share-bar span { flex-basis: 0; min-width: 4px; border-radius: 2px }
+.usage-share-bar span:first-child { border-radius: 99px 2px 2px 99px }
+.usage-share-bar span:last-child { border-radius: 2px 99px 99px 2px }
+.usage-share-bar span:only-child { border-radius: 99px }
+.usage-share-legend { display: flex; flex-wrap: wrap; gap: 4px 16px; font-size: 12px }
+.usage-share-legend span { display: inline-flex; align-items: center; gap: 6px; color: var(--muted) }
+.usage-share-legend b { color: var(--ink); font-weight: 600; font-variant-numeric: tabular-nums }
+.usage-share-legend small { color: var(--faint) }
+
+.usage-table-scroll { overflow-x: auto; border-radius: 12px; outline: none }
+.usage-table-scroll:focus-visible { box-shadow: 0 0 0 2px var(--accent-line) }
+.usage-table { width: 100%; border-collapse: collapse; font-size: 13.5px; font-variant-numeric: tabular-nums }
+.usage-table th { padding: 8px 10px; border-bottom: 1px solid var(--rule-strong); color: var(--muted); font-size: 12px; font-weight: 500; text-align: right; white-space: nowrap }
+.usage-table td { padding: 10px; border-bottom: 1px solid var(--rule); color: var(--muted); text-align: right; white-space: nowrap }
+.usage-table tbody tr:hover { background: color-mix(in oklab, var(--sunken) 60%, transparent) }
+.usage-table .usage-col-model { width: 100%; text-align: left; white-space: normal; color: var(--ink) }
+.usage-table .usage-rank { width: 1%; text-align: left; font-size: 12px }
+.usage-table .usage-strong { color: var(--ink) }
+.usage-table td:nth-child(3) { color: var(--ink) }
+.usage-table-empty { padding: 26px 0 !important; text-align: center !important }
+.usage-model-button { display: inline-flex; align-items: center; gap: 8px; padding: 0; border: 0; background: none; color: var(--ink); font-weight: 500; text-align: left; cursor: pointer; word-break: break-all }
+.usage-model-button:hover { color: var(--accent-ink); text-decoration: underline; text-underline-offset: 3px }
+.usage-row-bar { height: 3px; max-width: 220px; margin-top: 6px }
+.usage-row-bar span { display: block; height: 100%; border-radius: 99px }
+.usage-unpriced { color: var(--muted) }
+.usage-unpriced button { padding: 0; border: 0; background: none; color: var(--accent-ink); font: inherit; font-weight: 600; cursor: pointer }
+.usage-unpriced button:hover { text-decoration: underline }
+.usage-override-list { list-style: none; margin: 0; padding: 0; border: 1px solid var(--rule); border-radius: 12px; background: var(--surface) }
+.usage-override-list li { display: grid; grid-template-columns: minmax(120px, auto) 1fr auto; align-items: center; gap: 14px; padding: 10px 14px }
+.usage-override-list li + li { border-top: 1px solid var(--rule) }
+.usage-override-list .secondary-button { height: 30px }
+.usage-footnote { margin: 0; color: var(--faint); font-size: 12px; line-height: 1.6 }
+
+.usage-sheet-backdrop { position: fixed; inset: 0; z-index: 5; display: grid; place-items: center; padding: 24px; background: #16181d66; backdrop-filter: blur(4px); animation: fade-in .15s ease-out }
+.usage-sheet { width: min(760px, 100%); max-height: calc(100dvh - 48px); overflow: auto; display: flex; flex-direction: column; gap: 22px; padding: 22px; border: 1px solid var(--rule); border-radius: 18px; background: var(--surface); color: var(--ink); box-shadow: var(--shadow-3); animation: rise-in .2s ease-out }
+.usage-sheet-head { display: flex; align-items: flex-start; justify-content: space-between; gap: 16px }
+.usage-sheet-head h2 { display: flex; align-items: center; gap: 9px; margin: 0; font-size: 19px; font-weight: 600; word-break: break-all }
+.usage-sheet-head p { margin: 4px 0 0; color: var(--muted); font-size: 13px }
+.usage-sheet-section { display: flex; flex-direction: column; gap: 8px }
+.usage-stat-grid { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 14px }
+.usage-stat-grid div { display: flex; flex-direction: column; gap: 2px }
+.usage-stat-grid span { color: var(--muted); font-size: 12px }
+.usage-stat-grid strong { font-size: 22px; font-weight: 600; font-variant-numeric: tabular-nums }
+.usage-sheet-foot { display: flex; flex-wrap: wrap; align-items: center; justify-content: space-between; gap: 12px; padding-top: 14px; border-top: 1px solid var(--rule) }
+.usage-sheet-foot > div { display: flex; gap: 8px }
+.usage-price-form { width: min(560px, 100%); gap: 16px }
+.usage-price-grid { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 14px }
+.usage-money-input { position: relative; display: block }
+.usage-money-input i { position: absolute; left: 12px; top: 50%; transform: translateY(-50%); color: var(--muted); font-style: normal; font-weight: 500 }
+.usage-money-input input { padding-left: 24px !important }
+.usage-price-form .field-label input:disabled { color: var(--muted); background: var(--sunken) }
+
+.more-settings-tab .usage-tab-icon { font-weight: 700 }
+
+@media (max-width: 860px) {
+  .usage-page { padding: 16px 16px 40px }
+  .usage-hero { grid-template-columns: 1fr; padding: 16px }
+  .usage-metrics { grid-template-columns: repeat(2, minmax(0, 1fr)) }
+  .usage-share-grid { grid-template-columns: 1fr }
+  .usage-stat-grid { grid-template-columns: repeat(2, minmax(0, 1fr)) }
+  .usage-refresh { margin-left: 0 }
+  .usage-col-share { display: none }
+  .usage-override-list li { grid-template-columns: 1fr auto }
+  .usage-override-list li .usage-muted { grid-column: 1 / -1; grid-row: 2 }
+}
