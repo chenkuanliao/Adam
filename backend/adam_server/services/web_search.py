@@ -1,4 +1,5 @@
 import asyncio
+import copy
 import ipaddress
 import json
 import re
@@ -120,7 +121,9 @@ async def plan_search(provider, question: str, selection: str, paper_title: str)
         "Return only JSON: {\"query\": \"short search query\"}. "
         "Do not put private passages or a full PDF excerpt in the query."
     )
-    planner = type(provider)(provider.api_key, provider.model, provider.base_url, prompt)
+    # Copy the configured provider so every adapter (including OAuth-backed ones) keeps its credentials.
+    planner = copy.copy(provider)
+    planner.system_prompt = prompt
     input_text = f"Paper title: {paper_title}\nQuestion: {question}"
     if selection:
         input_text += f"\nSelected focus: {selection[:500]}"

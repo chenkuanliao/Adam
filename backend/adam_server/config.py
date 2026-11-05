@@ -5,6 +5,10 @@ from pathlib import Path
 
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
+from .services.chatgpt_auth import ChatGPTAuth
+
+CHATGPT_OAUTH_MARKER = "chatgpt-oauth"
+
 SYSTEM_PROMPT_BASE = """# Adam
 
 You are Adam, a research paper review assistant.
@@ -43,6 +47,11 @@ class Settings(BaseSettings):
     opencode_model: str = "gpt-5.6-terra"
     opencode_base_url: str = "https://opencode.ai/zen/v1"
     search_base_url: str = "http://localhost:8888"
+    # Sign in with ChatGPT: the browser-facing loopback port (in the redirect URI) and the
+    # address the callback listener binds. Docker binds 0.0.0.0 inside the container.
+    chatgpt_callback_port: int = 1455
+    chatgpt_callback_listen_host: str = "127.0.0.1"
+    chatgpt_callback_listen_port: int | None = None
 
     model_config = SettingsConfigDict(env_file=".env", env_prefix="ADAM_", extra="ignore")
 
@@ -103,6 +112,9 @@ class Settings(BaseSettings):
         return prompt if isinstance(prompt, str) and prompt.strip() else DEFAULT_QUICK_ASK_PROMPT
 
     def provider_api_key(self, provider: str) -> str | None:
+        if provider == "chatgpt":
+            # OAuth tokens stay in the credential store; callers only need to know it is usable.
+            return CHATGPT_OAUTH_MARKER if ChatGPTAuth(self.data_dir).connected() else None
         key = self.runtime_settings.get("api_keys", {}).get(provider)
         if key:
             return str(key)

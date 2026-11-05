@@ -233,7 +233,7 @@ class AppSettingsOut(BaseModel):
 
 
 class AppSettingsUpdate(BaseModel):
-    provider: str = Field(pattern=r"^(zen|openrouter|openai|anthropic|google)$")
+    provider: str = Field(pattern=r"^(zen|openrouter|openai|anthropic|google|chatgpt)$")
     model: str = Field(min_length=1, max_length=200, pattern=r"^[A-Za-z0-9._:/-]+$")
     api_keys: dict[str, str | None] = Field(default_factory=dict)
     favorites: dict[str, list[str]] = Field(default_factory=dict)
@@ -242,7 +242,7 @@ class AppSettingsUpdate(BaseModel):
 
 
 class TitleModelUpdate(BaseModel):
-    provider: str = Field(pattern=r"^(zen|openrouter|openai|anthropic|google)$")
+    provider: str = Field(pattern=r"^(zen|openrouter|openai|anthropic|google|chatgpt)$")
     model: str = Field(min_length=1, max_length=200, pattern=r"^[A-Za-z0-9._:/-]+$")
 
 
@@ -252,7 +252,7 @@ class ProviderModelsOut(BaseModel):
 
 
 class ModelFavoriteUpdate(BaseModel):
-    provider: str = Field(pattern=r"^(zen|openrouter|openai|anthropic|google)$")
+    provider: str = Field(pattern=r"^(zen|openrouter|openai|anthropic|google|chatgpt)$")
     model: str = Field(min_length=1, max_length=200)
     starred: bool
 
@@ -260,6 +260,37 @@ class ModelFavoriteUpdate(BaseModel):
 class ProviderKeyUpdate(BaseModel):
     provider: str = Field(pattern=r"^(zen|openrouter|openai|anthropic|google)$")
     api_key: str | None = Field(default=None, max_length=10000)
+
+
+class ChatGPTCallbackIn(BaseModel):
+    url: str = Field(min_length=1, max_length=8000)
+
+
+class ChatGPTStatusOut(BaseModel):
+    signed_in: bool
+    plan_enabled: bool
+    email: str | None = None
+    name: str | None = None
+    access_expires_at: int | None = None
+    session_expires_at: int | None = None
+    last_refreshed_at: int | None = None
+    registered: bool
+    usage_paused: bool
+    usage_message: str | None = None
+    usage_url: str
+    pending: bool
+    redirect_uri: str
+    listener_active: bool
+    listener_error: str | None = None
+    last_error: str | None = None
+    revoked: bool | None = None
+
+
+class ChatGPTSignInOut(BaseModel):
+    authorize_url: str
+    redirect_uri: str
+    listener_active: bool
+    listener_error: str | None = None
 
 
 FolderIcon = Literal["folder", "book", "bookmark", "star", "heart", "lightbulb", "flask", "code", "globe", "leaf", "briefcase", "graduation"]

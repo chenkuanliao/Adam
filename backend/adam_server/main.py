@@ -26,8 +26,10 @@ from .schemas import ChatTurnIn, ContextImageIn, PriceOverrideIn
 from .services.context import build_paper_context
 from .services.documents import document_file_path, ingest_pdf
 from .services.thumbnails import THUMBNAIL_MEDIA_TYPE, THUMBNAIL_WIDTHS, ThumbnailBusy, ensure_thumbnail, remove_thumbnails, shutdown_thumbnail_workers, thumbnail_etag
-from .services.llm import AnthropicProvider, GoogleProvider, OpenAICompatibleProvider, OpenAIResponsesProvider, TITLE_SYSTEM_PROMPT, clean_title, generate_zen_title, sse
+from .services.llm import AnthropicProvider, ChatGPTSubscriptionProvider, GoogleProvider, OpenAICompatibleProvider, OpenAIResponsesProvider, TITLE_SYSTEM_PROMPT, clean_title, generate_zen_title, sse
+from .services.chatgpt_auth import ChatGPTAuth, ChatGPTAuthError, friendly_api_error, error_code, parse_callback_url
 from .services.web_search import asks_for_citing_papers, plan_search, previous_sources, search_citing_papers, search_web, web_context
+from .schemas import ChatGPTCallbackIn, ChatGPTSignInOut, ChatGPTStatusOut
 from .schemas import PaperCandidate, PaperImportIn, PaperSearchOut, PdfLinkIn, PdfLinkOut
 from .services.paper_discovery import discover, download_pdf, existing_paper, resolve_pdf, verify_pdf_link
 from .services.pricing import PriceBook, RefreshTooSoon, parse_overrides
@@ -40,11 +42,26 @@ logger = logging.getLogger(__name__)
 price_book = PriceBook(settings.data_dir / "pricing")
 # (document_id, conversation_id) that title-generation usage is attributed to.
 title_usage_scope: contextvars.ContextVar[tuple[str | None, str | None]] = contextvars.ContextVar("title_usage_scope", default=(None, None))
+chatgpt_auth = ChatGPTAuth(settings.data_dir, settings.chatgpt_callback_port)
+chatgpt_listener: asyncio.base_events.Server | None = None
+PROVIDER_NAMES = ("zen", "openrouter", "openai", "anthropic", "google", "chatgpt")
+
+
+async def ensure_chatgpt_listener() -> None:
+    """Start the loopback callback listener on first sign-in so a busy port never blocks startup."""
+    global chatgpt_listener
+    if chatgpt_listener is None or not chatgpt_listener.is_serving():
+        chatgpt_listener = await chatgpt_auth.start_listener(settings.chatgpt_callback_listen_host, settings.chatgpt_callback_listen_port or settings.chatgpt_callback_port)
 
 
 @asynccontextmanager
 async def lifespan(_app: FastAPI) -> AsyncIterator[None]:
+    # Keep the 30-day refresh token rotating while the server runs.
+    refresher = asyncio.create_task(chatgpt_auth.background_refresh())
     yield
+    refresher.cancel()
+    if chatgpt_listener is not None:
+        chatgpt_listener.close()
     # Stop thumbnail worker processes with the server instead of leaving them to interpreter exit.
     await run_in_threadpool(shutdown_thumbnail_workers)
 
@@ -101,7 +118,14 @@ async def import_paper(request: PaperImportIn, db: Session = Depends(get_db)):
         raise HTTPException(502, "The PDF could not be downloaded. Retry, choose another source, or upload it manually.") from None
 
 
+def missing_credentials_message(provider: str, purpose: str = "chat") -> str:
+    if provider == "chatgpt":
+        return f"Sign in with ChatGPT in Settings → ChatGPT (subscription) to enable {purpose}."
+    return f"No API key is configured for {provider}. Open Settings to enable {purpose}."
+
+
 def make_provider(provider_name: str, api_key: str, model: str, system_prompt: str):
+    if provider_name == "chatgpt": return ChatGPTSubscriptionProvider(chatgpt_auth, model, system_prompt)
     if provider_name == "google": return GoogleProvider(api_key, model, "https://generativelanguage.googleapis.com/v1beta", system_prompt)
     if provider_name == "anthropic": return AnthropicProvider(api_key, model, system_prompt=system_prompt)
     if provider_name == "openai": return OpenAIResponsesProvider(api_key, model, "https://api.openai.com/v1", system_prompt)
@@ -116,7 +140,7 @@ async def generate_configured_title(transcript: str, fallback: str) -> str:
     provider_name, model = settings.title_provider, settings.title_model
     api_key = settings.provider_api_key(provider_name)
     if not api_key:
-        raise ValueError(f"No {provider_name} API key is configured for title generation.")
+        raise ValueError(missing_credentials_message(provider_name, "title generation"))
     document_id, conversation_id = title_usage_scope.get()
     tracker = UsageTracker(SessionLocal, "title", document_id, conversation_id)
     if provider_name == "zen" and model.startswith(("gpt-", "grok-", "muse-")):
@@ -179,7 +203,7 @@ def settings_response(app_settings: Settings, db: Session) -> AppSettingsOut:
     selected_models = dict(runtime.get("selected_models", {}))
     if active_provider not in selected_models:
         selected_models[active_provider] = runtime.get("model", app_settings.opencode_model)
-    providers = {name: bool(app_settings.provider_api_key(name)) for name in ("zen", "openrouter", "openai", "anthropic", "google")}
+    providers = {name: bool(app_settings.provider_api_key(name)) for name in PROVIDER_NAMES}
     favorites: dict[str, list[str]] = {}
     for item in db.scalars(select(ModelFavorite).order_by(ModelFavorite.created_at)).all():
         favorites.setdefault(item.provider, []).append(item.model_id)
@@ -206,7 +230,7 @@ def update_app_settings(request: AppSettingsUpdate, app_settings: Settings = Dep
 @app.put("/api/settings/title", response_model=AppSettingsOut)
 def update_title_model(request: TitleModelUpdate, app_settings: Settings = Depends(get_settings), db: Session = Depends(get_db)) -> AppSettingsOut:
     if not app_settings.provider_api_key(request.provider):
-        raise HTTPException(503, f"Add a {request.provider} API key before selecting it for chat titles.")
+        raise HTTPException(503, "Sign in with ChatGPT before selecting it for chat titles." if request.provider == "chatgpt" else f"Add a {request.provider} API key before selecting it for chat titles.")
     app_settings.save_title_settings(request.provider, request.model)
     return settings_response(app_settings, db)
 
@@ -228,8 +252,10 @@ def update_provider_key(request: ProviderKeyUpdate, app_settings: Settings = Dep
 
 @app.get("/api/settings/models/{provider}", response_model=ProviderModelsOut)
 async def list_provider_models(provider: str, app_settings: Settings = Depends(get_settings)) -> ProviderModelsOut:
-    if provider not in {"zen", "openrouter", "openai", "anthropic", "google"}:
+    if provider not in PROVIDER_NAMES:
         raise HTTPException(404, "Unknown provider.")
+    if provider == "chatgpt":
+        return ProviderModelsOut(provider=provider, models=await list_chatgpt_models())
     key = app_settings.provider_api_key(provider)
     if not key:
         raise HTTPException(503, f"Add a {provider} API key to load models.")
@@ -255,6 +281,64 @@ async def list_provider_models(provider: str, app_settings: Settings = Depends(g
         if provider == "openai" and not model_id.startswith(("gpt-", "o1", "o3", "o4")): continue
         if model_id: models.append(model_id)
     return ProviderModelsOut(provider=provider, models=sorted(set(models)))
+
+
+async def list_chatgpt_models() -> list[str]:
+    try:
+        token = await chatgpt_auth.access_token()
+        async with chatgpt_auth.client(timeout=20) as client:
+            response = await client.get("https://api.openai.com/v1/models", headers={"Authorization": f"Bearer {token}"})
+    except ChatGPTAuthError as exc:
+        raise HTTPException(401, str(exc)) from exc
+    except httpx.HTTPError as exc:
+        raise HTTPException(502, "Could not load models from ChatGPT.") from exc
+    body = chatgpt_auth.json_body(response)
+    if response.status_code != 200:
+        code, param = error_code(body)
+        raise HTTPException(response.status_code, friendly_api_error(response.status_code, code, param))
+    # Keep server order; only models marked visibility == "list" are user-selectable.
+    models = [item.get("slug") for item in body.get("models", []) if isinstance(item, dict) and item.get("visibility") == "list" and item.get("slug")]
+    return list(dict.fromkeys(models))
+
+
+def chatgpt_status(extra: dict | None = None) -> ChatGPTStatusOut:
+    return ChatGPTStatusOut(**{**chatgpt_auth.status(), **(extra or {})})
+
+
+@app.get("/api/chatgpt/status", response_model=ChatGPTStatusOut)
+def get_chatgpt_status() -> ChatGPTStatusOut:
+    return chatgpt_status()
+
+
+@app.post("/api/chatgpt/sign-in", response_model=ChatGPTSignInOut)
+async def start_chatgpt_sign_in() -> ChatGPTSignInOut:
+    # The listener must be running before the browser opens the authorize URL.
+    await ensure_chatgpt_listener()
+    url = chatgpt_auth.start()
+    return ChatGPTSignInOut(authorize_url=url, redirect_uri=chatgpt_auth.redirect_uri, listener_active=chatgpt_auth.listener_active, listener_error=chatgpt_auth.listener_error)
+
+
+@app.post("/api/chatgpt/callback", response_model=ChatGPTStatusOut)
+async def complete_chatgpt_sign_in(request: ChatGPTCallbackIn) -> ChatGPTStatusOut:
+    try:
+        await chatgpt_auth.complete(parse_callback_url(request.url))
+    except ChatGPTAuthError as exc:
+        raise HTTPException(400, str(exc)) from exc
+    except httpx.HTTPError as exc:
+        raise HTTPException(502, "Adam could not reach ChatGPT to finish signing in. Try again.") from exc
+    return chatgpt_status()
+
+
+@app.post("/api/chatgpt/sign-out", response_model=ChatGPTStatusOut)
+async def chatgpt_sign_out() -> ChatGPTStatusOut:
+    result = await chatgpt_auth.sign_out()
+    return ChatGPTStatusOut(**result)
+
+
+@app.post("/api/chatgpt/resume", response_model=ChatGPTStatusOut)
+def resume_chatgpt_usage() -> ChatGPTStatusOut:
+    chatgpt_auth.resume_usage()
+    return chatgpt_status()
 
 
 FOLDER_COLORS = ["#8c9d65", "#618fbd", "#b8836d", "#9a80b8", "#c29d54", "#689f98"]
@@ -792,7 +876,7 @@ def load_title_transcript(conversation_id: str) -> tuple[str, str, str]:
         if not conversation:
             raise HTTPException(404, "Conversation not found.")
         if not settings.provider_api_key(settings.title_provider):
-            raise HTTPException(503, f"No {settings.title_provider} API key is configured for chat titles.")
+            raise HTTPException(503, missing_credentials_message(settings.title_provider, "chat titles"))
         messages = list(db.scalars(select(Message).where(Message.conversation_id == conversation.id).order_by(Message.created_at)))
         if not messages:
             raise HTTPException(409, "Send a message before generating a title.")
@@ -886,7 +970,7 @@ def prepare_chat_stream(conversation_id: str, request: ChatRequest) -> ChatStrea
         provider_name = conversation.provider
         api_key = settings.provider_api_key(provider_name)
         if not api_key:
-            raise HTTPException(503, f"No API key is configured for {provider_name}. Open Settings to enable chat.")
+            raise HTTPException(503, missing_credentials_message(provider_name))
 
         if conversation.context_builder_version == "quick-ask-v1":
             paper_context, context_mode = "", "quick_ask_history"
@@ -1016,7 +1100,7 @@ def prepare_quick_ask(conversation_id: str, request: QuickAskRequest) -> tuple[s
             raise HTTPException(422, "Quick Ask requires selected text or a screenshot.")
         api_key = settings.provider_api_key(conversation.provider)
         if not api_key:
-            raise HTTPException(503, f"No API key is configured for {conversation.provider}. Open Settings to enable Quick Ask.")
+            raise HTTPException(503, missing_credentials_message(conversation.provider, "Quick Ask"))
         paper_title = Path(db.get(Document, conversation.document_id).original_name).stem
         return conversation.provider, conversation.model_id, api_key, paper_title, conversation.document_id
 
