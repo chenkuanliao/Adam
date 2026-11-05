@@ -801,7 +801,8 @@ kbd { display: inline-grid; place-items: center; min-width: 18px; height: 18px; 
 .provider-nav button { width: 100%; height: 38px; display: flex; align-items: center; gap: 9px; padding: 0 10px; border: 0; border-radius: 8px; background: transparent; color: var(--ink-2); font-size: 13.5px; text-align: left }
 .provider-nav button:hover { background: #16181d0a }
 .provider-nav button.active { background: var(--surface); color: var(--ink); font-weight: 600; box-shadow: var(--shadow-1), inset 0 0 0 1px var(--rule) }
-.provider-nav small { margin-left: auto; padding: 1px 6px; border-radius: 999px; background: #2f7a521a; color: var(--success); font-size: 10.5px; font-weight: 600 }
+.provider-nav-name { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap }
+.provider-nav small { flex: none; margin-left: auto; padding: 1px 6px; white-space: nowrap; border-radius: 999px; background: #2f7a521a; color: var(--success); font-size: 10.5px; font-weight: 600 }
 .provider-dot { width: 8px; height: 8px; flex: none; border: 1.5px solid var(--rule-strong); border-radius: 50%; background: var(--surface) }
 .provider-dot.connected { border-color: var(--success); background: var(--success); box-shadow: 0 0 0 3px #2f7a5222 }
 .more-tab-icon { width: 20px; height: 20px; display: grid; place-items: center; border-radius: 6px; background: var(--ink); color: var(--marker); font-size: 12px }

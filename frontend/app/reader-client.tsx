@@ -60,13 +60,13 @@ function readReaderView(documentId: string): ReaderView | null {
   } catch { return null; }
 }
 
-const PROVIDERS: Array<{ id: ProviderId; name: string; keyLabel: string }> = [
+const PROVIDERS: Array<{ id: ProviderId; name: string; keyLabel: string; navName?: string }> = [
   { id: 'zen', name: 'OpenCode Zen', keyLabel: 'OpenCode Zen key' },
   { id: 'openrouter', name: 'OpenRouter', keyLabel: 'OpenRouter key' },
   { id: 'openai', name: 'OpenAI', keyLabel: 'OpenAI key' },
   { id: 'anthropic', name: 'Anthropic', keyLabel: 'Anthropic key' },
   { id: 'google', name: 'Google', keyLabel: 'Google AI key' },
-  { id: 'chatgpt', name: 'ChatGPT (subscription)', keyLabel: 'ChatGPT sign-in' },
+  { id: 'chatgpt', name: 'ChatGPT (subscription)', navName: 'ChatGPT', keyLabel: 'ChatGPT sign-in' },
 ];
 const API_BASE = '';
 const MIN_ZOOM = .1;
@@ -2692,7 +2692,7 @@ function SettingsDialog({ onClose }: { onClose: () => void }) {
       <div className="provider-layout">
         <nav className="provider-nav" aria-label="Settings sections">
           <span className="nav-section-label">Providers</span>
-          {PROVIDERS.map((item) => <button type="button" className={settingsTab === 'providers' && provider === item.id ? 'active' : ''} onClick={() => { setSettingsTab('providers'); chooseProvider(item.id); }} key={item.id}><span className={`provider-dot${settings?.providers[item.id] ? ' connected' : ''}`} />{item.name}{settings?.providers[item.id] && <small>{settings.provider === item.id ? 'In use' : 'Ready'}</small>}</button>)}
+          {PROVIDERS.map((item) => <button type="button" className={settingsTab === 'providers' && provider === item.id ? 'active' : ''} onClick={() => { setSettingsTab('providers'); chooseProvider(item.id); }} key={item.id} title={item.name}><span className={`provider-dot${settings?.providers[item.id] ? ' connected' : ''}`} /><span className="provider-nav-name">{item.navName ?? item.name}</span>{settings?.providers[item.id] && <small>{settings.provider === item.id ? 'In use' : 'Ready'}</small>}</button>)}
           <span className="nav-section-label secondary-label">General</span>
           <button type="button" className={`more-settings-tab${settingsTab === 'titles' ? ' active' : ''}`} onClick={() => { setSettingsTab('titles'); setStatus(''); if (settings?.providers[titleProvider]) void loadTitleModels(titleProvider); }}><span className="more-tab-icon">✦</span>Chat titles</button>
           <button type="button" className={`more-settings-tab${settingsTab === 'system' ? ' active' : ''}`} onClick={() => { setSettingsTab('system'); setStatus(''); }}><span className="more-tab-icon">¶</span>System prompt</button>
