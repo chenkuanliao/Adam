@@ -1,169 +1,163 @@
 # Adam
 
-Adam is a local-first, self-hosted research-paper reader with selection-aware AI.
+**A self-hosted research-paper reader with an AI that has read the paper too.**
 
-The current vertical slice supports:
+Adam keeps your PDFs, notes, and chats on your own machine. Open a paper, select any passage, figure, or equation, and ask about it. The model sees the full paper, so its answers stay grounded in what you are reading. You choose the model: bring an API key from OpenCode Zen, OpenRouter, OpenAI, Anthropic, or Google, or sign in with your ChatGPT plan.
 
-- persistent local PDF upload and library
-- online paper discovery from **Find papers** or the search dialog: search arXiv and the web, review source/PDF links, choose a folder, and download into the local reader; source failures leave other results available, and identical PDFs reuse existing library copies
-- nested folders with drag-and-drop folder and paper moves, root color inheritance, 12 selectable icons, folder-scoped uploads and search, and grid/list views; removing a folder keeps its papers, notes, and chats
-- in-browser PDF rendering and native text selection
-- PDF find with `Cmd/Ctrl + F` and chat find with `Cmd/Ctrl + Shift + F`, highlighted matches, next/previous navigation, and `Escape` to close; the chat shortcut focuses history search when chat history is open
-- chat history search across titles, questions, and answers for the current paper, with matching snippets and direct navigation into a matching chat
-- a floating reader dock with editable page and zoom controls, plus a matching editable chat text percentage
-- Continue reading with browser-local saved page, zoom, and reading position
-- full-window focus reading: click **Focus reading** or press `F` to hide the sidebar and anchored note cards while keeping note and chat-link icons available; toggle **Notes** to show anchored note cards beside the PDF without leaving focus mode; use **Exit focus** or `Esc` to restore your workspace, zoom, and reading position
-- local native-text extraction with PyMuPDF
-- per-paper chat histories with temporary empty chats, autosaved unsent drafts, switch, delete, and reload restoration
-- automatic full-paper context for every question, with selected passages and images treated as explicit focus
-- provider/model/system-prompt snapshots per conversation
-- streamed responses from OpenCode Zen, using GPT-5.6 Terra by default
-- optional web search through a local SearXNG container, with cited sources saved per chat and reused in follow-up questions
-- provider-aware model and API-key settings for OpenCode Zen, OpenRouter, OpenAI, Anthropic, and Google, available from either screen with `Cmd/Ctrl + ,`
-- an optional **ChatGPT (subscription)** provider that uses your own ChatGPT Plus or Pro plan through Sign in with ChatGPT instead of an API key
-- Docker Compose deployment with host-mounted data
+![Adam's reader: a paper on the left, a chat about a selected passage on the right](docs/images/reader-chat.png)
 
-## Run with Docker
+- [Features](#features)
+- [Requirements](#requirements)
+- [Quick start](#quick-start)
+- [Configuration](#configuration)
+- [Keyboard shortcuts](#keyboard-shortcuts)
+- [Your data](#your-data)
+- [Development](#development)
+
+## Features
+
+### Ask about any passage
+
+Select text in the PDF and add it to the chat, or press **R** to drag over a figure or equation. Adam always sends the full paper text; your selections tell the model what to focus on. Answers stream in, render Markdown and math, and are saved per paper, so you can come back to any conversation later.
+
+![Selecting a sentence, adding it to the chat, and getting a streamed answer](docs/images/ask-about-a-passage.gif)
+
+- **Quick Ask** (**A**) answers a question about a selection in a small floating window, without leaving your place. You can move the thread into the main chat afterwards.
+- **Search web** lets the model run a web search through a bundled SearXNG instance and cite its sources. The sources stay available for follow-up questions in that chat.
+- **Chat history** for each paper is searchable across titles, questions, and answers. Chats get automatic titles, and unsent drafts are saved.
+- **Link reference to PDF** pins an answer to the passage it was about, so you can jump between the two.
+
+### Find and import papers
+
+Search arXiv and the web from inside Adam (**⌘/Ctrl + Shift + K**), review a result, pick a folder, and download it into your library. You can also paste a link to any public PDF. Adam checks that the file is a real PDF before adding it, and importing the same PDF twice reuses the copy you already have.
+
+![Searching online for papers and getting arXiv results](docs/images/find-papers.gif)
+
+### Notes with source quotes
+
+Each paper has a rich-text note beside it. Select text in the PDF and press **Q** to insert it as a quote with its page citation. **Show in PDF** scrolls back to the quoted passage and highlights it. You can also highlight in four colors (**1–4**) and attach short notes to passages (**N**).
+
+![Quoting a passage into the paper note, then jumping back to it in the PDF](docs/images/quote-into-notes.gif)
+
+### A library that stays organized
+
+Upload PDFs or import them from the web, then sort them into nested, color-coded folders with drag and drop. Switch between grid and list views, search with **⌘/Ctrl + K**, and pick up where you left off with **Continue reading**, which remembers your page, scroll position, and zoom.
+
+![The paper library with folders and paper cards](docs/images/library.png)
+
+### Focus reading
+
+Press **F** to hide everything except the paper. Toggle **Notes** to show your anchored notes beside the page, and press **Esc** to return to your workspace exactly as you left it.
+
+![Focus reading with an anchored note card beside the page](docs/images/focus.png)
+
+### Usage and cost tracking
+
+**Settings → Usage & cost** shows token usage and estimated spend by provider, model, and day, including cache hits and savings. Prices come from public price lists and you can override them. Prompts and answers are never copied into usage records. See [Usage and cost](docs/usage-and-cost.md) for how costs are estimated.
+
+![The Usage & cost dashboard in Settings](docs/images/usage.png)
+
+## Requirements
+
+- **Docker** with Docker Compose v2 (Docker Desktop, or Docker Engine with the Compose plugin).
+- **An AI provider** for chat. Any one of:
+  - an API key for [OpenCode Zen](https://opencode.ai/zen) (the default), [OpenRouter](https://openrouter.ai), [OpenAI](https://platform.openai.com), [Anthropic](https://console.anthropic.com), or [Google AI Studio](https://aistudio.google.com), or
+  - a ChatGPT **Plus or Pro** plan, used through [Sign in with ChatGPT](docs/chatgpt-subscription.md).
+
+  Everything except chat (library, reader, notes, search) works without a provider.
+- **Free local ports** 3000 (web app), 8888 (search), and 1455 (ChatGPT sign-in callback). Each can be changed in `.env`.
+
+To run Adam without Docker for development, you also need Python 3.12 and Node.js 22.13 or later. See [Development](#development).
+
+## Quick start
 
 ```sh
+git clone https://github.com/chenkuanliao/Adam.git
+cd Adam
 cp .env.example .env
 mkdir -p secrets
-# Put your OpenCode Zen key in secrets/opencode_api_key.
+# Paste your OpenCode Zen key into this file, or leave it empty to use another provider.
+touch secrets/opencode_api_key
 chmod 600 secrets/opencode_api_key
-docker compose up --build
-```
-
-Open <http://localhost:3000>. PDFs and application state are stored under `./data`, outside the containers.
-To run a separate copy from another checkout, give it a unique Compose project and unused ports, for example `ADAM_WEB_PORT=3001 ADAM_SEARCH_PORT=8889 docker compose -p adam-folders up --build -d`. Each checkout keeps its own `./data` and `./secrets` directories.
-The Search web control is off for each new question. When enabled, Adam searches and cites useful sources in its answer. It can include up to 7,500 characters of search snippet and page text from each of five results. Earlier web sources remain available to follow-up questions in that chat. SearXNG needs no search API key; it is reachable only through Docker and localhost port 8888 for local development.
-Settings changed in the app are stored in `./data/settings.json` and survive container rebuilds. Keys remain server-side and are never returned to the browser. An OpenCode Zen key entered in Settings takes precedence over the Docker secret; removing it falls back to the secret.
-The Chat titles section in Settings selects a separate provider and model for automatic chat names and title regeneration. It defaults to OpenCode Zen with `gpt-6-luna`.
-
-## ChatGPT subscription (Sign in with ChatGPT)
-
-The **ChatGPT (subscription)** provider lets the owner of this self-hosted install use their own ChatGPT plan for chat, Quick Ask, and chat titles, with no API key. It follows OpenAI's [Sign in with ChatGPT open-source token path](https://developers.openai.com/siwc/token-sharing-open-source).
-
-- **Requirements:** a ChatGPT **Plus or Pro** plan whose workspace allows plan usage in other apps.
-- **Personal use only.** OpenAI limits this path to open-source and personal local projects. Adam has one owner and no multi-user support. Do not expose Adam to other people while you are signed in.
-
-### Setup
-
-1. Start Adam. With Docker, `compose.yaml` publishes the sign-in callback on the host as `127.0.0.1:${ADAM_CHATGPT_CALLBACK_PORT:-1455}`. For local development, the API process listens on `127.0.0.1:1455` itself. Port 1455 must be free; if another app is using it, set `ADAM_CHATGPT_CALLBACK_PORT` to another port.
-2. Open Settings (`Cmd/Ctrl + ,`) → **ChatGPT (subscription)** → **Sign in with ChatGPT**. A ChatGPT tab opens. Approve access, including plan usage.
-3. ChatGPT redirects to `http://127.0.0.1:1455/auth/callback`. Adam finishes signing in and the tab says you can close it. Settings then shows your account and loads the models your plan can use (`GET /v1/models`, entries with `visibility == "list"`).
-4. Pick a model and click **Apply model**. To use ChatGPT for chat titles too, choose it in **Chat titles**.
-
-Credentials are stored in `./data/chatgpt_auth.json` with `0600` permissions and written atomically. They include the issued `oaiapp_…` client ID, a random host ID, account identity, the access, refresh, and ID tokens, and expiry times. Tokens are never logged or sent to the browser; the UI only sees status (signed-in email and expiry). Access tokens last about an hour and refresh automatically when needed. Each refresh replaces the 30-day refresh token, and refreshes are serialized. A background job refreshes at least once a day while Adam runs, so the session stays alive as long as Adam is running at least every few weeks. **Sign out** revokes the refresh token with OpenAI and deletes the local tokens.
-
-### Using Adam from another device (Tailscale, LAN)
-
-The callback address is `127.0.0.1`, which always means "this device". If your browser runs on another device, such as a MacBook reaching your PC over Tailscale, the final redirect fails on that device with a "can't connect" page. That failure is expected and the sign-in can still be finished:
-
-1. In Settings → **ChatGPT (subscription)**, click **Sign in with ChatGPT** and approve access in the new tab.
-2. When the tab shows the connection error, copy the **entire address** from its address bar. It starts with `http://127.0.0.1:1455/auth/callback?code=…&state=…`.
-3. Back in Adam, open **Using Adam from another device?**, paste the URL into **Callback URL**, and click **Finish sign-in**.
-
-The server checks the pasted `state` against the pending sign-in (one use, 15-minute lifetime) and completes the PKCE exchange itself. Paste the URL promptly; if it has expired, start the sign-in again.
-
-### Preview limitations and errors
-
-- Plan usage is a preview. Inference uses only `POST https://api.openai.com/v1/responses` with `store: false` and `stream: true`. Adam never sends parameters that plan usage rejects, including `temperature`, `top_p`, `max_output_tokens`, `previous_response_id`, and `user`, so answers use the model's default sampling.
-- Audio and video input, hosted tools, and file uploads are not available on this path. Adam only sends text and selected-region images.
-- **ChatGPT plan limit reached** means `subscription_sharing_usage_limit_exceeded` (HTTP 429). Adam pauses ChatGPT requests for a short while and links to [ChatGPT usage settings](https://chatgpt.com/settings/usage). OpenAI does not report a reset time, so Adam does not show one; Plus plans share a rolling limit across all apps, and an app-specific limit may also apply. Use **Resume now** in Settings to try again sooner.
-- **Sign in again** means the session was revoked, expired, or disconnected from ChatGPT settings. Click **Sign in again with ChatGPT**. Adam reuses its saved app registration.
-- If the account or workspace is not eligible for plan usage, or the plan scope was declined, Settings says so. Use another provider in that case.
-
-## Run for development
-
-Backend, using this machine's standard Python environment:
-
-```sh
-source ~/Documents/Projects/mainenv/bin/activate
-cd backend
-pip install -r requirements.txt
-uvicorn adam_server.main:app --reload
-```
-
-Frontend:
-
-```sh
-cd frontend
-npm install
-npm run dev
-```
-
-The frontend runs at <http://localhost:3000> and proxies `/api` requests to the development API at <http://localhost:8000>.
-For local development, start the search service with `docker compose up -d search`; the backend uses <http://localhost:8888> by default. Paper discovery queries arXiv directly and uses this service for broader web results. No AI key is needed. Search runs only on submission; reviewing a source may load remote metadata/PDF links, and **Download & add to library** stores the PDF and extracts its text. Restricted or unavailable PDFs can still be uploaded manually. Imported papers retain their source URL, PDF URL, available identifiers, and import date. arXiv versions remain separate search results; repeat imports preserve the existing copy and its folder, notes, and chats.
-
-## Usage and cost
-
-Open **Settings → Usage & cost** (in the Settings dialog, under General) to see token usage and estimated spend by provider, model, and day for the past 24 hours, 7, 30, or 90 days. Switch between **Cost** and **Tokens**, filter by provider or request type (chat, Quick Ask, chat titles), and click a model for its cost, tokens, cost per 1M tokens, cache hit rate, trend, and cost/token mix.
-
-- **What is tracked:** every model call Adam makes — chat answers, Quick Ask, chat-title generation, and web-search query planning (counted with the chat or Quick Ask that triggered it). Each call stores only token counts, provider, model, time, and the paper/chat it belonged to, in the local SQLite database. Prompts and answers are not copied into usage records. Deleting a paper or chat keeps its usage history.
-- **History starts when this version is installed.** Earlier requests were never measured and cannot be reconstructed.
-- **Token categories:** uncached input, cache reads, cache writes, and output. Reasoning/thinking tokens are shown but are already part of output, so they are never charged twice. A call that is stopped or fails after the provider reported usage is still recorded.
-- **Costs are estimates recomputed from current prices**, not stored amounts, so price updates and overrides also apply to past usage. Prices come from [LiteLLM's price list](https://github.com/BerriAI/litellm/blob/main/model_prices_and_context_window.json) and, for OpenCode Zen, Zen's own prices via [models.dev](https://models.dev). Both are cached in `./data/pricing`, refreshed every 24 hours, and kept when a refresh fails; **Refresh prices** forces an update (at most once a minute). OpenRouter's reported per-request cost is used as-is. Usage of a model with no known price is shown as **Unpriced** and counts as $0 — Adam never guesses. Cache savings are cache-read tokens × (input price − cache-read price). Context-length price tiers and batch/priority discounts are not applied.
-- **Price overrides:** choose **Set price** on an unpriced model, **Set price**/**Edit price** in a model's details, or **Add price** under *Your model prices*. Enter USD per 1M tokens for input and output, and optionally cache read and cache write (both default to the input price). Overrides win over published and provider-reported prices and are saved in `./data/settings.json`.
-- **Prompt caching:** Anthropic Claude requests mark the system prompt, which contains the paper, as cacheable, so follow-up questions about the same paper within about five minutes read it from the cache at a fraction of the input price. OpenAI, Gemini, and most Zen models cache repeated prompts automatically.
-
-For development only, `scripts/seed-usage-demo.py` can add clearly marked synthetic usage (and `--clear` removes it); see the script for how to run it inside the API container. It is never run automatically.
-
-## Data durability
-
-Do not delete `./data` when upgrading. A normal update rebuilds the disposable containers while retaining this directory:
-
-```sh
-docker compose down
 docker compose up --build -d
 ```
 
-Stop the application before copying `./data` as a simple consistent backup.
+Open <http://localhost:3000>, upload a PDF, and start asking questions.
 
-See [ARCHITECTURE.md](./ARCHITECTURE.md) for design decisions and the incremental roadmap.
+If you left `secrets/opencode_api_key` empty, open **Settings** (**⌘/Ctrl + ,**), choose a provider, paste its API key, and click **Apply model**. For a ChatGPT plan, follow [ChatGPT subscription](docs/chatgpt-subscription.md).
 
-## Isolated UI review
-
-The combined reviewed design runs separately from the original explorations:
+To update to a newer version:
 
 ```sh
-source ~/Documents/Projects/mainenv/bin/activate
-ADAM_DATA_DIR="$PWD/data/review-demo" ADAM_SEARCH_BASE_URL=http://127.0.0.1:1 PYTHONPATH="$PWD/backend" uvicorn adam_server.main:app --host 127.0.0.1 --port 8414
+git pull
+docker compose up --build -d
 ```
 
-In another terminal, seed the local review backend with six clearly labeled synthetic PDFs and three folders (safe to rerun without duplicates):
+Containers are rebuilt and your data in `./data` is kept.
+
+## Configuration
+
+Most settings live in the app, under **Settings** (**⌘/Ctrl + ,**):
+
+| Section | What it controls |
+| --- | --- |
+| **Providers** | API keys and the chat model for OpenCode Zen, OpenRouter, OpenAI, Anthropic, Google, and ChatGPT. Each conversation remembers the provider, model, and system prompt it started with. |
+| **Chat titles** | A separate provider and model for automatic chat titles. Defaults to OpenCode Zen with `gpt-6-luna`. |
+| **System prompt** | The instructions sent with every chat and with Quick Ask. |
+| **Usage & cost** | Token usage and estimated spend. See [Usage and cost](docs/usage-and-cost.md). |
+
+Settings are saved in `./data/settings.json` and survive rebuilds. API keys stay on the server and are never sent back to the browser. A Zen key entered in Settings takes precedence over `secrets/opencode_api_key`; removing it falls back to the file.
+
+Ports and the default Zen model are set in `.env`:
+
+| Variable | Default | Purpose |
+| --- | --- | --- |
+| `ADAM_WEB_PORT` | `3000` | Port of the web app |
+| `ADAM_SEARCH_PORT` | `8888` | Port of the bundled SearXNG search service (localhost only) |
+| `ADAM_CHATGPT_CALLBACK_PORT` | `1455` | Port for the Sign in with ChatGPT callback |
+| `ADAM_OPENCODE_MODEL` | `gpt-5.6-terra` | Default OpenCode Zen chat model |
+
+**Web search** is off for each new question until you turn on **Search web** in the composer. It uses the bundled SearXNG container, so it needs no search API key. Each answer can draw on up to five results, with up to 7,500 characters of text from each.
+
+To run a second copy from another checkout, give it its own Compose project name and ports:
 
 ```sh
-source ~/Documents/Projects/mainenv/bin/activate
-python scripts/seed-review-demo.py --api-base http://127.0.0.1:8414
-cd frontend
-ADAM_INTERNAL_API_BASE=http://127.0.0.1:8414 ADAM_INSPECTOR_PORT=9414 npm run dev -- --port 7414 --strictPort
+ADAM_WEB_PORT=3001 ADAM_SEARCH_PORT=8889 docker compose -p adam-2 up --build -d
 ```
 
-Open <http://localhost:7414>. The original reference previews on 7411–7413 use other checkouts and are left running. No Docker changes are required. Demo chat needs a configured provider key for live AI; the PDF, folder, settings, selection, and saved-reading interactions work without one.
+Each checkout keeps its own `./data` and `./secrets`.
 
-Click a sidebar folder row to open it and toggle its subfolders. The chevron indicates whether the branch is expanded, and your choices are remembered in this browser. Create a subfolder from an open folder, or choose a parent in the New folder dialog. Drag folders onto other folders or onto All papers / Workspace to move them to the top level. Edit folder also lets you change its parent. Descendants inherit their root folder’s color; moving a branch to the top level automatically assigns a color. Removing a folder keeps its papers in Unfiled and promotes its subfolders to the top level.
+## Keyboard shortcuts
 
-Click a page number or percentage to edit it; Enter applies a valid value, and Escape or leaving the field cancels the edit. Page numbers must be whole numbers within the paper. Paper zoom accepts 10–3200%; chat text accepts 100–200%. Invalid input stays in the field with a message. Escape clears bulk selection when no dialog or text entry is active. Continue reading appears after opening papers and stores progress in this browser; it resumes the page, position within the page, horizontal scroll, and zoom.
+Press **?** in the reader to see these at any time.
 
-Click in the PDF, Chat, or Notes pane (or focus its controls with the keyboard), then press **⌘ + / −** on Mac or **Ctrl + / −** elsewhere to zoom that pane. The unshifted **=** key also zooms in. These shortcuts work while writing notes or chat drafts, use each pane's existing zoom limits, and keep the browser's page zoom unchanged.
+| Keys | Action |
+| --- | --- |
+| **1 – 4** | Highlight the selection |
+| **C** | Add the selection to the chat context |
+| **A** | Quick Ask about the selection |
+| **N** | Attach a note to the selection |
+| **Q** | Quote the selection in the paper note |
+| **R** | Capture a region of the page (figures, equations) |
+| **F** / **Esc** | Enter / leave focus reading |
+| **⌘/Ctrl + F** | Find in the PDF |
+| **⌘/Ctrl + Shift + F** | Search the chat or chat history |
+| **⌘/Ctrl + K** | Search your library (press again to switch to online search and Add from link) |
+| **⌘/Ctrl + Shift + K** | Find papers online |
+| **⌘/Ctrl + ,** | Open Settings |
+| **⌘/Ctrl + / −** | Zoom the focused pane (PDF, chat, or notes) |
+| **⌘/Ctrl + Z** | Undo a highlight (add **Shift** to redo) |
 
-Checks: `npm run lint`, `npm run build`, and `npm run test:reader-controls` from `frontend/`. The existing global Cloudflare/browser type collisions remain in the default TypeScript configuration; `npx tsc --noEmit --types node --incremental false` checks the browser code without those conflicting ambient globals.
+For more detail on folders, reader controls, chats, and notes, see the [user guide](docs/user-guide.md).
 
-**Add from link:** Open search (or Find papers), choose **Add from link**, and paste a public HTTP/HTTPS PDF URL. **Check PDF link** downloads a temporary copy, validates the actual PDF and shows its title, page count, and size without changing your library. Choose a folder and **Download & add to library**, then **Open in reader**. URLs without a `.pdf` suffix work. Login pages, damaged/password-protected PDFs, private-network addresses, and oversized files are rejected. Saving downloads and validates the file again; duplicate copies retain their existing notes, chats, and folder.
+## Your data
 
-Paper search shortcuts: `Cmd/Ctrl + K` opens library search and cycles through **My library → Find papers online → Add from link → My library** while the dialog is open. `Cmd/Ctrl + Shift + K` opens online paper discovery directly. Switching modes preserves the search query, PDF link, and online results.
+Everything Adam stores is in `./data` on your machine, outside the containers: PDFs, extracted text, the SQLite database (library, notes, chats, usage), settings, and ChatGPT sign-in credentials. Adam only goes online for things you ask it to do (AI requests, web and paper searches, PDF imports) and to refresh public model price lists once a day.
 
-New chats stay temporary until you type a draft or send a message. Repeated **New** clicks reuse an empty chat, and empty chats do not appear in history. Draft text autosaves locally on the server, with a browser recovery copy while saves are pending; it restores when you switch chats or reload. Clearing an unsent draft removes it from history. Opening a paper with saved chats shows its history first. You can write drafts before configuring an API key.
+- **Do not delete `./data` when upgrading.** `docker compose down` and `docker compose up --build -d` keep it.
+- **To back up**, stop Adam (`docker compose down`) and copy `./data`.
+- **Single user.** Adam has no login. Run it on your own machine or a private network such as Tailscale, not the public internet.
 
-## Paper notes and source quotes
+## Development
 
-Open **Notes** in the right pane. Use **A− / percentage / A+** beside the tabs to zoom the full note from 50–200%, including headings and source quotes. Click the percentage to enter a size; Enter applies it and Escape cancels. Note zoom stays independent of PDF and chat zoom and is retained when switching panes during the session. Click in the note where you want a quote. Select text in the PDF and press **Q** (or **Quote in note**): the quote inserts at the retained note cursor, splitting a paragraph when needed. Source quotes are protected blocks with their page citation. Click **Show in PDF** on a source quote to scroll to the quoted passage and briefly highlight it before it fades. New quotes retain their exact position across saves, reloads, and copy/paste; older quotes locate their text on the cited page. Drag the grip to move a quote, use its up/down buttons, or cut/copy/paste it with the surrounding writing. **+ Above** and **+ Below** add writing space beside a quote; empty paragraphs are also kept at document edges. Undo/redo includes quote insertion and moves. Existing cited quotes become protected blocks when opened; ordinary blockquotes remain editable.
-
-Editor regression tests: `npm run test:paper-notes` in `frontend/`. The browser test targets an isolated review server seeded with `scripts/seed-review-demo.py` and uses installed Google Chrome:
-
-```sh
-cd frontend
-ADAM_TEST_BASE_URL=http://localhost:7426 npm run test:paper-notes:browser
-```
-
-The browser tests rewrite the synthetic **Sparse Attention for Long-Context Retrieval** and **Reliable Tool Use in Research Assistants** notes. Use a demo instance rather than a library with personal notes.
+See [docs/development.md](docs/development.md) to run the backend and frontend directly, seed demo data, and run the tests. [ARCHITECTURE.md](ARCHITECTURE.md) describes the design and roadmap.
