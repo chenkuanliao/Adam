@@ -553,6 +553,70 @@ def test_folder_organization_keeps_reader_data_and_moves_atomically() -> None:
     client.delete(f"/api/documents/{paper['id']}")
 
 
+def test_archiving_folders_and_papers_is_reversible() -> None:
+    folder = client.post('/api/folders', json={'name': 'Archive lifecycle'}).json()
+    assert folder['archived_at'] is None
+    url = f"/api/folders/{folder['id']}"
+    archived = client.patch(url, json={'archived': True}).json()
+    assert archived['archived_at'] is not None
+    assert archived['name'] == 'Archive lifecycle'
+    assert client.patch(url, json={'name': 'Renamed archive'}).json()['archived_at'] is not None
+    assert client.patch(url, json={'archived': False}).json()['archived_at'] is None
+
+    paper = client.post('/api/documents', files={'file': ('archive.pdf', BytesIO(sample_pdf('Archive me.')), 'application/pdf')}).json()
+    assert paper['archived_at'] is None
+    request = {'document_ids': [paper['id']], 'archived': True}
+    assert client.post('/api/document-archive', json={**request, 'document_ids': ['missing']}).status_code == 404
+    assert client.post('/api/document-archive', json=request).json()[0]['archived_at'] is not None
+    assert client.get(f"/api/documents/{paper['id']}").json()['archived_at'] is not None
+    assert client.post('/api/document-archive', json={**request, 'archived': False}).json()[0]['archived_at'] is None
+    assert client.delete(f"/api/documents/{paper['id']}").status_code == 204
+    assert client.delete(url).status_code == 204
+
+
+def test_restore_paper_from_archived_ancestor_moves_only_that_paper_to_unfiled() -> None:
+    root = client.post('/api/folders', json={'name': 'Archive selective restore'}).json()
+    child = client.post('/api/folders', json={'name': 'Nested', 'parent_id': root['id']}).json()
+    papers = []
+    pdfs = {}
+    for name in ['Restore one', 'Keep nested', 'Keep explicit']:
+        pdfs[name] = sample_pdf(name)
+        paper = client.post('/api/documents', files={'file': (f'{name}.pdf', BytesIO(pdfs[name]), 'application/pdf')}).json()
+        assert client.post('/api/document-moves', json={'document_ids': [paper['id']], 'folder_id': child['id']}).status_code == 200
+        papers.append(paper)
+    chosen, remaining, explicit = papers
+    note_url = f"/api/documents/{chosen['id']}/paper-note"
+    assert client.put(note_url, json={'content_html': '<p>Keep note</p>', 'plain_text': 'Keep note', 'revision': 0}).status_code == 200
+    conversation = client.post(f"/api/documents/{chosen['id']}/conversations", json={}).json()
+    assert client.post('/api/document-archive', json={'document_ids': [explicit['id']], 'archived': True}).status_code == 200
+    assert client.patch(f"/api/folders/{root['id']}", json={'archived': True}).status_code == 200
+
+    # Mixed missing IDs must not detach or restore any valid paper.
+    assert client.post('/api/document-archive', json={'document_ids': [chosen['id'], 'missing'], 'archived': False}).status_code == 404
+    assert client.get(f"/api/documents/{chosen['id']}").json()['folder_id'] == child['id']
+    response = client.post('/api/document-archive', json={'document_ids': [chosen['id']], 'archived': False})
+    assert response.status_code == 200
+    assert response.json()[0]['folder_id'] is None
+    assert response.json()[0]['archived_at'] is None
+    assert client.get(note_url).json()['plain_text'] == 'Keep note'
+    assert client.get(f"/api/conversations/{conversation['id']}").status_code == 200
+    assert client.get(f"/api/documents/{chosen['id']}/file").content == pdfs['Restore one']
+
+    # Restore the ancestor without moving the remaining files or clearing explicit archives.
+    assert client.patch(f"/api/folders/{root['id']}", json={'archived': False}).status_code == 200
+    assert client.get(f"/api/documents/{remaining['id']}").json()['folder_id'] == child['id']
+    assert client.get(f"/api/documents/{explicit['id']}").json()['archived_at'] is not None
+    assert client.get(f"/api/documents/{chosen['id']}").json()['folder_id'] is None
+    # An explicit paper archive in a visible folder restores to that same folder.
+    restored = client.post('/api/document-archive', json={'document_ids': [explicit['id']], 'archived': False}).json()[0]
+    assert restored['folder_id'] == child['id']
+    assert restored['archived_at'] is None
+    for paper in papers:
+        assert client.delete(f"/api/documents/{paper['id']}").status_code == 204
+    assert client.delete(f"/api/folders/{child['id']}").status_code == 204
+    assert client.delete(f"/api/folders/{root['id']}").status_code == 204
+
+
 def test_folder_migration_preserves_existing_papers_and_children(tmp_path) -> None:
     import sqlite3
     import subprocess
@@ -581,7 +645,7 @@ def test_folder_migration_preserves_existing_papers_and_children(tmp_path) -> No
             assert db.execute(f'SELECT COUNT(*) FROM {table}').fetchone()[0] == 1
         assert db.execute('SELECT color, icon FROM folders WHERE id = ?', ('old-folder',)).fetchone() == ('#8c9d65', 'folder')
         assert 'discovery_json' in {column[1] for column in db.execute('PRAGMA table_info(documents)')}
-        assert db.execute('SELECT version_num FROM alembic_version').fetchall() == [('0015_usage_events',)]
+        assert db.execute('SELECT version_num FROM alembic_version').fetchall() == [('0016_archive',)]
         assert db.execute('PRAGMA foreign_key_check').fetchall() == []
 
 
@@ -1004,7 +1068,7 @@ def test_folder_and_discovery_migrations_upgrade_all_feature_branches(tmp_path) 
             if revision in ['0011_nested_folders', '0012_merge_folder_features']:
                 assert db.execute("SELECT parent_id, icon FROM folders WHERE id = 'child'").fetchone() == ('root', 'folder')
             assert 'discovery_json' in {column[1] for column in db.execute('PRAGMA table_info(documents)')}
-            assert db.execute('SELECT version_num FROM alembic_version').fetchall() == [('0015_usage_events',)]
+            assert db.execute('SELECT version_num FROM alembic_version').fetchall() == [('0016_archive',)]
             assert db.execute('PRAGMA foreign_key_check').fetchall() == []
 
 
