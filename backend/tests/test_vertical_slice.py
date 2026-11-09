@@ -97,7 +97,7 @@ def test_upload_extract_reopen_and_missing_key() -> None:
     created_chat = client.post(f"/api/documents/{uploaded['id']}/conversations", json={})
     assert created_chat.status_code == 201
     conversation = created_chat.json()
-    assert conversation["model_id"] == "gpt-5.6-terra"
+    assert conversation["model_id"] == "gpt-6.1-sol"
     assert client.get(f"/api/documents/{uploaded['id']}/conversations").json() == []
 
     chat = client.post(
@@ -120,7 +120,7 @@ def test_upload_extract_reopen_and_missing_key() -> None:
 def test_settings_are_persisted_without_exposing_the_key() -> None:
     initial = client.get("/api/settings")
     assert initial.status_code == 200
-    assert initial.json()["model"] == "gpt-5.6-terra"
+    assert initial.json()["model"] == "gpt-6.1-sol"
     assert initial.json()["provider"] == "zen"
     assert "You are Adam" in initial.json()["system_prompt"]
     assert "`$$...$$`" in initial.json()["system_prompt"]
