@@ -115,7 +115,7 @@ Ports and the default Zen model are set in `.env`:
 | `ADAM_WEB_PORT` | `3000` | Port of the web app |
 | `ADAM_SEARCH_PORT` | `8888` | Port of the bundled SearXNG search service (localhost only) |
 | `ADAM_CHATGPT_CALLBACK_PORT` | `1455` | Port for the Sign in with ChatGPT callback |
-| `ADAM_OPENCODE_MODEL` | `gpt-5.6-terra` | Default OpenCode Zen chat model |
+| `ADAM_OPENCODE_MODEL` | `gpt-6.1-sol` | Default OpenCode Zen chat model |
 
 **Web search** is off for each new question until you turn on **Search web** in the composer. It uses the bundled SearXNG container, so it needs no search API key. Each answer can draw on up to five results, with up to 7,500 characters of text from each.
 

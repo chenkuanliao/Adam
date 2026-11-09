@@ -8,7 +8,7 @@ Status: active implementation, 2026-09-07. Durable per-paper conversations, relo
 - FastAPI upload/library/file/page-text/chat endpoints.
 - Content-addressed PDF storage and PyMuPDF native page-text extraction.
 - SQLite document/page/message schema with an initial Alembic migration.
-- OpenCode Zen provider adapter that sends the question, selected text, and page—not the PDF. The default model is `gpt-5.6-terra`.
+- OpenCode Zen provider adapter that sends the question, selected text, and page—not the PDF. The default model is `gpt-6.1-sol`.
 - Optional ChatGPT (subscription) adapter via Sign in with ChatGPT: loopback PKCE callback (or pasted callback URL), owner-only credential file in `./data`, serialized token refresh, and Responses API calls with `store: false`.
 - Same-origin frontend API proxy and Docker Compose with `./data:/data` persistence.
 - Automated smoke coverage for upload, deduplication, extraction, PDF serving, and missing-key behavior.

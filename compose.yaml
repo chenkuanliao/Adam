@@ -5,7 +5,7 @@ services:
     environment:
       ADAM_DATA_DIR: /data
       ADAM_OPENCODE_API_KEY_FILE: /run/secrets/opencode_api_key
-      ADAM_OPENCODE_MODEL: ${ADAM_OPENCODE_MODEL:-gpt-5.6-terra}
+      ADAM_OPENCODE_MODEL: ${ADAM_OPENCODE_MODEL:-gpt-6.1-sol}
       ADAM_SEARCH_BASE_URL: http://search:8080
       ADAM_CORS_ORIGINS: http://localhost:${ADAM_WEB_PORT:-3000},http://127.0.0.1:${ADAM_WEB_PORT:-3000}
       # Sign in with ChatGPT: the redirect URI uses the host port; the listener binds 1455 in the container.

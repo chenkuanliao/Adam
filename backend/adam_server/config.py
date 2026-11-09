@@ -44,7 +44,7 @@ class Settings(BaseSettings):
     max_upload_mb: int = 100
     opencode_api_key: str | None = None
     opencode_api_key_file: Path | None = None
-    opencode_model: str = "gpt-5.6-terra"
+    opencode_model: str = "gpt-6.1-sol"
     opencode_base_url: str = "https://opencode.ai/zen/v1"
     search_base_url: str = "http://localhost:8888"
     # Sign in with ChatGPT: the browser-facing loopback port (in the redirect URI) and the
