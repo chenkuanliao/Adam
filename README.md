@@ -161,3 +161,7 @@ Everything Adam stores is in `./data` on your machine, outside the containers: P
 ## Development
 
 See [docs/development.md](docs/development.md) to run the backend and frontend directly, seed demo data, and run the tests. [ARCHITECTURE.md](ARCHITECTURE.md) describes the design and roadmap.
+
+## License
+
+Adam is released under the [MIT License](LICENSE). Copyright (c) 2026 Chen-Kuan Liao.
