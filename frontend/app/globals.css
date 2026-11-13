@@ -339,7 +339,7 @@ kbd { display: inline-grid; place-items: center; min-width: 18px; height: 18px; 
 
 /* ---------- Reader ---------- */
 .reader-shell { height: 100vh; height: 100dvh; display: flex; flex-direction: column; overflow: hidden; background: var(--desk) }
-.reader-header { position: relative; z-index: 10; flex: none; height: 56px; display: grid; grid-template-columns: 1fr minmax(0, auto) 1fr; align-items: center; gap: 16px; padding: 0 14px; border-bottom: 1px solid var(--rule); background: var(--surface) }
+.reader-header { position: relative; z-index: 10; flex: none; height: 56px; display: grid; grid-template-columns: minmax(max-content, 1fr) minmax(0, auto) minmax(max-content, 1fr); align-items: center; gap: 16px; padding: 0 14px; border-bottom: 1px solid var(--rule); background: var(--surface) }
 .reader-header-start { display: flex; align-items: center; min-width: 0 }
 .brand-button { padding: 0; border: 0; background: none }
 .reader-back { height: 36px; display: flex; align-items: center; gap: 8px; padding: 0 12px 0 6px; border-radius: 10px; color: var(--ink-2); font-size: 14px; font-weight: 600 }
@@ -1000,7 +1000,7 @@ kbd { display: inline-grid; place-items: center; min-width: 18px; height: 18px; 
 .focus-reading-button:focus-visible{outline:2px solid var(--accent);outline-offset:3px}
 .focus-reading-button kbd{padding:2px 4px;border:1px solid #cad5c5;border-radius:4px;font:9px inherit;color:#6e8264}
 .reader-shell.focus-reading{height:100dvh}
-.focus-reading .reader-header{height:54px;padding:0 22px;gap:20px;grid-template-columns:minmax(0,1fr) minmax(0,2fr) minmax(0,1fr);background:#f8f9f3}
+.focus-reading .reader-header{height:54px;padding:0 22px;gap:20px;grid-template-columns:minmax(0,1fr) minmax(0,2fr) minmax(max-content,1fr);background:#f8f9f3}
 .focus-reading .reader-header>.brand-button,.focus-reading .reader-delete-button,.focus-reading .reader-header-tools>.settings-button{display:none}
 .focus-reading .note-view-button{flex-shrink:0;white-space:nowrap}
 .focus-reading .document-title{grid-column:2;position:static;transform:none;max-width:none;min-width:0;text-align:center}
@@ -1017,7 +1017,7 @@ kbd { display: inline-grid; place-items: center; min-width: 18px; height: 18px; 
 .pdf-displayed-canvas{display:block;pointer-events:none;user-select:none}
 .reader-shell:not(.focus-reading) .document-title{position:static;transform:none;flex:1;min-width:0;max-width:none;margin:0 16px}.reader-header-tools{flex-shrink:0}
 @media(max-width:640px){.reader-header{padding:0 10px}.reader-header-tools{gap:6px}.focus-reading-button{padding:0 8px}.focus-reading-button kbd{display:none}.reader-shell:not(.focus-reading) .focus-reading-button>span{display:none}.focus-reading .reader-header{padding:0 10px;gap:8px}.focus-reading .document-title{display:block}.focus-reading .document-title strong{font-size:11px}.focus-reading .focus-reading-button>span{display:none}.focus-reading .pdf-pane{padding:20px 12px}.focus-reading .reader-header-tools{gap:6px}}
-@media(max-width:800px){.focus-reading .reader-header{grid-template-columns:minmax(88px,1fr) minmax(0,2fr) minmax(88px,1fr)}.focus-reading .focus-reading-button>span{display:none}.focus-reading .focus-reading-button{gap:4px;padding:0 6px}.focus-reading .focus-reading-button kbd{display:inline-block}.focus-reading .document-title>span{font-size:9px}}
+@media(max-width:800px){.focus-reading .reader-header{grid-template-columns:minmax(88px,1fr) minmax(0,2fr) minmax(max-content,1fr)}.focus-reading .focus-reading-button>span{display:none}.focus-reading .focus-reading-button{gap:4px;padding:0 6px}.focus-reading .focus-reading-button kbd{display:inline-block}.focus-reading .document-title>span{font-size:9px}}
 
 /* Reviewed combination: Folio's palette, quiet surfaces, and original Adam mark. */
 .brand-mark { width:31px; height:31px; border-radius:9px; background:#2e6650; color:#fff; font:700 17px Georgia,serif; box-shadow:none }
