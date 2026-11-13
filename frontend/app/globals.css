@@ -1268,3 +1268,121 @@ kbd { display: inline-grid; place-items: center; min-width: 18px; height: 18px; 
 .chatgpt-paste p { margin: 8px 0 10px; color: var(--muted); font-size: 12.5px; line-height: 1.55 }
 .chatgpt-paste code { font-size: 11.5px; overflow-wrap: anywhere }
 .chatgpt-message { margin: 0; color: var(--ink-2); font-size: 12.5px; line-height: 1.5 }
+
+/* ---------- Dark theme ----------
+ * Chosen in Settings → Appearance (theme.ts sets <html data-theme>). The tokens carry most of it;
+ * the rules below cover surfaces that hard-code light colors. PDF pages stay white paper. */
+:root[data-theme="dark"] {
+  --bg: #141518;
+  --surface: #1c1e22;
+  --surface-2: #202227;
+  --sunken: #111215;
+  --ink: #ecebe6;
+  --ink-2: #cfcdc6;
+  --muted: #9b9da4;
+  --faint: #73767e;
+  --rule: #2b2e33;
+  --rule-strong: #3b3e45;
+  --accent: #6db08d;
+  --accent-ink: #93cbad;
+  --accent-soft: #1d2b24;
+  --accent-line: #325240;
+  --glass-bg: rgba(31, 36, 33, .86);
+  --glass-line: rgba(255, 255, 255, .08);
+  --glass-ink: #b9d8c5;
+  --glass-muted: #87a393;
+  --glass-hover: #6db08d1f;
+  --glass-shadow: 0 8px 28px #00000066, inset 0 1px 0 #ffffff12;
+  --marker: #f0b93a;
+  --marker-soft: #33291a;
+  --marker-ink: #f2cd78;
+  --danger: #ec7b6c;
+  --danger-soft: #35201d;
+  --success: #6fbf8f;
+  --desk: #0e0f11;
+  --desk-2: #17191c;
+  --desk-ink: #f3f1ec;
+  --shadow-1: 0 1px 2px #0000004d, 0 2px 8px #00000033;
+  --shadow-2: 0 10px 30px #00000066;
+  --shadow-3: 0 28px 70px #00000099;
+  --dark-danger-line: #5c302a;
+  --dark-hover: #ffffff0d;
+  --dark-chip: #ffffff14;
+}
+[data-theme="dark"] ::selection { background: #6db08d47 }
+[data-theme="dark"] :is(.error-banner, .files-icon-button:hover, .number-error) { border-color: var(--dark-danger-line) }
+[data-theme="dark"] .paper-note-error { border-top-color: var(--dark-danger-line) }
+[data-theme="dark"] .number-error { background: var(--danger-soft) }
+[data-theme="dark"] .library-header { background: color-mix(in srgb, var(--bg) 90%, transparent) }
+[data-theme="dark"] .files-toolbar { background: color-mix(in srgb, var(--surface) 92%, transparent) }
+[data-theme="dark"] :is(.files-sidebar nav > button, .files-folder-row > .files-folder-link):hover,
+[data-theme="dark"] .provider-nav button:hover { background: var(--dark-hover) }
+[data-theme="dark"] :is(.files-selection-bar button, .dock-group) { background: var(--dark-chip) }
+[data-theme="dark"] .reader-dock { border-color: var(--glass-line) }
+[data-theme="dark"] :is(.files-paper-select, .files-paper-actions button) { background: color-mix(in srgb, var(--surface) 94%, transparent) }
+[data-theme="dark"] .paper-preview { background: radial-gradient(120% 80% at 50% 0%, var(--surface-2) 0%, var(--sunken) 100%) }
+[data-theme="dark"] .files-paper-colored .paper-preview { background: radial-gradient(120% 80% at 50% 0%, var(--surface-2) 0%, var(--folder-tint) 100%), var(--sunken) }
+[data-theme="dark"] .files-drop-active::after { background: color-mix(in srgb, var(--accent-soft) 95%, transparent) }
+[data-theme="dark"] :is(.files-dialog, .folder-spotlight)::backdrop,
+[data-theme="dark"] :is(.settings-backdrop, .ai-note-backdrop) { background: #00000080 }
+[data-theme="dark"] .app-dialog::backdrop { background: #00000080 }
+[data-theme="dark"] .folder-color-swatch { box-shadow: 0 0 0 1px #ffffff26 }
+[data-theme="dark"] .note-view-button.active { border-color: #6b5524 }
+[data-theme="dark"] :is(.no-key-notice, .pending-model-choice) { border-color: #6b5524 }
+[data-theme="dark"] .tab-list > button span { background: var(--dark-chip) }
+[data-theme="dark"] .side-pane { background: linear-gradient(160deg, #1b2420 0%, var(--surface) 42%, var(--surface-2) 100%) }
+[data-theme="dark"] .user-message { box-shadow: inset 0 0 0 1px var(--accent-line) }
+[data-theme="dark"] .composer { box-shadow: 0 4px 18px #0000004d }
+[data-theme="dark"] .composer:focus-within { box-shadow: 0 4px 18px #0000004d, 0 0 0 3px var(--accent-soft) }
+[data-theme="dark"] :is(.paper-note-status, .provider-nav small, .active-model-label) { background: #6fbf8f1f }
+[data-theme="dark"] .toolbar-divider { background: var(--glass-line) }
+[data-theme="dark"] .toolbar-action { border-color: var(--glass-line); background: var(--dark-chip); color: var(--glass-ink) }
+[data-theme="dark"] .toolbar-action:hover:not(:disabled) { background: #ffffff1f }
+[data-theme="dark"] .dock-tool kbd, [data-theme="dark"] .files-selection-bar > kbd { border-color: var(--glass-line) }
+[data-theme="dark"] .note-anchor { background: color-mix(in srgb, var(--note-color) 28%, var(--surface)) }
+[data-theme="dark"] .page-note-card { border-color: color-mix(in srgb, var(--note-color) 45%, var(--rule-strong)); border-left-color: var(--note-color); background: color-mix(in srgb, var(--note-color) 12%, var(--surface)) }
+[data-theme="dark"] .note-editor { border-color: color-mix(in srgb, var(--note-color) 45%, var(--rule-strong)) }
+[data-theme="dark"] :is(.note-editor header, .note-editor footer) { background: color-mix(in srgb, var(--note-color) 14%, var(--surface)) }
+[data-theme="dark"] .note-colors button { border-color: var(--surface) }
+[data-theme="dark"] .note-colors button.selected { box-shadow: 0 0 0 2px var(--surface), 0 0 0 4px currentColor }
+[data-theme="dark"] :is(.field-label input[placeholder*="Key configured"], .chatgpt-account) { border-color: #6fbf8f55; background: #6fbf8f10 }
+[data-theme="dark"] .pdf-pane, [data-theme="dark"] .focus-reading .pdf-pane { background: radial-gradient(ellipse at 50% 0%, var(--desk-2) 0%, var(--desk) 85%); scrollbar-color: #ffffff30 transparent }
+[data-theme="dark"] .pdf-page-wrap { box-shadow: 0 1px 0 #ffffff0d, 0 18px 50px #00000080, 0 2px 6px #00000059 }
+[data-theme="dark"] .settings-dialog { color: var(--ink-2) }
+[data-theme="dark"] .settings-dialog .selected-model-summary small { background: var(--dark-chip) }
+[data-theme="dark"] .settings-dialog .primary-button { color: var(--sunken) }
+[data-theme="dark"] .selected-model-summary { background: var(--sunken) }
+@supports ((backdrop-filter: blur(12px)) or (-webkit-backdrop-filter: blur(12px))) {
+  [data-theme="dark"] :is(.side-pane .mode-tabs, .side-pane .conversation-header, .composer) { background: color-mix(in srgb, var(--surface) 90%, transparent) }
+}
+@media (prefers-reduced-transparency: reduce) {
+  [data-theme="dark"] :is(.reader-dock, .selection-toolbar, .files-selection-bar, .action-tooltip, .linked-passage-toast, .quick-ask-head) { background: #1f2421 }
+  [data-theme="dark"] :is(.side-pane .mode-tabs, .side-pane .conversation-header, .composer) { background: var(--surface) }
+}
+[data-theme="dark"] .pane-find { background: var(--surface); color: var(--ink-2); border-color: var(--rule-strong); box-shadow: var(--shadow-2) }
+[data-theme="dark"] :is(.pane-find:focus-within, .history-search > div:focus-within) { border-color: var(--accent); box-shadow: 0 0 0 3px #6db08d26 }
+[data-theme="dark"] :is(.find-symbol, .history-search > div > span) { color: var(--muted) }
+[data-theme="dark"] :is(.find-count, .history-search small) { color: var(--faint) }
+[data-theme="dark"] :is(.pane-find button:hover, .history-search button:hover) { background: var(--dark-hover) }
+[data-theme="dark"] :is(.find-trigger, .history-search > div) { border-color: var(--rule-strong); background: var(--surface); color: var(--ink-2) }
+[data-theme="dark"] .history-card .history-match-snippet { color: var(--accent-ink) }
+[data-theme="dark"] .history-search-match { color: #16181d }
+[data-theme="dark"] .usage-settings { --usage-type-input: #73767e; --usage-type-cache-write: #4f8a69 }
+
+/* ---------- Appearance settings ---------- */
+.appearance-page { display: flex; flex-direction: column; gap: 18px }
+.theme-options { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 12px }
+.theme-option { display: flex; flex-direction: column; gap: 10px; padding: 10px 10px 12px; border: 1px solid var(--rule-strong); border-radius: 12px; background: var(--surface); color: var(--ink-2); text-align: left; transition: border-color .15s, box-shadow .15s }
+.theme-option:hover { border-color: var(--ink-2) }
+.theme-option[aria-checked="true"] { border-color: var(--accent); box-shadow: 0 0 0 3px var(--accent-soft) }
+.theme-option > span:last-child { display: flex; align-items: center; justify-content: space-between; gap: 8px; padding: 0 2px; font-size: 13px; font-weight: 600 }
+.theme-option small { color: var(--faint); font: 500 11px var(--font-mono) }
+.theme-option[aria-checked="true"] small { color: var(--accent) }
+.theme-swatch { position: relative; display: block; height: 92px; overflow: hidden; border: 1px solid var(--rule); border-radius: 8px }
+.theme-swatch-half { position: absolute; inset: 0; display: grid; grid-template-columns: 26% 1fr; gap: 6px; padding: 8px; background: var(--sw-bg) }
+.theme-swatch-half::before { content: ''; border-radius: 4px; background: var(--sw-side) }
+.theme-swatch-half::after { content: ''; border-radius: 4px; background: linear-gradient(var(--sw-ink) 0 0) 10px 12px / 46% 6px no-repeat, linear-gradient(var(--sw-line) 0 0) 10px 26px / 70% 4px no-repeat, linear-gradient(var(--sw-line) 0 0) 10px 36px / 58% 4px no-repeat, linear-gradient(var(--sw-accent) 0 0) 10px calc(100% - 12px) / 32% 10px no-repeat, var(--sw-card); box-shadow: 0 0 0 1px var(--sw-line) }
+.theme-swatch-light { --sw-bg: #f5f3ee; --sw-side: #efece5; --sw-card: #fffdf9; --sw-ink: #16181d; --sw-line: #e5e1d8; --sw-accent: #2e6650 }
+.theme-swatch-dark { --sw-bg: #141518; --sw-side: #111215; --sw-card: #1c1e22; --sw-ink: #ecebe6; --sw-line: #2b2e33; --sw-accent: #6db08d }
+.theme-swatch-system .theme-swatch-dark { clip-path: polygon(100% 0, 100% 100%, 0 100%) }
+.appearance-note { margin: 0; color: var(--muted); font-size: 12.5px; line-height: 1.5 }
